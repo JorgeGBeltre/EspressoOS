@@ -7,5 +7,6 @@ pub mod flash;
 pub mod gpio;
 pub mod i2c;
 pub mod spi;
+pub mod ssh; // servidor SSH (servicio de red, gating por Fase 7)
 pub mod uart;
 pub mod wifi;

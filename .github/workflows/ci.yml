@@ -1,0 +1,45 @@
+name: CI
+
+# Pipeline de integración continua de EspressoOS.
+#   - logic-tests: corre siempre (no necesita el toolchain Xtensa).
+#   - build:       compila el kernel + clippy + fmt (toolchain esp vía espup).
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  logic-tests:
+    name: Tests de lógica (Python, sin toolchain)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Ejecutar arnés de lógica pura
+        run: python tools/tests/run_all.py
+      - name: Regenerar y validar tabla de particiones
+        run: python tools/partition-gen/partition_gen.py
+
+  build:
+    name: Build kernel (Xtensa esp)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Instala el toolchain Xtensa de Espressif (canal esp) para el target del S3.
+      - name: Instalar toolchain Xtensa
+        uses: esp-rs/xtensa-toolchain@v1.5
+        with:
+          default: true
+          buildtargets: esp32s3
+      - name: Formato (rustfmt)
+        run: cargo fmt --all -- --check
+      - name: Lints (clippy)
+        run: cargo clippy --release -- -D warnings
+      - name: Compilar (release)
+        run: cargo build --release
+    # NOTA: mientras el kernel siga en "borrador (sin compilar)", este job fallará
+    # hasta cerrar P0 (ver docs/PRODUCTION-READINESS.md). Es intencional: el gate
+    # de build refleja el estado real y se pondrá verde al arreglar el drift de API.

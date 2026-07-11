@@ -1,0 +1,23 @@
+# Configuración de compilación para el target Xtensa del ESP32-S3.
+#
+# Verificar tras instalar el toolchain: algunos parámetros (build-std, rustflags)
+# dependen de la versión del canal "esp" que instale espup.
+
+[target.xtensa-esp32s3-none-elf]
+# `espflash` flashea por el USB-Serial-JTAG integrado y abre el monitor serie.
+runner = "espflash flash --monitor"
+
+[build]
+target = "xtensa-esp32s3-none-elf"
+rustflags = [
+  # Necesario para desenrollado/backtraces fiables en Xtensa.
+  "-C", "force-frame-pointers",
+]
+
+# El canal "esp" suele traer `core`/`alloc` precompilados para el target.
+# Si el build falla por falta de core, descomenta build-std:
+# [unstable]
+# build-std = ["core", "alloc"]
+
+[env]
+ESP_LOG = "info"

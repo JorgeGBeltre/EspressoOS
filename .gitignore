@@ -1,0 +1,16 @@
+# Artefactos de compilación de Rust
+/target
+**/target
+
+# Artefactos de imagen/particiones generados
+*.bin
+*.elf
+!bootloader/**/*.bin
+
+# Python (herramientas)
+__pycache__/
+*.pyc
+
+# Sistema
+.DS_Store
+Thumbs.db

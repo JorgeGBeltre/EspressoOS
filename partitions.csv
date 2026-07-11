@@ -1,0 +1,23 @@
+# Tabla de particiones de esp32s3-os  (flash 16 MB = 0x1000000)
+#
+# Se ubica en la flash en el offset 0x8000 (tamaño 0xC00).
+# Genera el binario con: python tools/partition-gen/partition_gen.py
+#
+# Reglas: las particiones de tipo `app` deben alinearse a 0x10000 (64 KB).
+# Layout:
+#   0x000000  bootloader (2ª etapa)      -> lo escribe espflash
+#   0x008000  tabla de particiones       -> este CSV
+#   0x009000  nvs        24 KB
+#   0x00F000  otadata     8 KB
+#   0x020000  factory     4 MB  (kernel principal, slot A)
+#   0x420000  ota_0       4 MB  (slot B para OTA)
+#   0x820000  fs        ~7.8 MB (LittleFS: /, datos de usuario)
+#   0xFF0000  coredump   64 KB
+#
+# Name,     Type, SubType,  Offset,    Size,      Flags
+nvs,        data, nvs,      0x9000,    0x6000,
+otadata,    data, ota,      0xF000,    0x2000,
+factory,    app,  factory,  0x20000,   0x400000,
+ota_0,      app,  ota_0,    0x420000,  0x400000,
+fs,         data, spiffs,   0x820000,  0x7D0000,
+coredump,   data, coredump, 0xFF0000,  0x10000,

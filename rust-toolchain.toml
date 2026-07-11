@@ -1,0 +1,5 @@
+# Toolchain de Espressif para Xtensa (instalado con `espup install`).
+# El canal "esp" provee el fork de rustc/LLVM con soporte del target Xtensa,
+# que NO está en el upstream de Rust.
+[toolchain]
+channel = "esp"

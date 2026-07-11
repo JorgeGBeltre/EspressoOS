@@ -1,0 +1,29 @@
+# Workspace raíz de esp32s3-os
+#
+# NOTA: el crate `bootloader` está deliberadamente FUERA de `members` por ahora.
+# En la Fase 0 el arranque lo realiza la ROM del ESP32-S3 + el runtime de esp-hal,
+# y `espflash` empaqueta la imagen. El bootloader propio (2ª etapa) se desarrolla
+# en una fase posterior; sus fuentes ya existen como esqueleto en ./bootloader.
+[workspace]
+resolver = "2"
+members = ["kernel"]
+# members = ["kernel", "bootloader"]   # <- se activa en la fase del bootloader propio
+
+[workspace.package]
+edition = "2021"
+license = "MIT OR Apache-2.0"
+repository = ""
+
+# Perfil de desarrollo: algo de optimización porque el target embebido
+# se comporta mejor y entra en memoria con -O.
+[profile.dev]
+opt-level = 1
+debug = true
+lto = false
+
+[profile.release]
+opt-level = "s"
+lto = "fat"
+codegen-units = 1
+debug = true
+overflow-checks = false

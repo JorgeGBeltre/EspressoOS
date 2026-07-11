@@ -1,0 +1,79 @@
+[package]
+name = "esp32s3-os-kernel"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "kernel"
+path = "src/main.rs"
+
+# ============================================================================
+# Dependencias externas — CONSOLIDADAS por el agente de integración a partir de
+# lo que pidió cada subsistema. Todas las versiones pertenecen a la MISMA tanda
+# del ecosistema esp-rs, alineada con `esp-hal 0.23.x`. Coherencia verificada en
+# crates.io (jul-2026):
+#   - esp-wifi 0.12.0  -> depende de esp-hal ^0.23, smoltcp ^0.12, esp-alloc ^0.6.
+#   - esp-storage 0.5.0 (feb-2025) es la versión pareja de esp-hal 0.23.
+#   - esp-backtrace 0.15 / esp-println 0.13 / esp-alloc 0.6: misma generación.
+#
+# REGLA DURA (contrato §1): nadie sube estas versiones sin actualizar
+# docs/kernel-contract.md. La API de esp-hal rompe entre minors.
+# ============================================================================
+[dependencies]
+# --- Núcleo del HAL y runtime (fijados por el contrato §1) ------------------
+# `unstable`: OBLIGATORIO en esp-hal 0.23. Habilita la superficie que usan los
+# subsistemas: timers (systimer/timg), rng, i2c/spi master, la macro
+# `#[handler]`, `esp_hal::time`, `reset::software_reset` y `*::steal()`. Además,
+# esp-wifi exige `esp-hal/unstable`. Sin él, arch::timer y drivers::* no compilan.
+esp-hal       = { version = "0.23.1", features = ["esp32s3", "unstable"] }
+esp-backtrace = { version = "0.15.0", features = ["esp32s3", "panic-handler", "println", "exception-handler"] }
+esp-println   = { version = "0.13.0", features = ["esp32s3", "jtag-serial"] }
+esp-alloc     = { version = "0.6.0" }
+
+# --- Tiempo / frecuencias ---------------------------------------------------
+# `fugit::HertzU32` lo usa drivers::spi directamente (Config::with_frequency).
+# Dependencia directa porque el módulo lo importa por su ruta (`fugit::...`).
+fugit = "0.3"
+
+# --- Backend de flash NOR (drivers::flash -> FS/OTA) ------------------------
+# esp-storage implementa los traits embedded-storage/NorFlash sobre las rutinas
+# ROM SPI de Espressif; es el backend de bloques del FS y del OTA.
+#   `bytewise-read`: permite lectura con granularidad de byte (el FS configura
+#   un `read_size` pequeño; sin esta feature exigiría offsets/longitudes /4).
+esp-storage      = { version = "0.5.0", features = ["esp32s3", "bytewise-read"] }
+embedded-storage = "0.3.1"
+
+# --- Red (drivers::wifi, Fase 7): esp-wifi 802.11 + smoltcp TCP/IP ----------
+# Mismos features que solicitó el subsistema. `smoltcp`/`utils` conectan el
+# `WifiDevice` de esp-wifi con el stack smoltcp. esp-wifi usa el allocator global
+# (feature `esp-alloc`, activa por defecto) — el heap ya está listo en `main`.
+esp-wifi = { version = "0.12.0", features = ["esp32s3", "wifi", "utils", "smoltcp"] }
+
+# smoltcp 0.12 usa `core::net` para direcciones. Solo lo que el driver necesita.
+# (esp-wifi también trae smoltcp como dep opcional con sus propias features; Cargo
+# unifica el conjunto — misma versión 0.12, sin conflicto.)
+smoltcp = { version = "0.12.0", default-features = false, features = [
+    "alloc",
+    "medium-ethernet",
+    "proto-ipv4",
+    "proto-dhcpv4",
+    "socket-tcp",
+    "socket-dhcpv4",
+    "socket-udp",
+] }
+
+# ----------------------------------------------------------------------------
+# NO añadidas a propósito (evitar dependencias sin usar o que romperían el build):
+#
+#  * littlefs2 = "0.4"  -> el subsistema lo PIDIÓ, pero fs/littlefs/mod.rs es un
+#    BORRADOR que aún NO enlaza el núcleo `lfs`: no hay ningún `use littlefs2` en
+#    el código. Añadirlo sería una dependencia sin usar (y su compatibilidad
+#    no_std/target está sin confirmar). Se activará cuando fs/littlefs importe el
+#    crate de verdad; entonces verificar la versión no_std pareja de esp-hal 0.23.
+#
+#  * embedded-hal = "1.0" -> solo haría falta si el `Spi` bloqueante de esp-hal
+#    0.23 NO tuviera método inherente `transfer(read, write)`. drivers/spi.rs usa
+#    el método inherente y NO importa `embedded_hal::spi::SpiBus`, así que hoy es
+#    innecesaria. Si al resolver esp-hal el `transfer` inherente no existiera,
+#    añadir `embedded-hal = "1.0"` y `use embedded_hal::spi::SpiBus;` en spi.rs.
+# ----------------------------------------------------------------------------

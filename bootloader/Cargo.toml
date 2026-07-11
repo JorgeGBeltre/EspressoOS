@@ -1,0 +1,16 @@
+# Bootloader de 2ª etapa propio (ESQUELETO — se desarrolla en fase posterior).
+#
+# En la Fase 0 NO se usa: arranca la ROM del ESP32-S3 + runtime de esp-hal,
+# y espflash empaqueta la imagen del kernel. Este crate queda fuera del
+# workspace hasta que se aborde el arranque propio.
+[package]
+name = "esp32s3-os-bootloader"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "bootloader"
+path = "src/main.rs"
+
+[dependencies]
+# Por diseño, el bootloader no usa HAL: acceso directo a registros.

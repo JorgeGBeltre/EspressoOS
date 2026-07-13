@@ -82,6 +82,22 @@ impl Scheduler {
 
 static SCHED: Mutex<Option<Scheduler>> = Mutex::new(None);
 
+use core::sync::atomic::{AtomicBool, Ordering};
+
+static NEED_RESCHED: AtomicBool = AtomicBool::new(false);
+
+pub fn set_need_resched() {
+    NEED_RESCHED.store(true, Ordering::Relaxed);
+}
+
+pub fn clear_need_resched() {
+    NEED_RESCHED.store(false, Ordering::Relaxed);
+}
+
+pub fn need_resched() -> bool {
+    NEED_RESCHED.load(Ordering::Relaxed)
+}
+
 fn with_sched<R>(f: impl FnOnce(&mut Scheduler) -> R) -> Option<R> {
     interrupts::critical_section(|| {
         let mut guard = SCHED.lock();
@@ -169,15 +185,29 @@ pub fn spawn(
 }
 
 pub fn yield_now() {
-    schedule();
+    crate::syscall::invoke(crate::syscall::Syscall::Yield as usize, [0; crate::syscall::MAX_ARGS]);
 }
 
 pub fn exit(code: i32) -> ! {
+    mark_zombie(code);
+
+    set_need_resched();
+
+    // Invocar el syscall de exit para forzar el trap de replanificación y no volver
+    crate::syscall::invoke(crate::syscall::Syscall::Exit as usize, [code as usize; crate::syscall::MAX_ARGS]);
+
+    loop {
+        core::hint::spin_loop();
+    }
+}
+
+pub fn mark_zombie(code: i32) {
     with_sched(|s| {
         #[cfg(feature = "smp")]
         let cur = if core_id() == 1 { s.current1 } else { s.current };
         #[cfg(not(feature = "smp"))]
         let cur = s.current;
+
         if let Some(t) = s.tasks.get_mut(&cur) {
             t.state = TaskState::Zombie;
             t.exit_code = code;
@@ -187,12 +217,6 @@ pub fn exit(code: i32) -> ! {
         #[cfg(feature = "smp")]
         s.ready1.retain(|x| *x != cur);
     });
-
-    schedule();
-
-    loop {
-        core::hint::spin_loop();
-    }
 }
 
 pub fn tick() {
@@ -205,8 +229,7 @@ pub fn tick() {
     .unwrap_or(false);
 
     if expired {
-
-        schedule();
+        set_need_resched();
     }
 }
 
@@ -222,11 +245,8 @@ pub fn current() -> Tid {
 }
 
 pub fn run() -> ! {
-
     let _prev = interrupts::disable();
-
-    let mut bootstrap = Context::default();
-    let mut target: Option<*const Context> = None;
+    let mut target: Option<(u32, bool)> = None;
     {
         let mut guard = SCHED.lock();
         if let Some(s) = guard.as_mut() {
@@ -236,81 +256,21 @@ pub fn run() -> ! {
             }
             s.current = first;
             s.slice_remaining = QUANTUM_TICKS;
-            target = s.ctx_ptr(first);
+            let task = s.tasks.get(&first).unwrap();
+            target = Some((task.context.sp, task.is_user));
         }
     }
 
-    if let Some(next) = target {
-
+    if let Some((next_sp, is_user)) = target {
+        crate::mm::mpu::prepare_world_switch(is_user, next_sp);
         unsafe {
-            context::switch_to(&mut bootstrap as *mut Context, next);
+            context::resume_task(next_sp);
         }
     }
 
     loop {
         core::hint::spin_loop();
     }
-}
-
-fn schedule() {
-    let prev = interrupts::disable();
-
-    // Bajo SMP, el núcleo 1 planifica desde su propia cola.
-    #[cfg(feature = "smp")]
-    if core_id() == 1 {
-        schedule_core1();
-        interrupts::restore(prev);
-        return;
-    }
-
-    let mut switch: Option<(*mut Context, *const Context)> = None;
-    {
-        let mut guard = SCHED.lock();
-        if let Some(s) = guard.as_mut() {
-            let cur = s.current;
-
-            s.reap_zombies_except(cur);
-
-            let still_running = s
-                .tasks
-                .get(&cur)
-                .map(|t| t.state == TaskState::Running)
-                .unwrap_or(false);
-            if still_running {
-                if let Some(t) = s.tasks.get_mut(&cur) {
-                    t.state = TaskState::Ready;
-                }
-
-                if cur != s.idle {
-                    s.ready.push(cur);
-                }
-            }
-
-            let next = policy::next_ready(s).unwrap_or(s.idle);
-            if let Some(t) = s.tasks.get_mut(&next) {
-                t.state = TaskState::Running;
-            }
-            s.current = next;
-            s.slice_remaining = QUANTUM_TICKS;
-
-            if next != cur {
-                let cur_ptr = s.ctx_ptr_mut(cur);
-                let next_ptr = s.ctx_ptr(next);
-                if let (Some(c), Some(n)) = (cur_ptr, next_ptr) {
-                    switch = Some((c, n));
-                }
-            }
-        }
-    }
-
-    if let Some((cur_ptr, next_ptr)) = switch {
-
-        unsafe {
-            context::switch_to(cur_ptr, next_ptr);
-        }
-    }
-
-    interrupts::restore(prev);
 }
 
 fn idle_entry(_arg: usize) {
@@ -329,19 +289,117 @@ fn task_trampoline(tid: usize) {
     exit(0);
 }
 
+#[inline(always)]
+fn core_id() -> usize {
+    #[cfg(feature = "smp")]
+    {
+        match esp_hal::Cpu::current() {
+            esp_hal::Cpu::AppCpu => 1,
+            _ => 0,
+        }
+    }
+    #[cfg(not(feature = "smp"))]
+    {
+        0
+    }
+}
+
+pub fn preempt_switch(save_frame: &mut esp_hal::xtensa_lx_rt::exception::Context) -> Option<u32> {
+    clear_need_resched();
+
+    let prev = interrupts::disable();
+    let mut next_sp: Option<u32> = None;
+    let core = core_id();
+
+    {
+        let mut guard = SCHED.lock();
+        if let Some(s) = guard.as_mut() {
+            #[cfg(feature = "smp")]
+            let cur = if core == 1 { s.current1 } else { s.current };
+            #[cfg(not(feature = "smp"))]
+            let cur = s.current;
+
+            s.reap_zombies_except(cur);
+
+            let still_running = s
+                .tasks
+                .get(&cur)
+                .map(|t| t.state == TaskState::Running)
+                .unwrap_or(false);
+
+            if still_running {
+                if let Some(t) = s.tasks.get_mut(&cur) {
+                    t.state = TaskState::Ready;
+                }
+                #[cfg(feature = "smp")]
+                {
+                    if core == 1 {
+                        if cur != s.idle1 {
+                            s.ready1.push(cur);
+                        }
+                    } else {
+                        if cur != s.idle {
+                            s.ready.push(cur);
+                        }
+                    }
+                }
+                #[cfg(not(feature = "smp"))]
+                {
+                    if cur != s.idle {
+                        s.ready.push(cur);
+                    }
+                }
+            }
+
+            // Guardar el SP actual
+            if let Some(t) = s.tasks.get_mut(&cur) {
+                t.context.sp = save_frame as *mut esp_hal::xtensa_lx_rt::exception::Context as u32;
+            }
+
+            // Elegir la siguiente tarea
+            #[cfg(feature = "smp")]
+            let next = if core == 1 {
+                if s.ready1.is_empty() { s.idle1 } else { s.ready1.remove(0) }
+            } else {
+                policy::next_ready(s).unwrap_or(s.idle)
+            };
+            #[cfg(not(feature = "smp"))]
+            let next = policy::next_ready(s).unwrap_or(s.idle);
+
+            if let Some(t) = s.tasks.get_mut(&next) {
+                t.state = TaskState::Running;
+            }
+
+            #[cfg(feature = "smp")]
+            {
+                if core == 1 {
+                    s.current1 = next;
+                } else {
+                    s.current = next;
+                    s.slice_remaining = QUANTUM_TICKS;
+                }
+            }
+            #[cfg(not(feature = "smp"))]
+            {
+                s.current = next;
+                s.slice_remaining = QUANTUM_TICKS;
+            }
+
+            if next != cur {
+                let next_task = s.tasks.get(&next).unwrap();
+                next_sp = Some(next_task.context.sp);
+                crate::mm::mpu::prepare_world_switch(next_task.is_user, next_task.context.sp);
+            }
+        }
+    }
+
+    interrupts::restore(prev);
+    next_sp
+}
+
 // ===========================================================================
 // SMP (Fase 9, feature `smp`): planificación en el núcleo 1 desde su cola propia.
 // ===========================================================================
-
-/// Id del núcleo que ejecuta esta llamada (0 = PRO_CPU, 1 = APP_CPU).
-#[cfg(feature = "smp")]
-#[inline]
-fn core_id() -> usize {
-    match esp_hal::Cpu::current() {
-        esp_hal::Cpu::AppCpu => 1,
-        _ => 0,
-    }
-}
 
 /// Crea una tarea que se ejecutará en el **núcleo 1** (cola `ready1`).
 #[cfg(feature = "smp")]
@@ -376,66 +434,12 @@ pub fn spawn_core1(
     }
 }
 
-/// Planificador del núcleo 1 (llamado desde `schedule()` cuando `core_id()==1`).
-/// Interrupciones ya deshabilitadas por el llamador.
-#[cfg(feature = "smp")]
-fn schedule_core1() {
-    let mut switch: Option<(*mut Context, *const Context)> = None;
-    {
-        let mut guard = SCHED.lock();
-        if let Some(s) = guard.as_mut() {
-            let cur = s.current1;
-
-            s.reap_zombies_except(cur);
-
-            let still_running = s
-                .tasks
-                .get(&cur)
-                .map(|t| t.state == TaskState::Running)
-                .unwrap_or(false);
-            if still_running {
-                if let Some(t) = s.tasks.get_mut(&cur) {
-                    t.state = TaskState::Ready;
-                }
-                if cur != s.idle1 {
-                    s.ready1.push(cur);
-                }
-            }
-
-            let next = if s.ready1.is_empty() {
-                s.idle1
-            } else {
-                s.ready1.remove(0)
-            };
-            if let Some(t) = s.tasks.get_mut(&next) {
-                t.state = TaskState::Running;
-            }
-            s.current1 = next;
-
-            if next != cur {
-                let cur_ptr = s.ctx_ptr_mut(cur);
-                let next_ptr = s.ctx_ptr(next);
-                if let (Some(c), Some(n)) = (cur_ptr, next_ptr) {
-                    switch = Some((c, n));
-                }
-            }
-        }
-    }
-
-    if let Some((cur_ptr, next_ptr)) = switch {
-        unsafe {
-            context::switch_to(cur_ptr, next_ptr);
-        }
-    }
-}
-
 /// Punto de entrada del núcleo 1: arranca el planificador de su cola. No retorna.
 #[cfg(feature = "smp")]
 pub fn run_secondary() -> ! {
     let _prev = interrupts::disable();
 
-    let mut bootstrap = Context::default();
-    let mut target: Option<*const Context> = None;
+    let mut target: Option<u32> = None;
     {
         let mut guard = SCHED.lock();
         if let Some(s) = guard.as_mut() {
@@ -448,13 +452,13 @@ pub fn run_secondary() -> ! {
                 t.state = TaskState::Running;
             }
             s.current1 = first;
-            target = s.ctx_ptr(first);
+            target = Some(s.tasks.get(&first).unwrap().context.sp);
         }
     }
 
-    if let Some(next) = target {
+    if let Some(next_sp) = target {
         unsafe {
-            context::switch_to(&mut bootstrap as *mut Context, next);
+            context::resume_task(next_sp);
         }
     }
 

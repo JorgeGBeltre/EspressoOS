@@ -30,6 +30,7 @@ pub struct Task {
     pub stack_base: *mut u8,
     pub stack_size: usize,
     pub exit_code: i32,
+    pub is_user: bool,
 
     pub(super) start_entry: fn(usize),
 
@@ -76,6 +77,7 @@ impl Task {
             stack_base: base,
             stack_size: size,
             exit_code: 0,
+            is_user: false,
             start_entry: entry,
             start_arg: arg,
         }))

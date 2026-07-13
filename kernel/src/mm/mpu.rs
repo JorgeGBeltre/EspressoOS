@@ -53,6 +53,11 @@ pub fn protect_world1() -> Option<crate::prelude::String> {
     }
 }
 
+pub fn prepare_world_switch(is_user: bool, next_sp: u32) {
+    #[cfg(feature = "pms")]
+    imp::prepare_world_switch(is_user, next_sp);
+}
+
 #[cfg(feature = "pms")]
 mod imp {
     use crate::prelude::*;
@@ -119,5 +124,28 @@ mod imp {
             "World-1 SRAM (4 regiones) -> sin acceso; constrain_1={:#010x}",
             constrain1
         )
+    }
+
+    pub fn prepare_world_switch(is_user: bool, next_sp: u32) {
+        let wcl = unsafe { &*esp_hal::peripherals::WCL::PTR };
+        if is_user {
+            let next_pc = unsafe { *(next_sp as *const u32) };
+            wcl.core_0_world_prepare().write(|w| unsafe {
+                w.core_0_world_prepare().bits(1)
+            });
+            wcl.core_0_world_trigger_addr().write(|w| unsafe {
+                w.core_0_world_trigger_addr().bits(next_pc)
+            });
+            wcl.core_0_world_update().write(|w| {
+                w.core_0_update().set_bit()
+            });
+        } else {
+            wcl.core_0_world_prepare().write(|w| unsafe {
+                w.core_0_world_prepare().bits(0)
+            });
+            wcl.core_0_world_update().write(|w| {
+                w.core_0_update().set_bit()
+            });
+        }
     }
 }

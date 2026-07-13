@@ -43,6 +43,23 @@ unsafe extern "C" fn __exception(cause: ExceptionCause, save_frame: &mut Context
         save_frame.A2 = ret as u32;
         // Avanzar EPC más allá de `syscall` para no re-ejecutarla al volver.
         save_frame.PC = save_frame.PC.wrapping_add(SYSCALL_INSN_LEN);
+
+        if crate::scheduler::need_resched() {
+            if let Some(sp) = crate::scheduler::preempt_switch(save_frame) {
+                core::arch::asm!(
+                    "mov a5, {0}",
+                    "movi a4, 1",
+                    "rsr.windowbase a6",
+                    "ssl a6",
+                    "sll a4, a4",
+                    "wsr.windowstart a4",
+                    "rsync",
+                    in(reg) sp,
+                    out("a6") _,
+                    out("a4") _
+                );
+            }
+        }
         return;
     }
     // Cualquier otra causa: diagnóstico de esp-backtrace intacto.

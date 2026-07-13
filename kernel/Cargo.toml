@@ -19,7 +19,7 @@ path = "src/main.rs"
 # Todas requieren validación en hardware; ver docs/design/remaining-phases.md.
 # ============================================================================
 [features]
-default = []
+default = ["syscall-trap"]
 syscall-trap = []
 smp = []
 pms = []

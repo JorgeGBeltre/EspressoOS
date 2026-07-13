@@ -132,8 +132,9 @@ fn sys_ioctl(_args: &[usize]) -> isize {
 
 fn sys_exit(args: &[usize]) -> isize {
     let code = arg(args, 0) as i32;
-
-    crate::scheduler::exit(code)
+    crate::scheduler::mark_zombie(code);
+    crate::scheduler::set_need_resched();
+    0
 }
 
 fn sys_spawn(args: &[usize]) -> isize {
@@ -257,6 +258,6 @@ fn sys_sbrk(_args: &[usize]) -> isize {
 }
 
 fn sys_yield(_args: &[usize]) -> isize {
-    crate::scheduler::yield_now();
+    crate::scheduler::set_need_resched();
     0
 }

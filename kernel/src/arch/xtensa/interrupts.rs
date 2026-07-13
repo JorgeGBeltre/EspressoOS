@@ -10,6 +10,33 @@ pub fn init() {
 
 }
 
+extern "C" {
+    fn handle_interrupts(level: u32, save_frame: &mut esp_hal::xtensa_lx_rt::exception::Context);
+}
+
+#[no_mangle]
+#[link_section = ".rwtext"]
+unsafe extern "C" fn __level_1_interrupt(level: u32, save_frame: &mut esp_hal::xtensa_lx_rt::exception::Context) {
+    handle_interrupts(level, save_frame);
+
+    if crate::scheduler::need_resched() {
+        if let Some(sp) = crate::scheduler::preempt_switch(save_frame) {
+            core::arch::asm!(
+                "mov a5, {0}",
+                "movi a4, 1",
+                "rsr.windowbase a6",
+                "ssl a6",
+                "sll a4, a4",
+                "wsr.windowstart a4",
+                "rsync",
+                in(reg) sp,
+                out("a6") _,
+                out("a4") _
+            );
+        }
+    }
+}
+
 #[inline(always)]
 pub fn disable() -> u32 {
     let ps_previo: u32;

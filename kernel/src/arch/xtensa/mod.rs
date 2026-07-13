@@ -5,7 +5,7 @@ pub mod interrupts;
 pub mod sync;
 pub mod timer;
 
-pub use context::{switch_to, Context};
+pub use context::Context;
 
 pub use interrupts::{disable, restore};
 

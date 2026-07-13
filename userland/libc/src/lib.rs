@@ -109,6 +109,11 @@ pub fn uptime_ms() -> usize {
     unsafe { syscall(12, 0, 0, 0, 0, 0, 0) as usize }
 }
 
+/// Crea una tubería. `fds[0]` = extremo de lectura, `fds[1]` = escritura.
+pub fn pipe(fds: &mut [i32; 2]) -> isize {
+    unsafe { syscall(26, fds.as_mut_ptr() as usize, 0, 0, 0, 0, 0) }
+}
+
 pub fn sbrk(size: usize) -> isize {
     unsafe { syscall(13, size, 0, 0, 0, 0, 0) }
 }

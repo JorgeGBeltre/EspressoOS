@@ -141,6 +141,15 @@ pub fn load_elf(path: &str) -> KResult<(u32, usize, *mut u8)> {
     // 6. Cargar cada segmento PT_LOAD en RAM
     for ph in phs {
         if ph.p_type == 1 { // PT_LOAD
+            // Seguridad: p_filesz nunca puede exceder p_memsz (si no, la copia se
+            // saldría de la región reservada [load_addr, load_addr+total_size)).
+            if ph.p_filesz > ph.p_memsz {
+                if is_pic {
+                    unsafe { alloc::alloc::dealloc(load_addr, layout); }
+                }
+                let _ = crate::vfs::close(fd);
+                return Err(KError::Corrupt);
+            }
             let dest_addr = (ph.p_vaddr as i32 + load_bias) as *mut u8;
             if let Err(e) = crate::vfs::seek(fd, crate::vfs::SeekFrom::Start(ph.p_offset as u64)) {
                 if is_pic {

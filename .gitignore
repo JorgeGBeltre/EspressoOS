@@ -7,6 +7,10 @@
 *.elf
 !bootloader/**/*.bin
 
+# Userland: scripts de enlace por-slot generados (se regeneran con tools/build-userland.ps1)
+userland/.slots/
+userland/dist/
+
 # Python (herramientas)
 __pycache__/
 *.pyc

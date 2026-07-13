@@ -266,8 +266,11 @@ impl Inode for ProcFsFile {
                 alloc::format!("uptime: {} ms\n", ms)
             }
             ProcFsFile::MemInfo => {
-                let size = crate::mm::heap::size();
-                alloc::format!("MemTotal: {} bytes\nMemFree: {} bytes\n", size, size)
+                let s = crate::mm::heap::stats();
+                alloc::format!(
+                    "MemTotal: {} bytes\nMemUsed: {} bytes\nMemFree: {} bytes\n",
+                    s.total, s.used, s.free
+                )
             }
             ProcFsFile::PidStatus(pid) => {
                 let pt = crate::scheduler::process::PROCESS_TABLE.lock();

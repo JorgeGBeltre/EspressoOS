@@ -41,6 +41,23 @@ pub fn dispatch(
         Syscall::GetTimeOfDay => sys_gettimeofday(args),
         Syscall::SetTimeOfDay => sys_settimeofday(args),
         Syscall::OtaState => sys_ota_state(args),
+        Syscall::Pipe => sys_pipe(args),
+    }
+}
+
+/// pipe(fds: *mut [i32;2]) — crea una tubería y devuelve [read_fd, write_fd].
+fn sys_pipe(args: &[usize]) -> isize {
+    let out = match unsafe { user_slice_mut(arg(args, 0), 8) } {
+        Ok(s) => s,
+        Err(e) => return e.as_errno(),
+    };
+    match crate::vfs::create_pipe() {
+        Ok((r, w)) => {
+            out[0..4].copy_from_slice(&(r as i32).to_le_bytes());
+            out[4..8].copy_from_slice(&(w as i32).to_le_bytes());
+            0
+        }
+        Err(e) => e.as_errno(),
     }
 }
 

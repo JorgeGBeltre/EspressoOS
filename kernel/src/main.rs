@@ -19,6 +19,12 @@ mod vfs;
 
 mod wifi_credentials;
 
+// Binarios de userland empotrados por build.rs (userland/dist/*.elf). Si no se
+// corrió tools/build-userland.ps1, la tabla queda vacía y se usa la shell interna.
+mod userland_bin {
+    include!(concat!(env!("OUT_DIR"), "/userland_bin.rs"));
+}
+
 use esp_backtrace as _;
 use esp_hal::clock::CpuClock;
 use esp_hal::main;
@@ -114,6 +120,9 @@ fn main() -> ! {
     if let Err(e) = vfs::mount("/sys", alloc::sync::Arc::new(fs::SysFs::new())) {
         println!("[kernel] aviso: mount /sys fallo: {:?}", e);
     }
+
+    // /bin: ramfs poblado con los binarios de userland empotrados en el firmware.
+    install_userland();
 
     init_etc_files();
 
@@ -241,6 +250,35 @@ fn sleep_ms(ms: u64) {
     while arch::xtensa::timer::uptime_ms().saturating_sub(inicio) < ms {
         scheduler::yield_now();
     }
+}
+
+fn install_userland() {
+    // Monta un ramfs en /bin y vuelca los binarios de userland empotrados en la
+    // imagen del kernel. No toca flash: /bin siempre coincide con el firmware.
+    if userland_bin::USERLAND_BINARIES.is_empty() {
+        println!("[kernel] userland no empotrado (corre tools/build-userland.ps1 y recompila)");
+        return;
+    }
+    if let Err(e) = vfs::mount("/bin", fs::ramfs::RamFs::new()) {
+        println!("[kernel] aviso: mount /bin fallo: {:?}", e);
+        return;
+    }
+    let mut n = 0u32;
+    for (name, bytes) in userland_bin::USERLAND_BINARIES {
+        let path = alloc::format!("/bin/{}", name);
+        let flags = vfs::OpenFlags(
+            vfs::OpenFlags::WRONLY.0 | vfs::OpenFlags::CREATE.0 | vfs::OpenFlags::TRUNC.0,
+        );
+        match vfs::open(&path, flags) {
+            Ok(fd) => {
+                let _ = vfs::write(fd, bytes);
+                let _ = vfs::close(fd);
+                n += 1;
+            }
+            Err(e) => println!("[kernel] aviso: instalar {} fallo: {:?}", path, e),
+        }
+    }
+    println!("[kernel] userland: {} binarios instalados en /bin", n);
 }
 
 fn init_etc_files() {

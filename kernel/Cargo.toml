@@ -28,9 +28,10 @@ path = "src/main.rs"
 esp-hal       = { version = "0.23.1", features = ["esp32s3", "unstable"] }
 esp-backtrace = { version = "0.15.0", features = ["esp32s3", "panic-handler", "println", "exception-handler"] }
 # default-features=false para NO activar `auto`: el grupo [jtag-serial|uart|auto]
-# admite EXACTAMENTE uno, y elegimos `jtag-serial` (consola USB-Serial-JTAG).
-# Conservamos lo útil del default: `critical-section` (impresión atómica) y `colors`.
-esp-println   = { version = "0.13.0", default-features = false, features = ["esp32s3", "jtag-serial", "critical-section", "colors"] }
+# admite EXACTAMENTE uno. Elegimos `uart` (UART0) porque esta placa usa un CH343
+# externo (COM5) cableado a UART0; con `jtag-serial` la salida iría al USB-Serial-JTAG
+# nativo (otro interfaz) y no se vería en el monitor. Conservamos critical-section + colors.
+esp-println   = { version = "0.13.0", default-features = false, features = ["esp32s3", "uart", "critical-section", "colors"] }
 esp-alloc     = { version = "0.6.0" }
 
 # --- Tiempo / frecuencias ---------------------------------------------------

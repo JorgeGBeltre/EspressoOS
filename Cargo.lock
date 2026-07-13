@@ -611,7 +611,6 @@ dependencies = [
  "critical-section",
  "esp-build",
  "log",
- "portable-atomic",
 ]
 
 [[package]]

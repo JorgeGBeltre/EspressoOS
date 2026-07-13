@@ -100,7 +100,11 @@ pub mod layout {
     pub const FLASH_SECTOR_SIZE: usize = 4096; // borrado mínimo
 
     // RAM.
-    pub const KERNEL_HEAP_SIZE: usize = 64 * 1024; // SRAM interna (Fase 0/1)
+    // SRAM interna (Fase 0/1). Subido 64->128 KB para dar holgura a esp-wifi, que
+    // reserva decenas de KB de estructuras internas en el arranque de la radio.
+    // Como la región interna se registra ANTES que la PSRAM, las asignaciones
+    // pequeñas (incluidas las potencialmente DMA de esp-wifi) tienden a caer aquí.
+    pub const KERNEL_HEAP_SIZE: usize = 128 * 1024;
     pub const PSRAM_SIZE: usize = 8 * 1024 * 1024;
     pub const DEFAULT_STACK_SIZE: usize = 8 * 1024; // pila por tarea (Fase 2)
 }

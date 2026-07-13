@@ -34,6 +34,9 @@ mod scheduler;
 mod shell;
 mod syscall;
 mod vfs;
+// Credenciales WiFi de desarrollo (archivo NO versionado; ver el `.example`).
+// `drivers::wifi` las lee vía `crate::wifi_credentials::{WIFI_SSID, WIFI_PASSWORD}`.
+mod wifi_credentials;
 
 use esp_backtrace as _; // instala panic handler + backtrace
 use esp_hal::clock::CpuClock;
@@ -53,19 +56,47 @@ const PRIO_DEFAULT: u8 = 1;
 /// Periodo del latido del LED, en milisegundos.
 const HEARTBEAT_MS: u64 = 500;
 
+/// Tamaño de pila de la tarea de red. Mayor que el por defecto (8 KB) porque el
+/// bring-up de esp-wifi + smoltcp (iface, handshakes) usa más pila que las tareas
+/// triviales. Los búferes grandes (SocketSet, RX/TX TCP) van al heap, no a la pila.
+const NET_STACK_SIZE: usize = 16 * 1024;
+
 #[main]
 fn main() -> ! {
     // -- §5.1  Inicialización del HAL a máxima frecuencia de CPU (240 MHz). -----
-    // `esp_hal::init` consume y reparte los periféricos. En esta fase no se
-    // necesita ningún periférico concreto en `main`: los subsistemas que sí los
-    // necesitan (systick, drivers de bus) los obtienen internamente. Por eso el
-    // valor se descarta tras fijar el reloj.
-    let _peripherals = esp_hal::init(esp_hal::Config::default().with_cpu_clock(CpuClock::max()));
+    // CAMBIO (Fase 1/7): AHORA conservamos los periféricos. `esp-wifi` necesita
+    // poseer WIFI, RADIO_CLK, TIMG0 y RNG (se ceden a `drivers::wifi`), y la PSRAM
+    // se mapea DENTRO de `esp_hal::init` vía `Config::psram` (esp-hal 0.23 ya no
+    // tiene función suelta de init de PSRAM). `CpuClock::max()` (240 MHz) además
+    // satisface el requisito de esp-wifi de CPU >= 80 MHz.
+    let peripherals = esp_hal::init(
+        esp_hal::Config::default()
+            .with_cpu_clock(CpuClock::max())
+            .with_psram(esp_hal::psram::PsramConfig {
+                // PSRAM octal de 8 MB. `AutoDetect` también valdría; la fijamos para
+                // no depender de la lectura de densidad.
+                size: esp_hal::psram::PsramSize::Size(8 * 1024 * 1024),
+                ..Default::default()
+            }),
+    );
 
     // -- §5.2  Heap del kernel (SRAM interna). OBLIGATORIO antes de cualquier ---
-    // asignación dinámica (Vec/String/Box/Arc). La PSRAM (§5.3, Fase 1) se
-    // añadirá con `mm::heap::add_psram` cuando se implemente su init.
+    // asignación dinámica (Vec/String/Box/Arc).
     mm::heap::init();
+
+    // -- §5.3  PSRAM -> heap secundario (Fase 1). La PSRAM ya está mapeada por ---
+    // `esp_hal::init`; obtenemos su rango con `psram_raw_parts` y la registramos en
+    // el allocator (`MemoryCapability::External`). Se añade ANTES de arrancar la
+    // red para que esp-wifi/smoltcp tengan holgura de heap.
+    // NOTA: la región interna (SRAM) se registra primero (arriba), así que las
+    // asignaciones pequeñas de esp-wifi tienden a caer en SRAM; la PSRAM absorbe
+    // los búferes grandes. (Ver RIESGO de DMA en el manifiesto.)
+    let (psram_base, psram_len) = esp_hal::psram::psram_raw_parts(&peripherals.PSRAM);
+    mm::heap::add_psram(psram_base, psram_len);
+    println!(
+        "[kernel] PSRAM añadida al heap: {} bytes @ {:p}",
+        psram_len, psram_base
+    );
 
     // -- §5.4  Consola (USB-Serial-JTAG), base de `/dev/console`. --------------
     // No es fatal si falla: el banner de bring-up usa `esp-println`, que funciona
@@ -125,6 +156,24 @@ fn main() -> ! {
     ) {
         Ok(tid) => println!("[kernel] tarea 'heartbeat' creada (tid={})", tid),
         Err(e) => println!("[kernel] aviso: no se pudo crear el latido: {:?}", e),
+    }
+
+    // -- §5.14 Red: cedemos a esp-wifi los periféricos que exige y arrancamos ---
+    // la tarea de red. DECISIÓN: como `spawn` solo admite `fn(usize)`, depositamos
+    // los periféricos en un `static` de `drivers::wifi` ANTES del spawn; `net_task`
+    // los recoge y hace toda la bring-up (init radio + STA + smoltcp + DHCP + eco)
+    // dentro de su bucle, cediendo con `scheduler::yield_now()`. La bring-up REAL
+    // ocurre DESPUÉS de `scheduler::run()` (con interrupciones activas), que es lo
+    // que esp-wifi necesita para progresar su firmware.
+    drivers::wifi::provide_peripherals(
+        peripherals.TIMG0,
+        peripherals.RNG,
+        peripherals.RADIO_CLK,
+        peripherals.WIFI,
+    );
+    match scheduler::spawn("net", drivers::wifi::net_task, 0, NET_STACK_SIZE, PRIO_DEFAULT) {
+        Ok(tid) => println!("[kernel] tarea 'net' creada (tid={})", tid),
+        Err(e) => println!("[kernel] aviso: no se pudo crear la red: {:?}", e),
     }
 
     // -- §5.7  Systick del scheduler (SYSTIMER @ TICK_HZ -> scheduler::tick). ---

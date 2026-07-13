@@ -25,7 +25,12 @@ path = "src/main.rs"
 # subsistemas: timers (systimer/timg), rng, i2c/spi master, la macro
 # `#[handler]`, `esp_hal::time`, `reset::software_reset` y `*::steal()`. Además,
 # esp-wifi exige `esp-hal/unstable`. Sin él, arch::timer y drivers::* no compilan.
-esp-hal       = { version = "0.23.1", features = ["esp32s3", "unstable"] }
+# `octal-psram`: habilita el init de la PSRAM octal de 8 MB dentro de `esp_hal::init`
+# (`Config::psram`) y el helper `esp_hal::psram::psram_raw_parts` que `main` usa para
+# registrar la PSRAM en el heap. (Para PSRAM quad sería `quad-psram`.) Requiere
+# además `unstable` (el módulo `esp_hal::psram` y el campo `Config::psram` están
+# gated por `unstable`). RECORDATORIO: la PSRAM exige compilar en RELEASE.
+esp-hal       = { version = "0.23.1", features = ["esp32s3", "unstable", "octal-psram"] }
 esp-backtrace = { version = "0.15.0", features = ["esp32s3", "panic-handler", "println", "exception-handler"] }
 # default-features=false para NO activar `auto`: el grupo [jtag-serial|uart|auto]
 # admite EXACTAMENTE uno. Elegimos `uart` (UART0) porque esta placa usa un CH343

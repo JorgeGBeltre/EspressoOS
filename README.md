@@ -27,6 +27,7 @@ The system implements fundamental operating system concepts (a Virtual File Syst
   - [Syscall Mechanism (System Calls)](#syscall-mechanism-system-calls)
   - [A/B Update Scheme (OTA)](#ab-update-scheme-ota)
   - [Peripheral Device Drivers](#peripheral-device-drivers)
+  - [SSH Server (Skeleton \& Wire-Format)](#ssh-server-skeleton--wire-format)
 - [Interactive REPL Shell](#interactive-repl-shell)
 - [Verification and Mock Testing](#verification-and-mock-testing)
 - [Contribution and License](#contribution-and-license)
@@ -110,6 +111,13 @@ EspressoOS/
 │   │   │   ├── spi.rs      # SPI master bus driver (skeleton)
 │   │   │   ├── i2c.rs      # I2C master bus driver (skeleton)
 │   │   │   ├── wifi.rs     # Network driver (esp-wifi + smoltcp) (draft)
+│   │   │   ├── ssh/        # Minimal SSH-2.0 server (skeleton, Phase 7+)
+│   │   │   │   ├── auth.rs    # User authentication (password / publickey ed25519)
+│   │   │   │   ├── channel.rs # Session channels & shell routing logic
+│   │   │   │   ├── crypt.rs   # Session encryption (ChaCha20-Poly1305 AEAD)
+│   │   │   │   ├── kex.rs     # Key Exchange (curve25519-sha256 ECDH & KDF)
+│   │   │   │   ├── proto.rs   # RFC 4251 types and Binary Packet Protocol
+│   │   │   │   └── mod.rs     # Connection state machine and server entry
 │   │   │   └── mod.rs
 │   │   ├── fs/             # Core File System Drivers
 │   │   │   ├── ramfs.rs    # In-memory RAM filesystem
@@ -129,6 +137,7 @@ EspressoOS/
 │   │   │   └── mod.rs
 │   │   ├── shell/          # Interactive REPL Environment
 │   │   │   ├── parser.rs   # CLI tokenizer and syntax parser (redirections, pipes)
+│   │   │   ├── remote.rs   # Shell Io trait and local/remote (SSH) adapters
 │   │   │   ├── commands/   # Shell built-in coreutils (echo, uptime, free, ps, etc.)
 │   │   │   └── mod.rs
 │   │   ├── syscall/        # Syscall Dispatcher
@@ -150,7 +159,9 @@ EspressoOS/
 │   ├── mkimage/            # Packaging tools for firmware binary creation (skeleton)
 │   │   └── README.md
 │   └── tests/              # Test suites
-│       └── logic_tests.py  # Python emulation suite to test OS logic
+│       ├── logic_tests.py  # Python emulation suite to test OS logic
+│       ├── ssh_proto_tests.py # Test suite for SSH packet formatting & types
+│       └── run_all.py         # Unified Python test runner
 ├── Cargo.toml              # Parent workspace Cargo configuration
 ├── partitions.csv          # Flash memory layout specification
 ├── rust-toolchain.toml     # Toolchain pin configuration
@@ -163,25 +174,56 @@ EspressoOS/
 
 To compile and flash EspressoOS, you will need the Espressif Xtensa Rust toolchain, flashing tools, and Python 3.
 
-1. **Install Rust + Espressif Xtensa Toolchain**:
-   Install using the official `espup` tool:
-   ```bash
-   cargo install espup
-   espup install
-   ```
-   *Note: Follow the terminal instructions to export variables (e.g. `source ~/export-esp.sh` or configure environment variables in Windows).*
+### 1. Install Rust + Espressif Xtensa Toolchain & Flashing Tools
 
-2. **Install Flashing Tools (`espflash`)**:
-   ```bash
-   cargo install espflash
-   ```
+Install `espup` (the toolchain installer) and `espflash` (flashing and monitoring utility) using Cargo:
 
-3. **Hardware Connections**:
-   Connect your **ESP32-S3** board to the host PC using the native **USB-Serial-JTAG** port directly (connected to the chip, not via external USB-to-UART bridging ICs if the board has two ports).
+```bash
+# Install toolchain and flashing utilities
+cargo install espup --locked
+cargo install espflash
+```
+
+Once installed, run `espup` to set up the toolchain on your system:
+```bash
+espup install
+```
+
+### 2. Configure Environment Variables
+
+Based on your operating system and shell, you must source the environment script to make the Xtensa toolchain accessible in your current terminal session:
+
+#### On Windows (PowerShell)
+You may need to adjust the execution policy in your session to run the script:
+```powershell
+# Allow local script execution (run as Administrator if needed, or CurrentUser)
+Set-ExecutionPolicy RemoteSigned -Scope CurrentUser
+
+# Load Espressif environment variables
+. $HOME\export-esp.ps1
+```
+
+#### On Linux / macOS
+```bash
+source $HOME/export-esp.sh
+```
+
+To verify that the tools and environment are set up correctly, check the flashing tool version:
+```bash
+espflash --version
+```
+
+### 3. Hardware Connections
+Connect your **ESP32-S3** board to the host PC using the native **USB-Serial-JTAG** port directly (connected to the chip, not via external USB-to-UART bridging ICs if the board has two ports).
 
 ---
 
 ## Building and Flashing
+
+Make sure you are in the repository directory before building:
+```bash
+cd EspressoOS
+```
 
 ### 1. Compile the Partition Table
 The flash memory must be partitioned before compiling and flashing the operating system. Run the Python generator from the repository root:
@@ -321,8 +363,16 @@ The `otadata` partition is split into **2 sectors** of **4 KB** each. Every sect
 
 ### Peripheral Device Drivers
 - **UART JTAG Serial** ([drivers/uart.rs](file:///C:/Users/Jorge/Desktop/Firmware/EspressoOS/kernel/src/drivers/uart.rs)): Console reader and writer. Operates asynchronously over native USB JTAG hardware channels.
-- **GPIO** ([drivers/gpio.rs](file:///C:/Users/Jorge/Desktop/Firmware/EspressoOS/kernel/src/drivers/gpio.rs)): Digital configuration controller providing Pin input, output, pull-up, and pull-down configurations.
+- **GPIO** ([drivers/gpio.rs](file:///C:/Users/Jorge/Desktop/Firmware/EspressoOS/kernel/src/drivers/gpio.rs)): Pin input, output, pull-up, and pull-down configurations.
 - **Flash SPI** ([drivers/flash.rs](file:///C:/Users/Jorge/Desktop/Firmware/EspressoOS/kernel/src/drivers/flash.rs)): SPI helper routines interacting directly with the chip's internal boot ROM functions to write/erase memory blocks.
+
+### SSH Server (Skeleton & Wire-Format)
+A minimal SSH-2.0 server ([drivers/ssh](file:///C:/Users/Jorge/Desktop/Firmware/EspressoOS/kernel/src/drivers/ssh)) designed to host the interactive REPL shell over a TCP connection (port 22).
+
+- **Wire-Format Parser (`proto.rs`)**: Implements RFC 4251 base types (uint32, string, name-list, mpint) and the SSH Binary Packet Protocol (RFC 4253 §6), verified using a host-based Python test suite ([ssh_proto_tests.py](file:///C:/Users/Jorge/Desktop/Firmware/EspressoOS/tools/tests/ssh_proto_tests.py)).
+- **Cryptographic Foundations (`kex.rs`, `crypt.rs`, `auth.rs`)**: Designs for key exchange (X25519-SHA256), host key verification (ssh-ed25519), and session decryption (ChaCha20-Poly1305 OpenSSH construction) using audited `no_std` crates.
+- **Shell Bridge (`shell::remote`)**: Introduces a unified `ShellIo` interface abstraction allowing the REPL shell to run on both the local console (`ConsoleIo`) and a remote SSH channel session (`SshChannelIo`).
+- *Note: Gated by Phase 7 (networking integration) and currently set up as a documented codebase skeleton.*
 
 ---
 
@@ -359,25 +409,31 @@ EspressoOS CLI Commands
 
 ## Verification and Mock Testing
 
-As a bare-metal OS running on target silicon, compiling and running tests directly on the development environment is difficult. To address this, EspressoOS includes a **Python validation harness** ([logic_tests.py](file:///C:/Users/Jorge/Desktop/Firmware/EspressoOS/tools/tests/logic_tests.py)).
+As a bare-metal OS running on target silicon, compiling and running tests directly on the development environment is difficult. To address this, EspressoOS includes **Python validation harnesses** located in [tools/tests](file:///C:/Users/Jorge/Desktop/Firmware/EspressoOS/tools/tests).
 
-This harness contains Python translations of the kernel's critical algorithms, allowing developers to verify OS logic offline:
+These harnesses contain offline verification logic for the kernel's pure modules:
 
 ### Simulated Algorithms and Checked Tests
-1. **Shell Parser & Tokenizer**: Tests parsing of single/double quotes, escape slashes `\`, redirection parsing, and pipe parsing.
-2. **VFS Path Normalization**: Validates resolution of relative paths, absolute paths, directory symbols `.`, and folder parent elements `..`.
-3. **OTA Selection Logic**: Tests CRC-32 parsing and selection calculations to verify bootloader decisions during power failures.
-4. **RamFs File System Semantics**: Simulates reading, writing, and offsets of virtual VFS nodes.
+1. **Shell Parser & Tokenizer** ([logic_tests.py](file:///C:/Users/Jorge/Desktop/Firmware/EspressoOS/tools/tests/logic_tests.py)): Tests parsing of single/double quotes, escape slashes `\`, redirection parsing, and pipe parsing.
+2. **VFS Path Normalization** ([logic_tests.py](file:///C:/Users/Jorge/Desktop/Firmware/EspressoOS/tools/tests/logic_tests.py)): Validates resolution of relative paths, absolute paths, directory symbols `.`, and folder parent elements `..`.
+3. **OTA Selection Logic** ([logic_tests.py](file:///C:/Users/Jorge/Desktop/Firmware/EspressoOS/tools/tests/logic_tests.py)): Tests CRC-32 parsing and selection calculations to verify bootloader decisions during power failures.
+4. **RamFs File System Semantics** ([logic_tests.py](file:///C:/Users/Jorge/Desktop/Firmware/EspressoOS/tools/tests/logic_tests.py)): Simulates reading, writing, and offsets of virtual VFS nodes.
+5. **SSH Binary Packet Protocol & Codecs** ([ssh_proto_tests.py](file:///C:/Users/Jorge/Desktop/Firmware/EspressoOS/tools/tests/ssh_proto_tests.py)): Verifies RFC 4251 data representations (uint32, string, name-list, mpint) and framing rules (padding, block alignment, lengths) for SSH packets.
 
 ### Running Logical Tests
 
-Execute the validation suite in your local development workspace using:
+You can run the unified test runner to execute all harnesses:
 ```bash
-# Via native Python unittest
+python tools/tests/run_all.py
+```
+
+Alternatively, run specific suites using:
+```bash
+# Run shell, VFS, RamFs and OTA tests
 python tools/tests/logic_tests.py
 
-# Or via pytest
-pytest tools/tests/logic_tests.py
+# Run SSH protocol codec and framing tests
+python tools/tests/ssh_proto_tests.py
 ```
 
 ---

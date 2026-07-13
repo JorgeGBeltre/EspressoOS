@@ -69,13 +69,22 @@ mod imp {
 
     pub fn init() {
         let s = sensitive!();
-        // Habilitar el monitor de violaciones de DRAM0 (limpiar + enable). No
-        // restringe accesos: sólo registra violaciones bajo la config vigente.
+        // 1) Monitor de violaciones DRAM0 (observabilidad): registra el mundo y la
+        //    dirección de cualquier acceso ilegal bajo la config vigente.
         s.core_0_dram0_pms_monitor_1().modify(|_, w| {
             w.core_0_dram0_pms_monitor_violate_clr().set_bit();
             w.core_0_dram0_pms_monitor_violate_en().set_bit()
         });
-        println!("[pms] monitor de violaciones DRAM0 habilitado (kernel = World-0)");
+        // 2) Enforcement en boot: restringe (sin acceso) las 4 regiones de datos
+        //    SRAM de World-1. Seguro porque el kernel corre en World-0; deja el
+        //    aislamiento listo para un futuro userland (que correría en World-1).
+        s.core_x_dram0_pms_constrain_1().modify(|_, w| unsafe {
+            w.core_x_dram0_pms_constrain_sram_world_1_pms_0().bits(0);
+            w.core_x_dram0_pms_constrain_sram_world_1_pms_1().bits(0);
+            w.core_x_dram0_pms_constrain_sram_world_1_pms_2().bits(0);
+            w.core_x_dram0_pms_constrain_sram_world_1_pms_3().bits(0)
+        });
+        println!("[pms] monitor DRAM0 + enforcement World-1 activos (kernel = World-0)");
     }
 
     pub fn report() -> String {

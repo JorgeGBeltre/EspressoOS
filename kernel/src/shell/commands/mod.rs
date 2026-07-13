@@ -234,7 +234,7 @@ fn cmd_help(_args: &[&str]) -> i32 {
     emit_line("  write ARCHIVO TEXTO   escribe TEXTO en ARCHIVO (trunca)");
     emit_line("  i2c scan|read|write   bus I2C (/dev/i2c0)");
     emit_line("  spi transfer B0...    bus SPI (/dev/spi0)");
-    emit_line("  ota status|set        actualización A/B (otadata)");
+    emit_line("  ota status|set|rx|apply  actualización A/B (otadata + OTA:3300)");
     emit_line("  syscalltest           ejercita la ABI de syscalls");
     emit_line("  smp                   estado del multinúcleo (SMP)");
     emit_line("  pms [world1]          protección de memoria (PMS)");
@@ -684,8 +684,32 @@ fn cmd_ota(args: &[&str]) -> i32 {
                 2
             }
         },
+        Some("rx") => {
+            let n = ota::rx_len();
+            if n == 0 {
+                emit_line("sin imagen en buffer (envíala: nc <ip> 3300 < firmware.bin)");
+            } else {
+                emit_line(&format!("imagen en buffer: {} bytes (usa 'ota apply')", n));
+            }
+            0
+        }
+        Some("apply") => {
+            emit_line("Flasheando imagen recibida en el slot inactivo...");
+            emit_line("(escribe varios MB; con WiFi activo puede cortar la radio)");
+            match ota::apply_buffered() {
+                Ok(slot) => {
+                    emit_line(&format!("OK: imagen escrita en {} y marcada para arrancar", slot_name(slot)));
+                    emit_line("(efectivo sólo con un bootloader que honre otadata)");
+                    0
+                }
+                Err(e) => {
+                    eprint_line(&format!("ota apply: {}", err_str(e)));
+                    1
+                }
+            }
+        }
         _ => {
-            eprint_line("uso: ota status | ota set factory|ota0");
+            eprint_line("uso: ota status | set factory|ota0 | rx | apply");
             2
         }
     }

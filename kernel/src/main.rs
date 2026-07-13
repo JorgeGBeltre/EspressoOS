@@ -144,9 +144,18 @@ fn main() -> ! {
     let _ = arch::xtensa::interrupts::disable();
     arch::xtensa::timer::init();
 
-    // SMP (Fase 9, opt-in): arranca el segundo núcleo antes del planificador.
+    // SMP (Fase 9, opt-in): encola una tarea para el núcleo 1 y arráncalo.
     #[cfg(feature = "smp")]
-    scheduler::core_sync::start_secondary_core(peripherals.CPU_CTRL);
+    {
+        let _ = scheduler::spawn_core1(
+            "core1-worker",
+            scheduler::core_sync::worker_entry,
+            0,
+            layout::DEFAULT_STACK_SIZE,
+            PRIO_DEFAULT,
+        );
+        scheduler::core_sync::start_secondary_core(peripherals.CPU_CTRL);
+    }
 
     println!("[kernel] arrancando el planificador...");
 

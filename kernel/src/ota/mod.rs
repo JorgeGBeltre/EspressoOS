@@ -1,5 +1,6 @@
 #![allow(dead_code)]
 
+use crate::arch::xtensa::sync::Mutex;
 use crate::drivers::flash;
 use crate::prelude::*;
 
@@ -131,4 +132,60 @@ pub fn apply_image(image: &[u8]) -> KResult<Slot> {
     upd.write(image)?;
     upd.finish()?;
     Ok(slot)
+}
+
+// ===========================================================================
+// Recepción de imagen OTA (Fase 5).
+//
+// Estrategia segura frente al hazard "flash + WiFi": la imagen se recibe por TCP
+// a un buffer en PSRAM (NO se escribe flash durante la transferencia, así la
+// radio no se perturba). El flasheo real (que sí deshabilita interrupciones por
+// sector y puede molestar al WiFi) se dispara aparte con `apply_buffered()`, que
+// el usuario invoca desde la shell (`ota apply`) — idealmente por la consola UART.
+// ===========================================================================
+
+/// Tamaño máximo de imagen que se acepta en el buffer (= tamaño del slot OTA).
+const MAX_IMAGE: usize = layout::OTA0_SIZE as usize;
+
+static RX_IMAGE: Mutex<Option<Vec<u8>>> = Mutex::new(None);
+
+/// Empieza (o reinicia) la recepción de una imagen.
+pub fn rx_begin() {
+    *RX_IMAGE.lock() = Some(Vec::new());
+}
+
+/// Añade un trozo recibido al buffer. Devuelve el total acumulado.
+pub fn rx_push(data: &[u8]) -> KResult<usize> {
+    let mut g = RX_IMAGE.lock();
+    let buf = g.get_or_insert_with(Vec::new);
+    if buf.len().saturating_add(data.len()) > MAX_IMAGE {
+        return Err(KError::NoSpace);
+    }
+    buf.try_reserve(data.len()).map_err(|_| KError::NoMem)?;
+    buf.extend_from_slice(data);
+    Ok(buf.len())
+}
+
+/// Bytes actualmente en el buffer de recepción.
+pub fn rx_len() -> usize {
+    RX_IMAGE.lock().as_ref().map(|b| b.len()).unwrap_or(0)
+}
+
+/// Descarta el buffer de recepción.
+pub fn rx_clear() {
+    *RX_IMAGE.lock() = None;
+}
+
+/// Flashea la imagen recibida en el slot inactivo y marca el arranque.
+///
+/// ⚠️ Escribe varios MB a flash: con el WiFi activo puede perturbar la radio.
+/// Preferir ejecutarlo desde la consola UART. Un `Ok(slot)` deja el otadata
+/// apuntando al nuevo slot (efectivo sólo con un bootloader que honre otadata).
+pub fn apply_buffered() -> KResult<Slot> {
+    let image = RX_IMAGE.lock().take().ok_or(KError::NotFound)?;
+    if image.is_empty() {
+        return Err(KError::Corrupt);
+    }
+    validate_header(&image)?;
+    apply_image(&image)
 }

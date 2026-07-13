@@ -42,6 +42,12 @@ const LINK_CHECK_MS: u64 = 5_000;
 const SSH_RX_SIZE: usize = 4096;
 const SSH_TX_SIZE: usize = 4096;
 
+/// Puerto de recepción de imágenes OTA (Fase 5). La imagen se bufferea en PSRAM;
+/// el flasheo real se dispara con `ota apply` desde la shell.
+pub const OTA_PORT: u16 = 3300;
+const OTA_RX_SIZE: usize = 8192;
+const OTA_TX_SIZE: usize = 1024;
+
 struct TcpTransport<'s> {
     sock: &'s mut tcp::Socket<'static>,
 }
@@ -296,6 +302,16 @@ pub fn net_task(_arg: usize) {
     }
     let ssh_handle = sockets.add(ssh_sock);
 
+    // Socket de recepción OTA (Fase 5): bufferea la imagen en PSRAM.
+    let ota_rx = tcp::SocketBuffer::new(alloc::vec![0u8; OTA_RX_SIZE]);
+    let ota_tx = tcp::SocketBuffer::new(alloc::vec![0u8; OTA_TX_SIZE]);
+    let mut ota_sock = tcp::Socket::new(ota_rx, ota_tx);
+    if let Err(e) = ota_sock.listen(OTA_PORT) {
+        println!("[ota] ERROR listen({}): {:?}", OTA_PORT, e);
+    }
+    let ota_handle = sockets.add(ota_sock);
+    let mut ota_receiving = false;
+
     let host_key = HostKey::from_seed(&crate::drivers::ssh::config::HOST_KEY_SEED);
 
     let mut ssh_conn = Connection::new(HwRng::new(rng));
@@ -335,6 +351,10 @@ pub fn net_task(_arg: usize) {
                             SSH_PORT, ip
                         );
                         println!("[ssh] host key: {}", host_key.fingerprint());
+                        println!(
+                            "[ota] recepción OTA en el puerto {} (probar: nc {} {} < firmware.bin)",
+                            OTA_PORT, ip, OTA_PORT
+                        );
                     }
                     have_ip = true;
                     set_status(WifiStatus::Connected);
@@ -400,6 +420,43 @@ pub fn net_task(_arg: usize) {
                         transport.close();
                         ssh_active = false;
                     }
+                }
+            }
+        }
+
+        {
+            let sock = sockets.get_mut::<tcp::Socket>(ota_handle);
+            if !sock.is_open() {
+                let _ = sock.listen(OTA_PORT);
+                ota_receiving = false;
+            }
+            if sock.is_active() {
+                if !ota_receiving {
+                    crate::ota::rx_begin();
+                    ota_receiving = true;
+                    println!("[ota] recibiendo imagen en el puerto {}...", OTA_PORT);
+                }
+                if sock.can_recv() {
+                    if let Ok(n) = sock.recv_slice(&mut buf) {
+                        if n > 0 {
+                            if let Err(e) = crate::ota::rx_push(&buf[..n]) {
+                                println!("[ota] ERROR al bufferear: {:?}", e);
+                                crate::ota::rx_clear();
+                                sock.close();
+                                ota_receiving = false;
+                            }
+                        }
+                    }
+                }
+                // El remoto cerró su lado de escritura: fin de la imagen.
+                if ota_receiving && !sock.may_recv() {
+                    let total = crate::ota::rx_len();
+                    println!(
+                        "[ota] imagen recibida: {} bytes. Flashea con 'ota apply' (mejor por consola).",
+                        total
+                    );
+                    sock.close();
+                    ota_receiving = false;
                 }
             }
         }

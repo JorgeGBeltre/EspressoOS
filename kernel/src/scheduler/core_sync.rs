@@ -45,7 +45,6 @@ pub fn current_core_id() -> usize {
 #[cfg(feature = "smp")]
 mod imp {
     use super::*;
-    use crate::arch::xtensa::timer::uptime_ms;
     use esp_hal::cpu_control::{CpuControl, Stack};
     use esp_hal::peripherals::CPU_CTRL;
     use esp_println::println;
@@ -70,23 +69,33 @@ mod imp {
         }
     }
 
-    /// Punto de entrada del núcleo 1. Bucle dedicado con heartbeat por segundo.
+    /// Punto de entrada del núcleo 1: entra a su planificador y ejecuta las
+    /// tareas encoladas en `ready1` (p. ej. `worker_entry`). No retorna.
     fn app_core_main() {
-        let mut last = 0u64;
-        loop {
-            let now = uptime_ms();
-            if now.wrapping_sub(last) >= 1000 {
-                last = now;
-                let t = CORE1_TICKS.fetch_add(1, Ordering::AcqRel) + 1;
-                println!(
-                    "[smp] core{} vivo tick={} uptime={}ms",
-                    super::current_core_id(),
-                    t,
-                    now
-                );
-            }
-            core::hint::spin_loop();
+        crate::scheduler::run_secondary();
+    }
+}
+
+/// Tarea de demostración que corre EN el núcleo 1 (encolada con `spawn_core1`).
+/// Incrementa el contador compartido e imprime su núcleo: si aparece `core1`,
+/// prueba que el planificador reparte tareas al segundo núcleo.
+#[cfg(feature = "smp")]
+pub fn worker_entry(_arg: usize) {
+    use esp_println::println;
+    let mut last = 0u64;
+    loop {
+        let now = crate::arch::xtensa::timer::uptime_ms();
+        if now.wrapping_sub(last) >= 1000 {
+            last = now;
+            let t = CORE1_TICKS.fetch_add(1, Ordering::AcqRel) + 1;
+            println!(
+                "[smp] tarea worker en core{} tick={} uptime={}ms",
+                current_core_id(),
+                t,
+                now
+            );
         }
+        crate::scheduler::yield_now();
     }
 }
 

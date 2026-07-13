@@ -58,6 +58,10 @@ use smoltcp::socket::{dhcpv4, tcp};
 use smoltcp::time::Instant;
 use smoltcp::wire::{EthernetAddress, HardwareAddress, IpCidr};
 
+// -- Servidor SSH sobre el mismo stack smoltcp (listener en el puerto 22). --
+use crate::drivers::ssh::crypto_rng::HwRng;
+use crate::drivers::ssh::{Connection, HostKey, Transport, SSH_PORT};
+
 // ============================================================================
 // Parámetros.
 // ============================================================================
@@ -71,6 +75,34 @@ const ECHO_TX_SIZE: usize = 2048;
 const ECHO_CHUNK: usize = 512;
 /// Periodo del chequeo de enlace/reconexión (ms).
 const LINK_CHECK_MS: u64 = 5_000;
+
+/// Búferes RX/TX del socket SSH (puerto 22). En el MVP los paquetes SSH son
+/// pequeños (kex + datos de canal), así que 4 KB por sentido bastan.
+const SSH_RX_SIZE: usize = 4096;
+const SSH_TX_SIZE: usize = 4096;
+
+/// Adaptador `Transport` (lo consume la máquina de estados SSH) sobre un socket
+/// TCP de smoltcp. `Ok(0)` = sin datos / sin sitio ahora (NO bloqueante).
+struct TcpTransport<'s> {
+    sock: &'s mut tcp::Socket<'static>,
+}
+impl<'s> Transport for TcpTransport<'s> {
+    fn read(&mut self, buf: &mut [u8]) -> KResult<usize> {
+        if !self.sock.can_recv() {
+            return Ok(0);
+        }
+        self.sock.recv_slice(buf).map_err(|_| KError::IoError)
+    }
+    fn write(&mut self, buf: &[u8]) -> KResult<usize> {
+        if !self.sock.can_send() {
+            return Ok(0);
+        }
+        self.sock.send_slice(buf).map_err(|_| KError::IoError)
+    }
+    fn close(&mut self) {
+        self.sock.close();
+    }
+}
 
 // ============================================================================
 // Estado del enlace — visible por `status()` (lectura sin bloqueo).
@@ -308,6 +340,23 @@ pub fn net_task(_arg: usize) {
     }
     let echo_handle = sockets.add(echo);
 
+    // -- Servidor SSH: socket en escucha en el puerto 22. --
+    let ssh_rx = tcp::SocketBuffer::new(alloc::vec![0u8; SSH_RX_SIZE]);
+    let ssh_tx = tcp::SocketBuffer::new(alloc::vec![0u8; SSH_TX_SIZE]);
+    let mut ssh_sock = tcp::Socket::new(ssh_rx, ssh_tx);
+    if let Err(e) = ssh_sock.listen(SSH_PORT) {
+        println!("[ssh] ERROR listen({}): {:?}", SSH_PORT, e);
+    }
+    let ssh_handle = sockets.add(ssh_sock);
+
+    // Host key ed25519 (generada al arranque con el TRNG; la radio está activa
+    // aquí, así que HwRng es un CSPRNG válido). Se imprime su huella para known_hosts.
+    let mut ssh_seed_rng = HwRng::new(rng);
+    let host_key = HostKey::generate(&mut ssh_seed_rng);
+    // Máquina de estados de la conexión SSH (una a la vez en el MVP).
+    let mut ssh_conn = Connection::new(HwRng::new(rng));
+    let mut ssh_active = false;
+
     // -- 9. Bucle principal de red: poll + DHCP + eco, cediendo la CPU. --
     let mut have_ip = false;
     let mut next_link_check = uptime_ms().saturating_add(LINK_CHECK_MS);
@@ -342,6 +391,11 @@ pub fn net_task(_arg: usize) {
                             "[net] servidor de ECO TCP escuchando en el puerto {} (probar: nc {} {})",
                             ECHO_PORT, ip, ECHO_PORT
                         );
+                        println!(
+                            "[ssh] servidor SSH en el puerto {} (probar: ssh root@{})",
+                            SSH_PORT, ip
+                        );
+                        println!("[ssh] host key: {}", host_key.fingerprint());
                     }
                     have_ip = true;
                     set_status(WifiStatus::Connected);
@@ -379,6 +433,28 @@ pub fn net_task(_arg: usize) {
             // El peer cerró su mitad (FIN): cerramos la nuestra para reciclar.
             if sock.may_send() && !sock.may_recv() {
                 sock.close();
+            }
+        }
+
+        // (c-bis) Servidor SSH: conduce la máquina de estados sobre el socket:22.
+        {
+            let sock = sockets.get_mut::<tcp::Socket>(ssh_handle);
+            // Tras cerrarse una sesión, volver a escuchar y marcar inactiva.
+            if !sock.is_open() {
+                let _ = sock.listen(SSH_PORT);
+                ssh_active = false;
+            }
+            if sock.is_active() {
+                // Cliente nuevo -> arranca una máquina de estados SSH fresca.
+                if !ssh_active {
+                    ssh_conn = Connection::new(HwRng::new(rng));
+                    ssh_active = true;
+                }
+                let mut transport = TcpTransport { sock };
+                // `pump` hace TODO el trabajo disponible sin bloquear y regresa.
+                if ssh_conn.pump(&mut transport, &host_key).is_err() {
+                    transport.close(); // error de protocolo -> cerrar y reiniciar
+                }
             }
         }
 

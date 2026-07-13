@@ -35,6 +35,27 @@ fn ct_eq(a: &[u8], b: &[u8]) -> bool {
 }
 
 pub fn check_password(user: &str, password: &[u8]) -> AuthResult {
+    if let Ok(inode) = crate::vfs::mount::resolve("/etc/passwd") {
+        let mut buf = [0u8; 512];
+        if let Ok(n) = inode.read_at(0, &mut buf) {
+            if let Ok(content) = core::str::from_utf8(&buf[..n]) {
+                for line in content.lines() {
+                    let line = line.trim();
+                    if line.is_empty() || line.starts_with('#') {
+                        continue;
+                    }
+                    let mut parts = line.split(':');
+                    if let (Some(u), Some(p)) = (parts.next(), parts.next()) {
+                        let u_trimmed = u.trim();
+                        let p_trimmed = p.trim();
+                        if user == u_trimmed && ct_eq(password, p_trimmed.as_bytes()) {
+                            return AuthResult::Success;
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     let user_ok = user.as_bytes() == config::DEV_USER.as_bytes();
     let pass_ok = ct_eq(password, config::DEV_PASSWORD);

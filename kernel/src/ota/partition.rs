@@ -123,7 +123,11 @@ impl OtaSelectEntry {
     }
 
     pub fn is_valid(&self) -> bool {
-        self.ota_seq != OTA_SEQ_EMPTY && self.ota_seq != 0 && self.crc == self.compute_crc()
+        self.ota_seq != OTA_SEQ_EMPTY 
+            && self.ota_seq != 0 
+            && self.crc == self.compute_crc()
+            && self.ota_state != OtaImgState::Invalid.as_raw()
+            && self.ota_state != OtaImgState::Aborted.as_raw()
     }
 
     pub fn to_bytes(&self) -> [u8; OTA_SELECT_ENTRY_SIZE] {
@@ -291,4 +295,25 @@ pub fn set_boot_slot(slot: Slot) -> KResult<()> {
 
     let entry = OtaSelectEntry::new(new_seq, OtaImgState::New);
     write_otadata_copy(write_copy, &entry)
+}
+
+pub fn get_state() -> KResult<OtaImgState> {
+    let entries = read_otadata()?;
+    if let Some(idx) = select_active_index(&entries) {
+        Ok(OtaImgState::from_raw(entries[idx].ota_state))
+    } else {
+        Err(KError::NotFound)
+    }
+}
+
+pub fn set_state(state: OtaImgState) -> KResult<()> {
+    let entries = read_otadata()?;
+    if let Some(idx) = select_active_index(&entries) {
+        let mut entry = entries[idx];
+        entry.ota_state = state.as_raw();
+        entry.crc = entry.compute_crc();
+        write_otadata_copy(idx, &entry)
+    } else {
+        Err(KError::NotFound)
+    }
 }

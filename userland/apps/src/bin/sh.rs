@@ -34,35 +34,35 @@ pub extern "C" fn main() -> i32 {
         }
         
         if let Ok(cmd) = core::str::from_utf8(&buf[0..len]) {
+            let cmd = cmd.trim();
             if cmd == "exit" {
                 println!("Saliendo de la shell...");
                 break;
-            } else if cmd == "ls" {
-                let pid = spawn("/bin/ls", 0, 0, 0, 0);
-                if pid >= 0 {
-                    let mut status = 0;
-                    let _ = wait(&mut status);
-                } else {
-                    println!("Error al ejecutar ls");
-                }
-            } else if cmd == "cat" {
-                let pid = spawn("/bin/cat", 0, 0, 0, 0);
-                if pid >= 0 {
-                    let mut status = 0;
-                    let _ = wait(&mut status);
-                } else {
-                    println!("Error al ejecutar cat");
-                }
-            } else if cmd == "echo" {
-                let pid = spawn("/bin/echo", 0, 0, 0, 0);
-                if pid >= 0 {
-                    let mut status = 0;
-                    let _ = wait(&mut status);
-                } else {
-                    println!("Error al ejecutar echo");
-                }
+            }
+            
+            let mut path_buf = [0u8; 64];
+            let path = if cmd.starts_with('/') {
+                cmd
             } else {
-                println!("Comando desconocido: {}", cmd);
+                let prefix = b"/bin/";
+                let cmd_bytes = cmd.as_bytes();
+                if prefix.len() + cmd_bytes.len() < path_buf.len() {
+                    path_buf[..prefix.len()].copy_from_slice(prefix);
+                    path_buf[prefix.len()..prefix.len() + cmd_bytes.len()].copy_from_slice(cmd_bytes);
+                    core::str::from_utf8(&path_buf[..prefix.len() + cmd_bytes.len()]).unwrap_or("")
+                } else {
+                    ""
+                }
+            };
+            
+            if !path.is_empty() {
+                let pid = spawn(path, 0, 0, 0, 0);
+                if pid >= 0 {
+                    let mut status = 0;
+                    let _ = wait(&mut status);
+                } else {
+                    println!("Error al ejecutar: {}", cmd);
+                }
             }
         }
     }

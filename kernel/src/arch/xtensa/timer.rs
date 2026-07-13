@@ -72,6 +72,8 @@ pub fn init() {
 
 }
 
+pub static SYSTEM_TIME_OFFSET_US: Mutex<u64> = Mutex::new(0);
+
 pub fn uptime_ms() -> u64 {
 
     esp_hal::time::now().duration_since_epoch().to_millis()

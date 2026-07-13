@@ -1,9 +1,12 @@
 use crate::prelude::*;
 use super::inode::{Inode, InodeKind, DirEntry};
 use smoltcp::iface::SocketHandle;
+use crate::arch::xtensa::sync::Mutex as KMutex;
 
 pub struct SocketInode {
     pub handle: SocketHandle,
+    pub is_udp: bool,
+    pub remote_endpoint: KMutex<Option<smoltcp::wire::IpEndpoint>>,
 }
 
 impl Inode for SocketInode {
@@ -19,20 +22,36 @@ impl Inode for SocketInode {
         Some(self.handle)
     }
 
+    fn is_udp_socket(&self) -> bool {
+        self.is_udp
+    }
+
+    fn set_socket_remote_endpoint(&self, endpoint: smoltcp::wire::IpEndpoint) -> KResult<()> {
+        *self.remote_endpoint.lock() = Some(endpoint);
+        Ok(())
+    }
+
     fn read_at(&self, _off: u64, buf: &mut [u8]) -> KResult<usize> {
         loop {
             let mut guard = crate::drivers::wifi::NET_SOCKETS.lock();
             if let Some(sockets) = guard.as_mut() {
-                let sock = sockets.get_mut::<smoltcp::socket::tcp::Socket>(self.handle);
-                
-                if sock.can_recv() {
-                    if let Ok(n) = sock.recv_slice(buf) {
-                        return Ok(n);
+                if self.is_udp {
+                    let sock = sockets.get_mut::<smoltcp::socket::udp::Socket>(self.handle);
+                    if sock.can_recv() {
+                        if let Ok((n, _remote_ep)) = sock.recv_slice(buf) {
+                            return Ok(n);
+                        }
                     }
-                }
-                
-                if !sock.is_open() || sock.state() == smoltcp::socket::tcp::State::CloseWait {
-                    return Ok(0);
+                } else {
+                    let sock = sockets.get_mut::<smoltcp::socket::tcp::Socket>(self.handle);
+                    if sock.can_recv() {
+                        if let Ok(n) = sock.recv_slice(buf) {
+                            return Ok(n);
+                        }
+                    }
+                    if !sock.is_open() || sock.state() == smoltcp::socket::tcp::State::CloseWait {
+                        return Ok(0);
+                    }
                 }
             }
             drop(guard);
@@ -44,16 +63,28 @@ impl Inode for SocketInode {
         loop {
             let mut guard = crate::drivers::wifi::NET_SOCKETS.lock();
             if let Some(sockets) = guard.as_mut() {
-                let sock = sockets.get_mut::<smoltcp::socket::tcp::Socket>(self.handle);
-                
-                if sock.can_send() {
-                    if let Ok(n) = sock.send_slice(buf) {
-                        return Ok(n);
+                if self.is_udp {
+                    let sock = sockets.get_mut::<smoltcp::socket::udp::Socket>(self.handle);
+                    let ep_guard = self.remote_endpoint.lock();
+                    if let Some(ep) = *ep_guard {
+                        if sock.can_send() {
+                            if let Ok(_) = sock.send_slice(buf, ep) {
+                                return Ok(buf.len());
+                            }
+                        }
+                    } else {
+                        return Err(KError::InvalidArgument);
                     }
-                }
-                
-                if !sock.is_open() {
-                    return Err(KError::IoError);
+                } else {
+                    let sock = sockets.get_mut::<smoltcp::socket::tcp::Socket>(self.handle);
+                    if sock.can_send() {
+                        if let Ok(n) = sock.send_slice(buf) {
+                            return Ok(n);
+                        }
+                    }
+                    if !sock.is_open() {
+                        return Err(KError::IoError);
+                    }
                 }
             }
             drop(guard);
@@ -82,8 +113,10 @@ impl Drop for SocketInode {
     fn drop(&mut self) {
         let mut guard = crate::drivers::wifi::NET_SOCKETS.lock();
         if let Some(sockets) = guard.as_mut() {
-            let sock = sockets.get_mut::<smoltcp::socket::tcp::Socket>(self.handle);
-            sock.close();
+            if !self.is_udp {
+                let sock = sockets.get_mut::<smoltcp::socket::tcp::Socket>(self.handle);
+                sock.close();
+            }
             sockets.remove(self.handle);
         }
     }

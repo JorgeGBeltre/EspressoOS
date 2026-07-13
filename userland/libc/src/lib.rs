@@ -117,6 +117,53 @@ pub fn yield_now() {
     unsafe { syscall(14, 0, 0, 0, 0, 0, 0); }
 }
 
+#[repr(C)]
+pub struct timeval {
+    pub tv_sec: i32,
+    pub tv_usec: i32,
+}
+
+pub fn gettimeofday(tv: &mut timeval) -> isize {
+    unsafe { syscall(23, tv as *mut timeval as usize, 0, 0, 0, 0, 0) }
+}
+
+pub fn settimeofday(tv: &timeval) -> isize {
+    unsafe { syscall(24, tv as *const timeval as usize, 0, 0, 0, 0, 0) }
+}
+
+#[repr(C)]
+pub struct sockaddr_in {
+    pub sin_family: u16,
+    pub sin_port: u16,
+    pub sin_addr: u32,
+    pub sin_zero: [u8; 8],
+}
+
+pub fn socket(domain: i32, ty: i32, protocol: i32) -> isize {
+    unsafe { syscall(18, domain as usize, ty as usize, protocol as usize, 0, 0, 0) }
+}
+
+pub fn bind(fd: i32, addr: &sockaddr_in) -> isize {
+    unsafe { syscall(19, fd as usize, addr as *const sockaddr_in as usize, core::mem::size_of::<sockaddr_in>(), 0, 0, 0) }
+}
+
+pub fn listen(fd: i32, backlog: i32) -> isize {
+    unsafe { syscall(20, fd as usize, backlog as usize, 0, 0, 0, 0) }
+}
+
+pub fn accept(fd: i32, addr: &mut sockaddr_in) -> isize {
+    let mut len = core::mem::size_of::<sockaddr_in>();
+    unsafe { syscall(21, fd as usize, addr as *mut sockaddr_in as usize, &mut len as *mut usize as usize, 0, 0, 0) }
+}
+
+pub fn connect(fd: i32, addr: &sockaddr_in) -> isize {
+    unsafe { syscall(22, fd as usize, addr as *const sockaddr_in as usize, core::mem::size_of::<sockaddr_in>(), 0, 0, 0) }
+}
+
+pub fn ota_state(op: usize, state: usize) -> isize {
+    unsafe { syscall(25, op, state, 0, 0, 0, 0) }
+}
+
 pub fn signal(sig: i32, handler: usize, restorer: usize) -> isize {
     #[repr(C)]
     struct Sigaction {

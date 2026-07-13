@@ -49,6 +49,12 @@ pub enum Syscall {
     Accept = 21,
 
     Connect = 22,
+
+    GetTimeOfDay = 23,
+
+    SetTimeOfDay = 24,
+
+    OtaState = 25,
 }
 
 impl Syscall {
@@ -78,6 +84,9 @@ impl Syscall {
             20 => Syscall::Listen,
             21 => Syscall::Accept,
             22 => Syscall::Connect,
+            23 => Syscall::GetTimeOfDay,
+            24 => Syscall::SetTimeOfDay,
+            25 => Syscall::OtaState,
             _ => return None,
         };
         Some(sc)

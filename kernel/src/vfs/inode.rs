@@ -36,6 +36,14 @@ pub trait Inode: Send + Sync {
         None
     }
 
+    fn is_udp_socket(&self) -> bool {
+        false
+    }
+
+    fn set_socket_remote_endpoint(&self, _endpoint: smoltcp::wire::IpEndpoint) -> KResult<()> {
+        Err(KError::NotSupported)
+    }
+
     fn read_at(&self, off: u64, buf: &mut [u8]) -> KResult<usize>;
 
     fn write_at(&self, off: u64, buf: &[u8]) -> KResult<usize>;

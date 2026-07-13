@@ -189,3 +189,11 @@ pub fn apply_buffered() -> KResult<Slot> {
     validate_header(&image)?;
     apply_image(&image)
 }
+
+pub fn get_state() -> KResult<OtaImgState> {
+    partition::get_state()
+}
+
+pub fn set_state(state: OtaImgState) -> KResult<()> {
+    partition::set_state(state)
+}

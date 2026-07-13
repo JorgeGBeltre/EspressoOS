@@ -38,6 +38,9 @@ pub fn dispatch(
         Syscall::Listen => sys_listen(args),
         Syscall::Accept => sys_accept(args),
         Syscall::Connect => sys_connect(args),
+        Syscall::GetTimeOfDay => sys_gettimeofday(args),
+        Syscall::SetTimeOfDay => sys_settimeofday(args),
+        Syscall::OtaState => sys_ota_state(args),
     }
 }
 
@@ -480,13 +483,11 @@ fn sys_socket(args: &[usize]) -> isize {
     let ty = arg(args, 1) as i32;
     let _proto = arg(args, 2) as i32;
     
-    if domain != 2 || ty != 1 {
+    if domain != 2 || (ty != 1 && ty != 2) {
         return KError::NotSupported.as_errno();
     }
     
-    let rx_buf = smoltcp::socket::tcp::SocketBuffer::new(alloc::vec![0; 4096]);
-    let tx_buf = smoltcp::socket::tcp::SocketBuffer::new(alloc::vec![0; 4096]);
-    let socket = smoltcp::socket::tcp::Socket::new(rx_buf, tx_buf);
+    let is_udp = ty == 2;
     
     let mut guard = crate::drivers::wifi::NET_SOCKETS.lock();
     let sockets = match guard.as_mut() {
@@ -494,10 +495,28 @@ fn sys_socket(args: &[usize]) -> isize {
         None => return KError::IoError.as_errno(),
     };
     
-    let handle = sockets.add(socket);
+    let handle = if is_udp {
+        let rx_meta = alloc::vec![smoltcp::socket::udp::PacketMetadata::EMPTY; 8];
+        let rx_data = alloc::vec![0; 2048];
+        let tx_meta = alloc::vec![smoltcp::socket::udp::PacketMetadata::EMPTY; 8];
+        let tx_data = alloc::vec![0; 2048];
+        let rx_buf = smoltcp::socket::udp::PacketBuffer::new(rx_meta, rx_data);
+        let tx_buf = smoltcp::socket::udp::PacketBuffer::new(tx_meta, tx_data);
+        let socket = smoltcp::socket::udp::Socket::new(rx_buf, tx_buf);
+        sockets.add(socket)
+    } else {
+        let rx_buf = smoltcp::socket::tcp::SocketBuffer::new(alloc::vec![0; 4096]);
+        let tx_buf = smoltcp::socket::tcp::SocketBuffer::new(alloc::vec![0; 4096]);
+        let socket = smoltcp::socket::tcp::Socket::new(rx_buf, tx_buf);
+        sockets.add(socket)
+    };
     drop(guard);
     
-    let socket_inode = Arc::new(crate::vfs::socket::SocketInode { handle });
+    let socket_inode = Arc::new(crate::vfs::socket::SocketInode {
+        handle,
+        is_udp,
+        remote_endpoint: crate::arch::xtensa::sync::Mutex::new(None),
+    });
     
     let open_file = match crate::vfs::OpenFile::new(socket_inode, crate::vfs::OpenFlags::RDWR) {
         Ok(f) => f,
@@ -533,19 +552,25 @@ fn sys_connect(args: &[usize]) -> isize {
     
     let addr = unsafe { &*addr_ptr };
     
-    let handle = match crate::vfs::get_inode(fd) {
-        Ok(inode) => {
-            if let Some(h) = inode.as_socket() {
-                h
-            } else {
-                return KError::InvalidArgument.as_errno();
-            }
-        }
+    let inode = match crate::vfs::get_inode(fd) {
+        Ok(inod) => inod,
         Err(e) => return e.as_errno(),
+    };
+    
+    let handle = match inode.as_socket() {
+        Some(h) => h,
+        None => return KError::InvalidArgument.as_errno(),
     };
     
     let port = u16::from_be(addr.sin_port);
     let ip_bytes = addr.sin_addr.to_ne_bytes();
+    let remote_addr = smoltcp::wire::IpAddress::Ipv4(smoltcp::wire::Ipv4Address::from_octets(ip_bytes));
+    let remote_endpoint = smoltcp::wire::IpEndpoint::new(remote_addr, port);
+    
+    if inode.is_udp_socket() {
+        let _ = inode.set_socket_remote_endpoint(remote_endpoint);
+        return 0;
+    }
     
     let cmd = crate::drivers::wifi::NetCmd::Connect {
         handle,
@@ -584,4 +609,76 @@ fn sys_listen(_args: &[usize]) -> isize {
 
 fn sys_accept(_args: &[usize]) -> isize {
     0
+}
+
+#[repr(C)]
+struct timeval {
+    tv_sec: i32,
+    tv_usec: i32,
+}
+
+fn sys_gettimeofday(args: &[usize]) -> isize {
+    let tv_ptr = arg(args, 0) as *mut timeval;
+    if tv_ptr.is_null() {
+        return KError::InvalidArgument.as_errno();
+    }
+    
+    let uptime_us = esp_hal::time::now().duration_since_epoch().to_micros();
+    let offset_us = *crate::arch::xtensa::timer::SYSTEM_TIME_OFFSET_US.lock();
+    let total_us = uptime_us.saturating_add(offset_us);
+    
+    let sec = (total_us / 1_000_000) as i32;
+    let usec = (total_us % 1_000_000) as i32;
+    
+    unsafe {
+        (*tv_ptr).tv_sec = sec;
+        (*tv_ptr).tv_usec = usec;
+    }
+    0
+}
+
+fn sys_settimeofday(args: &[usize]) -> isize {
+    let tv_ptr = arg(args, 0) as *const timeval;
+    if tv_ptr.is_null() {
+        return KError::InvalidArgument.as_errno();
+    }
+    
+    let tv = unsafe { &*tv_ptr };
+    let new_total_us = (tv.tv_sec as u64)
+        .saturating_mul(1_000_000)
+        .saturating_add(tv.tv_usec as u64);
+        
+    let uptime_us = esp_hal::time::now().duration_since_epoch().to_micros();
+    let new_offset_us = new_total_us.saturating_sub(uptime_us);
+    
+    *crate::arch::xtensa::timer::SYSTEM_TIME_OFFSET_US.lock() = new_offset_us;
+    0
+}
+
+fn sys_ota_state(args: &[usize]) -> isize {
+    let op = arg(args, 0);
+    if op == 0 {
+        match crate::ota::get_state() {
+            Ok(state) => state.as_raw() as isize,
+            Err(e) => e.as_errno(),
+        }
+    } else if op == 1 {
+        let state_raw = arg(args, 1) as u32;
+        let state = crate::ota::OtaImgState::from_raw(state_raw);
+        match crate::ota::set_state(state) {
+            Ok(()) => {
+                if state_raw == crate::ota::OtaImgState::Invalid.as_raw() 
+                    || state_raw == crate::ota::OtaImgState::Aborted.as_raw() {
+                    crate::println!("[kernel] Particion marcada como invalida/abortada. Reiniciando...");
+                    unsafe {
+                        esp_hal::reset::software_reset();
+                    }
+                }
+                0
+            }
+            Err(e) => e.as_errno(),
+        }
+    } else {
+        KError::InvalidArgument.as_errno()
+    }
 }

@@ -31,6 +31,7 @@ pub struct Task {
     pub stack_size: usize,
     pub exit_code: i32,
     pub is_user: bool,
+    pub affinity: Option<usize>,
 
     pub(super) start_entry: fn(usize),
 
@@ -78,6 +79,7 @@ impl Task {
             stack_size: size,
             exit_code: 0,
             is_user: false,
+            affinity: None,
             start_entry: entry,
             start_arg: arg,
         }))

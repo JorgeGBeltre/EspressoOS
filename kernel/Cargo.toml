@@ -60,6 +60,7 @@ esp-alloc     = { version = "0.6.0" }
 # `fugit::HertzU32` lo usa drivers::spi directamente (Config::with_frequency).
 # Dependencia directa porque el módulo lo importa por su ruta (`fugit::...`).
 fugit = "0.3"
+nb = "1.1"
 
 # --- Backend de flash NOR (drivers::flash -> FS/OTA) ------------------------
 # esp-storage implementa los traits embedded-storage/NorFlash sobre las rutinas

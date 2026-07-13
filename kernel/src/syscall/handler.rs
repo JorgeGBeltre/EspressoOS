@@ -141,8 +141,17 @@ fn sys_close(args: &[usize]) -> isize {
     ret_unit(crate::vfs::close(fd))
 }
 
-fn sys_ioctl(_args: &[usize]) -> isize {
-    KError::NotSupported.as_errno()
+fn sys_ioctl(args: &[usize]) -> isize {
+    let fd = arg(args, 0) as Fd;
+    let cmd = arg(args, 1) as u32;
+    let val = arg(args, 2);
+    match crate::vfs::get_inode(fd) {
+        Ok(inode) => match inode.ioctl(cmd, val) {
+            Ok(ret) => ret as isize,
+            Err(e) => e.as_errno(),
+        },
+        Err(e) => e.as_errno(),
+    }
 }
 
 fn sys_exit(args: &[usize]) -> isize {

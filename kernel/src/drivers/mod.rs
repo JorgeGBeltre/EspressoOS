@@ -5,3 +5,6 @@ pub mod spi;
 pub mod ssh;
 pub mod uart;
 pub mod wifi;
+pub mod power;
+pub mod device;
+pub mod crypto;

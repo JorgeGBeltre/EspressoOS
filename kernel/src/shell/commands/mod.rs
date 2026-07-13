@@ -182,6 +182,8 @@ pub fn dispatch(name: &str, args: &[&str]) -> i32 {
         "syscalltest" => cmd_syscalltest(),
         "smp" => cmd_smp(),
         "pms" => cmd_pms(args),
+        "power" => cmd_power(args),
+        "sha256" => cmd_sha256(args),
         "" => 0,
         other => {
             eprint_line(&format!("shell: comando no encontrado: {}", other));
@@ -238,6 +240,8 @@ fn cmd_help(_args: &[&str]) -> i32 {
     emit_line("  syscalltest           ejercita la ABI de syscalls");
     emit_line("  smp                   estado del multinúcleo (SMP)");
     emit_line("  pms [world1]          protección de memoria (PMS)");
+    emit_line("  power sleep|deep-sleep [segundos]  gestión de energía");
+    emit_line("  sha256 [texto]        hashing SHA-256 por hardware");
     emit_line("");
     emit_line("Redirección: '> archivo' (trunca) y '>> archivo' (añade).");
     0
@@ -795,7 +799,7 @@ fn cmd_pms(args: &[&str]) -> i32 {
     match args.first().copied() {
         Some("world1") => {
             emit_line("PMS: aplicando restricción de World-1 (experimental)...");
-            match crate::mm::mpu::protect_world1() {
+            match crate::mm::mpu::protect_world1_wx() {
                 Some(s) => {
                     emit_line(&s);
                     0
@@ -817,6 +821,36 @@ fn cmd_pms(args: &[&str]) -> i32 {
             }
         },
     }
+}
+
+fn cmd_power(args: &[&str]) -> i32 {
+    let mode = args.first().copied();
+    let secs = args.get(1).and_then(|s| s.parse::<u64>().ok()).unwrap_or(5);
+
+    match mode {
+        Some("sleep") => {
+            crate::drivers::power::enter_light_sleep(secs);
+            0
+        }
+        Some("deep-sleep") => {
+            crate::drivers::power::enter_deep_sleep(secs);
+        }
+        _ => {
+            eprint_line("uso: power sleep [segundos] | power deep-sleep [segundos]");
+            1
+        }
+    }
+}
+
+fn cmd_sha256(args: &[&str]) -> i32 {
+    let input = args.first().copied().unwrap_or("hello");
+    let hash = crate::drivers::crypto::sha256(input.as_bytes());
+    let mut hex = String::new();
+    for &b in &hash {
+        hex.push_str(&format!("{:02x}", b));
+    }
+    emit_line(&format!("SHA256(\"{}\") = {}", input, hex));
+    0
 }
 
 fn err_str(e: KError) -> &'static str {

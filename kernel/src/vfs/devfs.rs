@@ -135,6 +135,10 @@ impl Inode for DevNode {
         Ok(())
     }
 
+    fn ioctl(&self, cmd: u32, arg: usize) -> KResult<usize> {
+        self.dev.ioctl(cmd, arg)
+    }
+
 }
 
 pub fn register(devfs: &Arc<DevFs>, name: &str, dev: Arc<dyn Device>) -> KResult<()> {

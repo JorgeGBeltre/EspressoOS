@@ -823,6 +823,7 @@ dependencies = [
  "esp-storage",
  "esp-wifi",
  "fugit",
+ "nb 1.1.0",
  "poly1305",
  "rand_core",
  "sha2",

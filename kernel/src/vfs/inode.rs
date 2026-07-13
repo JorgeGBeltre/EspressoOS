@@ -52,6 +52,10 @@ pub trait Inode: Send + Sync {
         Err(KError::NotSupported)
     }
 
+    fn ioctl(&self, _cmd: u32, _arg: usize) -> KResult<usize> {
+        Err(KError::NotSupported)
+    }
+
     fn readdir(&self, _index: usize) -> KResult<Option<DirEntry>> {
         Err(KError::NotADirectory)
     }

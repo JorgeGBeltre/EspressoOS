@@ -32,18 +32,12 @@ struct Scheduler {
 
     slice_remaining: u32,
 
-    // --- Estado del núcleo 1 (SMP). Sólo existe con la feature `smp`; el camino
-    // mono-núcleo por defecto queda intacto. El core 1 usa su PROPIA cola
-    // (`ready1`) para no arrastrar la tarea de WiFi (esp-wifi tiene afinidad al
-    // core 0); `tasks` y el lock sí son compartidos. ---
+    // --- Estado del núcleo 1 (SMP). Sólo existe con la feature `smp`. ---
     #[cfg(feature = "smp")]
     current1: Tid,
 
     #[cfg(feature = "smp")]
     idle1: Tid,
-
-    #[cfg(feature = "smp")]
-    ready1: Vec<Tid>,
 }
 
 impl Scheduler {
@@ -85,18 +79,27 @@ static SCHED: Mutex<Option<Scheduler>> = Mutex::new(None);
 
 use core::sync::atomic::{AtomicBool, Ordering};
 
-static NEED_RESCHED: AtomicBool = AtomicBool::new(false);
+static NEED_RESCHED: [AtomicBool; 2] = [AtomicBool::new(false), AtomicBool::new(false)];
 
 pub fn set_need_resched() {
-    NEED_RESCHED.store(true, Ordering::Relaxed);
+    let core = core_id();
+    NEED_RESCHED[core].store(true, Ordering::Relaxed);
+}
+
+pub fn set_need_resched_core(core: usize) {
+    if core < 2 {
+        NEED_RESCHED[core].store(true, Ordering::Relaxed);
+    }
 }
 
 pub fn clear_need_resched() {
-    NEED_RESCHED.store(false, Ordering::Relaxed);
+    let core = core_id();
+    NEED_RESCHED[core].store(false, Ordering::Relaxed);
 }
 
 pub fn need_resched() -> bool {
-    NEED_RESCHED.load(Ordering::Relaxed)
+    let core = core_id();
+    NEED_RESCHED[core].load(Ordering::Relaxed)
 }
 
 fn with_sched<R>(f: impl FnOnce(&mut Scheduler) -> R) -> Option<R> {
@@ -123,13 +126,13 @@ pub fn init() {
             current1: IDLE_TID,
             #[cfg(feature = "smp")]
             idle1: IDLE_TID,
-            #[cfg(feature = "smp")]
-            ready1: Vec::new(),
         };
 
         if let Ok(idle) = Task::new(IDLE_TID, "idle", idle_entry, 0, layout::DEFAULT_STACK_SIZE, 0)
         {
-            sched.tasks.insert(IDLE_TID, idle);
+            let mut t = idle;
+            t.affinity = Some(0);
+            sched.tasks.insert(IDLE_TID, t);
         }
 
         // Bajo SMP, el núcleo 1 tiene su propia tarea idle.
@@ -140,7 +143,9 @@ pub fn init() {
             if let Ok(idle1) =
                 Task::new(idle1_tid, "idle1", idle_entry, 0, layout::DEFAULT_STACK_SIZE, 0)
             {
-                sched.tasks.insert(idle1_tid, idle1);
+                let mut t = idle1;
+                t.affinity = Some(1);
+                sched.tasks.insert(idle1_tid, t);
             }
             sched.idle1 = idle1_tid;
             sched.current1 = idle1_tid;
@@ -172,7 +177,10 @@ pub fn spawn(
         None => return Err(KError::NotSupported),
     };
 
-    let task = Task::new(tid, name, entry, arg, stack_size, priority)?;
+    let mut task = Task::new(tid, name, entry, arg, stack_size, priority)?;
+    if name == "net" {
+        task.affinity = Some(0);
+    }
 
     let inserted = with_sched(|s| {
         s.tasks.insert(tid, task);
@@ -215,8 +223,6 @@ pub fn mark_zombie(code: i32) {
         }
 
         s.ready.retain(|x| *x != cur);
-        #[cfg(feature = "smp")]
-        s.ready1.retain(|x| *x != cur);
     });
 }
 
@@ -251,13 +257,16 @@ pub fn run() -> ! {
     {
         let mut guard = SCHED.lock();
         if let Some(s) = guard.as_mut() {
-            let first = policy::next_ready(s).unwrap_or(s.idle);
+            let first = policy::next_ready(s, 0).unwrap_or(s.idle);
             if let Some(t) = s.tasks.get_mut(&first) {
                 t.state = TaskState::Running;
             }
             s.current = first;
             s.slice_remaining = QUANTUM_TICKS;
             let task = s.tasks.get(&first).unwrap();
+            let base = task.stack_base as u32;
+            let top = (task.stack_base as usize + task.stack_size) as u32;
+            crate::mm::mpu::configure_stack_guard(0, base, top);
             target = Some((task.context.sp, task.is_user));
         }
     }
@@ -332,20 +341,14 @@ pub fn preempt_switch(save_frame: &mut esp_hal::xtensa_lx_rt::exception::Context
                 if let Some(t) = s.tasks.get_mut(&cur) {
                     t.state = TaskState::Ready;
                 }
-                #[cfg(feature = "smp")]
-                {
-                    if core == 1 {
+                if core == 1 {
+                    #[cfg(feature = "smp")]
+                    {
                         if cur != s.idle1 {
-                            s.ready1.push(cur);
-                        }
-                    } else {
-                        if cur != s.idle {
                             s.ready.push(cur);
                         }
                     }
-                }
-                #[cfg(not(feature = "smp"))]
-                {
+                } else {
                     if cur != s.idle {
                         s.ready.push(cur);
                     }
@@ -360,12 +363,12 @@ pub fn preempt_switch(save_frame: &mut esp_hal::xtensa_lx_rt::exception::Context
             // Elegir la siguiente tarea
             #[cfg(feature = "smp")]
             let next = if core == 1 {
-                if s.ready1.is_empty() { s.idle1 } else { s.ready1.remove(0) }
+                policy::next_ready(s, 1).unwrap_or(s.idle1)
             } else {
-                policy::next_ready(s).unwrap_or(s.idle)
+                policy::next_ready(s, 0).unwrap_or(s.idle)
             };
             #[cfg(not(feature = "smp"))]
-            let next = policy::next_ready(s).unwrap_or(s.idle);
+            let next = policy::next_ready(s, 0).unwrap_or(s.idle);
 
             if let Some(t) = s.tasks.get_mut(&next) {
                 t.state = TaskState::Running;
@@ -386,8 +389,12 @@ pub fn preempt_switch(save_frame: &mut esp_hal::xtensa_lx_rt::exception::Context
                 s.slice_remaining = QUANTUM_TICKS;
             }
 
+            let next_task = s.tasks.get(&next).unwrap();
+            let base = next_task.stack_base as u32;
+            let top = (next_task.stack_base as usize + next_task.stack_size) as u32;
+            crate::mm::mpu::configure_stack_guard(core, base, top);
+
             if next != cur {
-                let next_task = s.tasks.get(&next).unwrap();
                 next_sp = Some(next_task.context.sp);
                 crate::mm::mpu::prepare_world_switch(next_task.is_user, next_task.context.sp);
             }
@@ -399,10 +406,10 @@ pub fn preempt_switch(save_frame: &mut esp_hal::xtensa_lx_rt::exception::Context
 }
 
 // ===========================================================================
-// SMP (Fase 9, feature `smp`): planificación en el núcleo 1 desde su cola propia.
+// SMP (Fase 9, feature `smp`): planificación en el núcleo 1.
 // ===========================================================================
 
-/// Crea una tarea que se ejecutará en el **núcleo 1** (cola `ready1`).
+/// Crea una tarea que se ejecutará en el **núcleo 1**.
 #[cfg(feature = "smp")]
 pub fn spawn_core1(
     name: &str,
@@ -424,10 +431,11 @@ pub fn spawn_core1(
         Some(Err(e)) => return Err(e),
         None => return Err(KError::NotSupported),
     };
-    let task = Task::new(tid, name, entry, arg, stack_size, priority)?;
+    let mut task = Task::new(tid, name, entry, arg, stack_size, priority)?;
+    task.affinity = Some(1);
     let inserted = with_sched(|s| {
         s.tasks.insert(tid, task);
-        s.ready1.push(tid);
+        s.ready.push(tid);
     });
     match inserted {
         Some(()) => Ok(tid),
@@ -435,7 +443,7 @@ pub fn spawn_core1(
     }
 }
 
-/// Punto de entrada del núcleo 1: arranca el planificador de su cola. No retorna.
+/// Punto de entrada del núcleo 1: arranca el planificador. No retorna.
 #[cfg(feature = "smp")]
 pub fn run_secondary() -> ! {
     let _prev = interrupts::disable();
@@ -444,16 +452,16 @@ pub fn run_secondary() -> ! {
     {
         let mut guard = SCHED.lock();
         if let Some(s) = guard.as_mut() {
-            let first = if s.ready1.is_empty() {
-                s.idle1
-            } else {
-                s.ready1.remove(0)
-            };
+            let first = policy::next_ready(s, 1).unwrap_or(s.idle1);
             if let Some(t) = s.tasks.get_mut(&first) {
                 t.state = TaskState::Running;
             }
             s.current1 = first;
-            target = Some(s.tasks.get(&first).unwrap().context.sp);
+            let task = s.tasks.get(&first).unwrap();
+            let base = task.stack_base as u32;
+            let top = (task.stack_base as usize + task.stack_size) as u32;
+            crate::mm::mpu::configure_stack_guard(1, base, top);
+            target = Some(task.context.sp);
         }
     }
 
@@ -487,8 +495,6 @@ pub fn block_current() {
             t.state = TaskState::Blocked;
         }
         s.ready.retain(|x| *x != cur);
-        #[cfg(feature = "smp")]
-        s.ready1.retain(|x| *x != cur);
     });
     set_need_resched();
     yield_now();

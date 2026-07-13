@@ -62,6 +62,9 @@ fn main() -> ! {
         heap_psram_len, heap_psram_base, psram_base
     );
 
+    drivers::power::init(peripherals.LPWR);
+    drivers::device::init();
+
     if let Err(e) = drivers::uart::init() {
         println!("[kernel] aviso: drivers::uart::init fallo: {:?}", e);
     }

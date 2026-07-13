@@ -72,6 +72,57 @@ pub fn set_base_console() {
     *OUTPUT.lock() = Sink::Console;
 }
 
+// ===========================================================================
+// Directorio de trabajo (CWD) y resolución de rutas relativas.
+// El VFS solo acepta rutas ABSOLUTAS; la shell mantiene un CWD y convierte las
+// rutas relativas a absolutas antes de llamar al VFS. (MVP: un CWD global.)
+// ===========================================================================
+
+/// Directorio de trabajo actual. Vacío = raíz (`/`).
+static CWD: Mutex<String> = Mutex::new(String::new());
+
+/// CWD actual como ruta absoluta (siempre empieza por `/`).
+pub fn cwd_get() -> String {
+    let c = CWD.lock();
+    if c.is_empty() {
+        String::from("/")
+    } else {
+        c.clone()
+    }
+}
+
+/// Normaliza una ruta ABSOLUTA colapsando `.`, `..` y `//`.
+fn norm_abs(path: &str) -> String {
+    let mut comps: Vec<&str> = Vec::new();
+    for part in path.split('/') {
+        match part {
+            "" | "." => {}
+            ".." => {
+                comps.pop();
+            }
+            p => comps.push(p),
+        }
+    }
+    let mut out = String::from("/");
+    out.push_str(&comps.join("/"));
+    out
+}
+
+/// Convierte `path` (relativo o absoluto) a una ruta ABSOLUTA normalizada,
+/// resolviéndolo contra el CWD.
+fn resolve(path: &str) -> String {
+    if path.starts_with('/') {
+        norm_abs(path)
+    } else {
+        let mut base = cwd_get();
+        if !base.ends_with('/') {
+            base.push('/');
+        }
+        base.push_str(path);
+        norm_abs(&base)
+    }
+}
+
 /// Escribe bytes crudos en el sink actual (consola, canal SSH o archivo).
 fn emit(bytes: &[u8]) {
     let mut sink = OUTPUT.lock();
@@ -120,8 +171,19 @@ fn emit_line(s: &str) {
 /// Emite una línea de diagnóstico/error SIEMPRE a la consola, ignorando la
 /// redirección (comportamiento estilo stderr).
 fn eprint_line(s: &str) {
-    let _ = uart::write(s.as_bytes());
-    let _ = uart::write(b"\r\n");
+    // Estilo stderr: ignora la redirección `>` a archivo, pero va al sink BASE
+    // (consola O canal SSH) para que los errores se VEAN en la sesión activa,
+    // también la remota.
+    match *BASE.lock() {
+        Sink::Ssh => {
+            let _ = crate::shell::remote::command_output_to_ssh(s.as_bytes());
+            let _ = crate::shell::remote::command_output_to_ssh(b"\r\n");
+        }
+        _ => {
+            let _ = uart::write(s.as_bytes());
+            let _ = uart::write(b"\r\n");
+        }
+    }
 }
 
 /// Configura el sink de salida según la redirección del comando.
@@ -139,13 +201,13 @@ pub fn begin_redirect(redirect: &Redirect) -> KResult<()> {
         }
         Redirect::Truncate(path) => {
             let flags = OpenFlags(OpenFlags::WRONLY.0 | OpenFlags::CREATE.0 | OpenFlags::TRUNC.0);
-            let fd = vfs::open(path, flags)?;
+            let fd = vfs::open(&resolve(path), flags)?;
             *OUTPUT.lock() = Sink::File(fd);
             Ok(())
         }
         Redirect::Append(path) => {
             let flags = OpenFlags(OpenFlags::WRONLY.0 | OpenFlags::CREATE.0 | OpenFlags::APPEND.0);
-            let fd = vfs::open(path, flags)?;
+            let fd = vfs::open(&resolve(path), flags)?;
             *OUTPUT.lock() = Sink::File(fd);
             Ok(())
         }
@@ -180,6 +242,8 @@ pub fn dispatch(name: &str, args: &[&str]) -> i32 {
         "ps" => cmd_ps(),
         "reboot" => cmd_reboot(),
         "ls" => cmd_ls(args),
+        "cd" => cmd_cd(args),
+        "pwd" => cmd_pwd(),
         "cat" => cmd_cat(args),
         "mkdir" => cmd_mkdir(args),
         "touch" => cmd_touch(args),
@@ -235,6 +299,8 @@ fn cmd_help(_args: &[&str]) -> i32 {
     emit_line("  ps                    tareas (tarea actual)");
     emit_line("  reboot                reinicia el sistema");
     emit_line("  ls [RUTA]             lista un directorio");
+    emit_line("  cd [RUTA]             cambia de directorio (por defecto /)");
+    emit_line("  pwd                   muestra el directorio actual");
     emit_line("  cat ARCHIVO...        muestra el contenido de archivos");
     emit_line("  mkdir DIR...          crea directorios");
     emit_line("  touch ARCHIVO...      crea archivos vacíos");
@@ -312,8 +378,10 @@ fn cmd_reboot() -> i32 {
 
 /// `ls [RUTA]` — lista un directorio (por defecto `/`).
 fn cmd_ls(args: &[&str]) -> i32 {
-    let path = args.first().copied().unwrap_or("/");
-    match vfs::readdir(path) {
+    // Sin argumento -> el directorio actual (CWD). Se resuelve a ruta absoluta.
+    let raw = args.first().copied().unwrap_or(".");
+    let path = resolve(raw);
+    match vfs::readdir(&path) {
         Ok(entries) => {
             for e in &entries {
                 emit_line(&format_entry(e));
@@ -321,10 +389,33 @@ fn cmd_ls(args: &[&str]) -> i32 {
             0
         }
         Err(e) => {
-            eprint_line(&format!("ls: {}: {}", path, err_str(e)));
+            eprint_line(&format!("ls: {}: {}", raw, err_str(e)));
             1
         }
     }
+}
+
+/// `cd [RUTA]` — cambia el directorio de trabajo. Sin argumento, va a `/`.
+fn cmd_cd(args: &[&str]) -> i32 {
+    let target = args.first().copied().unwrap_or("/");
+    let abs = resolve(target);
+    // Debe existir y ser un directorio: `readdir` falla si no lo es o no existe.
+    match vfs::readdir(&abs) {
+        Ok(_) => {
+            *CWD.lock() = abs;
+            0
+        }
+        Err(e) => {
+            eprint_line(&format!("cd: {}: {}", target, err_str(e)));
+            1
+        }
+    }
+}
+
+/// `pwd` — imprime el directorio de trabajo actual.
+fn cmd_pwd() -> i32 {
+    emit_line(&cwd_get());
+    0
 }
 
 /// Formatea una entrada de directorio con un sufijo según su tipo.
@@ -346,7 +437,7 @@ fn cmd_cat(args: &[&str]) -> i32 {
     }
     let mut status = 0;
     for path in args {
-        if let Err(e) = cat_one(path) {
+        if let Err(e) = cat_one(&resolve(path)) {
             eprint_line(&format!("cat: {}: {}", path, err_str(e)));
             status = 1;
         }
@@ -384,7 +475,7 @@ fn cmd_mkdir(args: &[&str]) -> i32 {
     }
     let mut status = 0;
     for path in args {
-        if let Err(e) = vfs::mkdir(path) {
+        if let Err(e) = vfs::mkdir(&resolve(path)) {
             eprint_line(&format!("mkdir: {}: {}", path, err_str(e)));
             status = 1;
         }
@@ -404,7 +495,7 @@ fn cmd_touch(args: &[&str]) -> i32 {
     let mut status = 0;
     let flags = OpenFlags(OpenFlags::WRONLY.0 | OpenFlags::CREATE.0);
     for path in args {
-        match vfs::open(path, flags) {
+        match vfs::open(&resolve(path), flags) {
             Ok(fd) => {
                 let _ = vfs::close(fd);
             }
@@ -425,7 +516,7 @@ fn cmd_rm(args: &[&str]) -> i32 {
     }
     let mut status = 0;
     for path in args {
-        if let Err(e) = vfs::unlink(path) {
+        if let Err(e) = vfs::unlink(&resolve(path)) {
             eprint_line(&format!("rm: {}: {}", path, err_str(e)));
             status = 1;
         }
@@ -453,7 +544,7 @@ fn cmd_write(args: &[&str]) -> i32 {
     text.push('\n');
 
     let flags = OpenFlags(OpenFlags::WRONLY.0 | OpenFlags::CREATE.0 | OpenFlags::TRUNC.0);
-    let fd = match vfs::open(path, flags) {
+    let fd = match vfs::open(&resolve(path), flags) {
         Ok(fd) => fd,
         Err(e) => {
             eprint_line(&format!("write: {}: {}", path, err_str(e)));

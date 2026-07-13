@@ -222,7 +222,9 @@ pub fn run_with_io(io: &mut dyn ShellIo) {
         if !io.alive() {
             break;
         }
-        io.write(super::prompt_bytes());
+        // Prompt con el directorio de trabajo actual (p.ej. "esp32s3-os:/tmp> ").
+        let prompt = alloc::format!("esp32s3-os:{}> ", crate::shell::commands::cwd_get());
+        io.write(prompt.as_bytes());
         line.clear();
         if !read_line_io(io, &mut line) {
             break; // sesión cerrada mientras leíamos

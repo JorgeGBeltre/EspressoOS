@@ -3,13 +3,33 @@
 [![Rust Version](https://img.shields.io/badge/Rust-1.75%2B%20%2F%20Xtensa-orange?logo=rust)](https://github.com/esp-rs/rust)
 [![Target Platform](https://img.shields.io/badge/Platform-ESP32--S3--WROOM--1-blue?logo=espressif)](https://www.espressif.com/en/products/socs/esp32-s3)
 [![License](https://img.shields.io/badge/License-MIT%20or%20Apache--2.0-teal)](LICENSE)
-[![Build Status](https://img.shields.io/badge/Phase-0%20(Bring--up)-green)](#project-status-and-development-roadmap)
+[![Status](https://img.shields.io/badge/Status-Boots%20%2B%20SSH%20login%20on%20hardware-brightgreen)](#current-status-running-on-hardware)
 
 ---
 
 **EspressoOS** is a Unix-like operating system written entirely from scratch in `no_std` Rust for the **ESP32-S3-WROOM-1-N16R8** development board (Xtensa LX7 dual-core, 16 MB flash, and 8 MB PSRAM). 
 
-The system implements fundamental operating system concepts (a Virtual File System "VFS" with an everything-is-a-file abstraction, a preemptive and cooperative multitasking scheduler, kernel-level peripheral drivers, a stable system call "syscall" ABI, and an interactive REPL shell) in a resource-constrained embedded hardware environment.
+The system implements fundamental operating system concepts (a Virtual File System "VFS" with an everything-is-a-file abstraction, a cooperative/preemptive multitasking scheduler with a hand-written Xtensa context switch, kernel-level peripheral drivers, a stable system call "syscall" ABI, a WiFi + TCP/IP network stack, an SSH-2.0 server, and an interactive REPL shell) in a resource-constrained embedded hardware environment.
+
+---
+
+## Current Status (Running on Hardware)
+
+EspressoOS **boots and runs on a physical ESP32-S3** and is reachable over the network via SSH. The following is verified working on real silicon:
+
+| Capability | Status |
+| :--- | :--- |
+| Compiles & links for `xtensa-esp32s3-none-elf` | ✅ |
+| Boots: HAL init, kernel heap, VFS (`ramfs` on `/` and `/tmp`, `devfs` on `/dev`) | ✅ |
+| **Multitasking** — hand-written Xtensa windowed-register context switch | ✅ cooperative, stable |
+| **8 MB PSRAM** mapped and added to the kernel heap | ✅ |
+| **WiFi (STA) + DHCP + TCP/IP** (`esp-wifi` + `smoltcp`) | ✅ (obtains an IP, TCP echo on port 2323) |
+| **SSH-2.0 server** (curve25519-sha256, ssh-ed25519, chacha20-poly1305@openssh) | ✅ `ssh <user>@<ip>` opens the shell |
+| Interactive shell over SSH (`ls`, `cat`, `mkdir`, `cd`, `pwd`, `write`, redirections…) | ✅ |
+
+> **Log in with a standard client:** `ssh youareme@<board-ip>` (dev credentials in [`ssh/config.rs`](kernel/src/drivers/ssh/config.rs); see [Connecting via SSH](#3-connect-over-ssh)).
+
+**Implemented since (compile-clean, pending on-device checks):** persistent storage (`EspFs` at `/`, survives reboot), I2C/SPI bus drivers (`/dev/i2c0` · `/dev/spi0`), the **syscall ABI** (+ a real `syscall`-instruction trap under `--features syscall-trap`), an **OTA image receiver** (TCP :3300 → `ota apply`), and — behind opt-in features — **PMS** memory protection enforced at boot (`--features pms`) and **real cross-core scheduling** on the APP_CPU (`--features smp`). Every feature combination builds and links in `--release`; **104/104** logic tests pass. **Still open:** safe **preemptive** scheduling (`need_resched` in the vector epilogue), verifying OTA boot-switch against the stock bootloader, and shared-queue cross-core migration. See the [roadmap](#project-status-and-development-roadmap).
 
 ---
 
@@ -27,7 +47,8 @@ The system implements fundamental operating system concepts (a Virtual File Syst
   - [Syscall Mechanism (System Calls)](#syscall-mechanism-system-calls)
   - [A/B Update Scheme (OTA)](#ab-update-scheme-ota)
   - [Peripheral Device Drivers](#peripheral-device-drivers)
-  - [SSH Server (Skeleton \& Wire-Format)](#ssh-server-skeleton--wire-format)
+  - [Networking (WiFi + TCP/IP)](#networking-wifi--tcpip)
+  - [SSH Server (Working)](#ssh-server-working)
 - [Interactive REPL Shell](#interactive-repl-shell)
 - [Verification and Mock Testing](#verification-and-mock-testing)
 - [Contribution and License](#contribution-and-license)
@@ -39,32 +60,32 @@ The system implements fundamental operating system concepts (a Virtual File Syst
 
 ## Project Status and Development Roadmap
 
-EspressoOS development is structured into **10 incremental phases**. Currently, the project is in **Phase 0 (Bring-up / Skeleton)**.
+EspressoOS development is structured into **10 incremental phases**. Bring-up (P0), memory/PSRAM (P1), multitasking (P2, cooperative), and networking with an SSH server (P7) are **verified on hardware**. Bus drivers (P3), persistent storage (P4, `EspFs`), and the syscall ABI (P6) are **wired and compile-clean** (pending on-device checks). OTA (P5) is partially wired; memory protection (P8) and SMP (P9) are implemented **behind opt-in cargo features** so the default image stays the known-good one. Progress is not strictly sequential — SSH was brought up early because the scheduler and network stack were ready.
 
 ```
 Phase 0 ──────► Phase 1 ──────► Phase 2 ──────► Phase 3 ──────► Phase 4 
 Bring-up       Memory         Multitasking   Bus Drivers    Storage & VFS
-(Current)      (PSRAM)        (Scheduler)    (I2C/SPI)      (Flash/LittleFS)
+(✅ done)       (✅ PSRAM)      (✅ sched.)     (✅ I2C/SPI)    (✅ EspFs)
   │
   ├──────────► Phase 5 ──────► Phase 6 ──────► Phase 7 ──────► Phase 8 ──────► Phase 9
                OTA A/B        Syscalls/      Networking     Memory         SMP Dual-Core
-               Firmware       Userland       (WiFi/smoltcp) Protection     Multiprocessing
+               (✅ OTA rx)     (✅ ABI)        (✅ WiFi+SSH)   (feat: pms)     (feat: smp)
 ```
 
 ### Development Phases Roadmap Table
 
 | Phase | Title | Involved Components / Status |
 | :--- | :--- | :--- |
-| **Phase 0** | **Bring-up (Skeleton)** | **[CURRENT]** Repository directory tree configured. Xtensa CPU clock setup, kernel heap initialization (SRAM), console UART, VFS boot (mounting `/dev` and `/tmp`), scheduler setup with `idle` thread, interactive `shell`, and a `heartbeat` task (blinking LED). |
-| **Phase 1** | **Memory Management (PSRAM)** | Enabling mapping and heap integration for the 8 MB external PSRAM using `esp-alloc` as a secondary allocator region ([mm/heap.rs](kernel/src/mm/heap.rs)). |
-| **Phase 2** | **Task Scheduler** | Fully preemptive multitasking driven by hardware interrupts (SYSTIMER at [timer.rs](kernel/src/arch/xtensa/timer.rs)) and Round-Robin scheduler policies at [policy.rs](kernel/src/scheduler/policy.rs). |
-| **Phase 3** | **Bus Drivers** | Implementing and integrating master bus drivers for I2C ([i2c.rs](kernel/src/drivers/i2c.rs)) and SPI ([spi.rs](kernel/src/drivers/spi.rs)) at the kernel level. |
-| **Phase 4** | **Storage & Filesystems** | Connecting the internal SPI flash NOR driver ([flash.rs](kernel/src/drivers/flash.rs)) and mounting **LittleFS** ([fs/littlefs/mod.rs](kernel/src/fs/littlefs/mod.rs)) as the primary persistent storage on `/`. |
-| **Phase 5** | **OTA A/B Updates** | OTA firmware partition selection, validation (checksum/signatures), writing, and failsafe rollback features inside [ota/partition.rs](kernel/src/ota/partition.rs). |
-| **Phase 6** | **Syscalls & Userland** | Isolation of system calls and execution of unprivileged user applications with separated kernel and user stacks. |
-| **Phase 7** | **Networking (WiFi)** | Enabling the 802.11 radio transceiver using `esp-wifi` bound to the `smoltcp` TCP/IP stack ([drivers/wifi.rs](kernel/src/drivers/wifi.rs)). |
-| **Phase 8** | **Memory Protection (PMS)** | Configuring the ESP32-S3 PMS (Peripheral Memory System) / World Controller hardware registers to protect kernel address spaces from user space tasks ([mm/mpu.rs](kernel/src/mm/mpu.rs)). |
-| **Phase 9** | **SMP Dual-Core** | Enabling Symmetric Multiprocessing across both Xtensa LX7 cores (PRO_CPU and APP_CPU) using atomic spinlocks and core affinity policies ([scheduler/core_sync.rs](kernel/src/scheduler/core_sync.rs)). |
+| **Phase 0** | **Bring-up** | **DONE (on hardware).** Xtensa CPU clock setup, kernel heap (SRAM), console over UART0, VFS boot (mounting `/dev`, `/`, `/tmp`), scheduler with `idle` thread, interactive `shell`, and a `heartbeat` task. Requires `build-std` + the `-Tlinkall.x` linker script (see [Building](#building-and-flashing)). |
+| **Phase 1** | **Memory Management (PSRAM)** | **DONE.** The 8 MB external octal PSRAM is mapped in `esp_hal::init` and registered as a secondary `esp-alloc` heap region ([mm/heap.rs](kernel/src/mm/heap.rs)). |
+| **Phase 2** | **Task Scheduler** | **DONE (cooperative, on hardware).** Round-robin scheduling ([policy.rs](kernel/src/scheduler/policy.rs)) over a hand-written Xtensa windowed-register context switch ([context.rs](kernel/src/arch/xtensa/context.rs), FreeRTOS/esp-idf-style `XT_STK` frame + `rfe`/`retw`). **Pending:** safe preemption (`need_resched` in the vector epilogue) instead of switching inside the SYSTIMER ISR. |
+| **Phase 3** | **Bus Drivers** | **Wired (compiles; needs a device to verify on hardware).** Master I2C ([i2c.rs](kernel/src/drivers/i2c.rs)) and SPI ([spi.rs](kernel/src/drivers/spi.rs)) drivers now receive their peripherals from `main` (no `Peripherals::steal()`), are exposed as `/dev/i2c0` and `/dev/spi0`, and driven by the `i2c` / `spi` shell commands (`i2c scan`, `spi transfer …`). |
+| **Phase 4** | **Storage & Filesystems** | **Wired (compiles + logic-tested; verify persistence on hardware).** `EspFs` ([fs/espfs](kernel/src/fs/espfs/mod.rs)) — a pure-Rust **log-structured, wear-leveled** filesystem over the internal NOR flash ([flash.rs](kernel/src/drivers/flash.rs)) — is mounted at `/` (RamFs fallback), so files survive reboots. Chosen over the C `littlefs2` (kept as a stub) to avoid a bindgen/cc build on this `no_std` Xtensa target. 11 logic tests in `tools/tests/espfs_tests.py`. |
+| **Phase 5** | **OTA A/B Updates** | **Wired.** An OTA image receiver on TCP **port 3300** ([drivers/wifi.rs](kernel/src/drivers/wifi.rs)) buffers the firmware into PSRAM (safe: no flash writes during the WiFi transfer); `ota apply` then flashes the inactive slot and updates `otadata` ([ota](kernel/src/ota/mod.rs)). `ota status`/`set`/`rx`/`apply` shell commands. **Boot-switching** relies on the ESP-IDF 2nd-stage bootloader `espflash` writes (it reads `otadata`) — verify on hardware; a custom bootloader is only needed if the stock one doesn't honor it. |
+| **Phase 6** | **Syscalls & Userland** | **Wired.** `syscall::invoke` + the `syscalltest` command exercise the full ABI (arg marshalling → `dispatch` → errno). A real Xtensa `syscall`-instruction trap (EXCCAUSE=1, overriding the weak `__exception` and delegating other causes to esp-backtrace) is available behind `--features syscall-trap` ([syscall/trap.rs](kernel/src/syscall/trap.rs)). No privilege rings yet, so it is a mechanism, not isolation. |
+| **Phase 7** | **Networking (WiFi) + SSH** | **DONE (on hardware).** 802.11 STA radio via `esp-wifi` bound to the `smoltcp` TCP/IP stack ([drivers/wifi.rs](kernel/src/drivers/wifi.rs)); DHCP-assigned IP; a **working SSH-2.0 server** on port 22 ([drivers/ssh](kernel/src/drivers/ssh)) serving the shell. |
+| **Phase 8** | **Memory Protection (PMS)** | **Behind `--features pms`, enforced at boot.** [mm/mpu.rs](kernel/src/mm/mpu.rs) enables the ESP32-S3 DRAM0 PMS **violation monitor** and applies **World-1 SRAM enforcement** at boot (safe: the kernel runs in **World-0**), confining a future userland; `pms` / `pms world1` inspect and re-apply. The exact permission-field encoding still needs TRM validation on hardware. |
+| **Phase 9** | **SMP Dual-Core** | **Behind `--features smp`, real cross-core scheduling.** [scheduler/core_sync.rs](kernel/src/scheduler/core_sync.rs) starts the **APP_CPU (core 1)** via `esp_hal::CpuControl`; core 1 runs the scheduler over its **own run-queue** (`ready1`) — `spawn_core1` places tasks there while WiFi stays on core 0 (esp-wifi affinity). A demo `core1-worker` proves execution on core 1 (`smp` command / `core1` serial heartbeats). Shared-queue migration with per-core preemption is the next hardware step. |
 
 ---
 
@@ -72,7 +93,7 @@ Bring-up       Memory         Multitasking   Bus Drivers    Storage & VFS
 
 - **Pure Rust `no_std` Development**: Zero dependency on the C-based ESP-IDF framework or standard library; complete low-level control of the hardware.
 - **Virtual File System (VFS)**: Uniform abstractions for devices and file operations (`/dev/console`, `/dev/null`, `/dev/zero`, `/tmp`). Standardized file descriptors (`Fd`) supporting `open`/`close`/`read`/`write`/`seek`/`readdir`.
-- **Hybrid Task Scheduler**: Supports cooperative multitasking through `yield_now()` and preemptive scheduling triggered by the hardware SYSTIMER interrupt, managing Xtensa register frames directly in assembly ([context.rs](kernel/src/arch/xtensa/context.rs)).
+- **Task Scheduler**: Round-robin multitasking with a **hand-written Xtensa windowed-register context switch** in assembly ([context.rs](kernel/src/arch/xtensa/context.rs)) — verified stable on hardware in **cooperative** mode (`yield_now()`). A SYSTIMER-driven preemptive path exists; making preemption fully safe (switching in the interrupt-vector epilogue rather than inside the ISR) is in progress.
 - **System Call ABI**: POSIX-like system calls utilizing registers (e.g., `a2` for syscall index) to transition from user mode to kernel mode safely.
 - **OTA Updates & Partition Mappings**: Core logic and structures compatible with the Espressif partition table format, prepared for safe, atomic OTA updates.
 - **Custom Partition Generator**: Bundled Python utility to generate and inspect bin tables compatible with the hardware ROM bootloader.
@@ -110,14 +131,16 @@ EspressoOS/
 │   │   │   ├── flash.rs    # NOR flash driver via ROM SPI routines
 │   │   │   ├── spi.rs      # SPI master bus driver (skeleton)
 │   │   │   ├── i2c.rs      # I2C master bus driver (skeleton)
-│   │   │   ├── wifi.rs     # Network driver (esp-wifi + smoltcp) (draft)
-│   │   │   ├── ssh/        # Minimal SSH-2.0 server (skeleton, Phase 7+)
-│   │   │   │   ├── auth.rs    # User authentication (password / publickey ed25519)
-│   │   │   │   ├── channel.rs # Session channels & shell routing logic
-│   │   │   │   ├── crypt.rs   # Session encryption (ChaCha20-Poly1305 AEAD)
-│   │   │   │   ├── kex.rs     # Key Exchange (curve25519-sha256 ECDH & KDF)
-│   │   │   │   ├── proto.rs   # RFC 4251 types and Binary Packet Protocol
-│   │   │   │   └── mod.rs     # Connection state machine and server entry
+│   │   │   ├── wifi.rs     # Network task: esp-wifi STA + smoltcp + DHCP + echo/SSH (working)
+│   │   │   ├── ssh/        # Working SSH-2.0 server (serves the shell on port 22)
+│   │   │   │   ├── auth.rs        # User authentication (password / publickey ed25519)
+│   │   │   │   ├── channel.rs     # Session channels & shell routing logic
+│   │   │   │   ├── crypt.rs       # Session AEAD (chacha20-poly1305@openssh.com)
+│   │   │   │   ├── kex.rs         # Key exchange (curve25519-sha256 ECDH + KDF, ed25519 host key)
+│   │   │   │   ├── proto.rs       # RFC 4251 types and Binary Packet Protocol
+│   │   │   │   ├── crypto_rng.rs  # Hardware TRNG -> rand_core adapter
+│   │   │   │   ├── config.rs      # Dev credentials, authorized keys, host-key seed
+│   │   │   │   └── mod.rs         # Connection state machine and server entry
 │   │   │   └── mod.rs
 │   │   ├── fs/             # Core File System Drivers
 │   │   │   ├── ramfs.rs    # In-memory RAM filesystem
@@ -181,8 +204,10 @@ Install `espup` (the toolchain installer) and `espflash` (flashing and monitorin
 ```bash
 # Install toolchain and flashing utilities
 cargo install espup --locked
-cargo install espflash
+cargo install espflash@3.3.0 --locked
 ```
+
+> **Important — use espflash 3.x.** This project targets `esp-hal 0.23`, whose image format predates the **ESP-IDF App Descriptor** that `espflash` **4.x** requires. With espflash 4.x the flashed image is rejected by the bootloader (`Image requires efuse blk rev …` / `no bootable app`). Until the project migrates to `esp-hal 1.0` + `esp-bootloader-esp-idf`, pin espflash to the **3.x** line (`3.3.0`).
 
 Once installed, run `espup` to set up the toolchain on your system:
 ```bash
@@ -214,7 +239,11 @@ espflash --version
 ```
 
 ### 3. Hardware Connections
-Connect your **ESP32-S3** board to the host PC using the native **USB-Serial-JTAG** port directly (connected to the chip, not via external USB-to-UART bridging ICs if the board has two ports).
+Connect your **ESP32-S3** board to the host PC over USB. The kernel console is configured for **UART0** (`esp-println` `uart` feature), which is what most dev boards expose through an on-board USB-to-UART bridge (CH343 / CP2102 / CH340). The serial port will appear as e.g. `COM5` (Windows) or `/dev/ttyUSB0` (Linux).
+
+> If your board only exposes the **native USB-Serial-JTAG** peripheral instead of a UART bridge, switch the `esp-println` feature in [`kernel/Cargo.toml`](kernel/Cargo.toml) from `uart` to `jtag-serial` (exactly one of `uart`/`jtag-serial`/`auto` may be enabled).
+
+Your board also needs a **2.4 GHz WiFi** network in range for the networking/SSH features (the ESP32-S3 radio is 2.4 GHz only).
 
 ---
 
@@ -233,33 +262,68 @@ python tools/partition-gen/partition_gen.py
 ```
 This utility parses [partitions.csv](partitions.csv) and compiles it into `partitions.bin`, validating partition alignments and boundary limits.
 
-### 2. Build the Kernel
-Compile the kernel binary optimized for the Xtensa architecture:
+### 2. Configure WiFi Credentials
+The networking and SSH features need the credentials of a **2.4 GHz** network. Copy the template to a git-ignored file and fill in your SSID/password:
+
+```bash
+cp kernel/src/wifi_credentials.rs.example kernel/src/wifi_credentials.rs
+```
+```rust
+// kernel/src/wifi_credentials.rs  — git-ignored, never committed
+pub const WIFI_SSID: &str = "your-2.4GHz-ssid";
+pub const WIFI_PASSWORD: &str = "your-password";
+```
+> `wifi_credentials.rs` is listed in `.gitignore`, so your password never lands in version control — only the `.example` template is tracked.
+
+### 3. Build the Kernel
+Compile the kernel binary optimized for the Xtensa architecture. **A release build is required** (PSRAM and esp-wifi do not work in debug):
 ```bash
 cargo build --release
 ```
 
-### 3. Flash and Monitor
+### 4. Flash and Monitor
 Write the binary onto the ESP32-S3 flash and start the serial monitor with a single command:
 ```bash
 cargo run --release
 ```
 *(This command runs `espflash flash --monitor` automatically as configured in `.cargo/config.toml`)*
 
-#### Expected Serial Output (Phase 0 - Bring-up)
+#### Expected Serial Output
 ```
+[kernel] PSRAM added to heap: 8388608 bytes @ 0x3c000000
 ========================================
    esp32s3-os   ·   kernel
-   Consola viva. Arrancando subsistemas.
-   Heap del kernel: 65536 bytes
 ========================================
-[kernel] tarea 'shell' creada (tid=1)
-[kernel] tarea 'heartbeat' creada (tid=2)
-
-esp32s3-os shell. Escribe 'help' para ver los comandos.
-esp32s3-os> 
+[kernel] task 'shell' created (tid=1)
+[kernel] task 'heartbeat' created (tid=2)
+[net] connecting to SSID 'your-ssid'...
+[net] associated; negotiating DHCP...
+[net] IP = 192.168.2.126
+[net] TCP echo server listening on port 2323
+[ssh] SSH server on port 22 (try: ssh youareme@192.168.2.126)
+[ssh] host key: SHA256:ODaZ7h4sUydeKsOw4lDsvi4bSji78Jrczj4kYWfTrS8
+[heartbeat] tick=0 uptime=236ms led=1
+[heartbeat] tick=1 uptime=736ms led=0
+...
 ```
-The on-board LED will flash at approximately **1 Hz**. If the LED does not blink, check the `LED_GPIO` constant defined in [main.rs](kernel/src/main.rs#L44) and change it to match your board layout (typically GPIO 2 or GPIO 48).
+The on-board LED blinks (~1 Hz). If it doesn't, adjust the `LED_GPIO` constant in [main.rs](kernel/src/main.rs) to match your board (typically GPIO 2 or GPIO 48).
+
+### 5. Connect over SSH
+Once the board prints its IP and `SSH server on port 22`, log in from any standard OpenSSH client on the same network:
+
+```bash
+ssh youareme@192.168.2.126        # then enter the dev password
+```
+
+Development credentials live in [`kernel/src/drivers/ssh/config.rs`](kernel/src/drivers/ssh/config.rs) (`DEV_USER` / `DEV_PASSWORD`) — change them for your setup. The **host key** is derived from a **fixed dev seed** (`HOST_KEY_SEED`) so its fingerprint is **stable across reboots and re-flashes** — you won't need to clear `known_hosts` on every connection.
+
+You can also verify the raw network path with the TCP echo server:
+```bash
+# sends "hello" and gets it back
+printf 'hello\n' | nc 192.168.2.126 2323
+```
+
+> **Security note (dev-only):** the SSH password, the authorized-keys list, and the host-key seed are placeholders embedded in the binary for the MVP. In production these would come from persistent storage (LittleFS: hashed passwords, `authorized_keys`, a TRNG-generated host key). Do **not** expose this server to the internet.
 
 ---
 
@@ -310,7 +374,7 @@ The VFS is the central hub for I/O routing. Filesystems and custom nodes impleme
 ### Task Scheduler
 Located in [scheduler/mod.rs](kernel/src/scheduler/mod.rs), the scheduler performs task scheduling for multitasking in the kernel.
 
-- **Hybrid Task Execution**: Supports cooperative context switching via `yield_now()` and preemptive switching driven by a periodic timer interrupt from the hardware SYSTIMER.
+- **Task Execution**: Cooperative context switching via `yield_now()` is verified working on hardware; a preemptive path driven by the SYSTIMER interrupt is present and being hardened (see the [roadmap](#project-status-and-development-roadmap)).
 - **Quantum**: The running task's time slice is set to **5 ticks**. At a tick rate of `TICK_HZ = 100`, this corresponds to **~50 ms**.
 - **Task Lifecycle**: Managed inside [scheduler/task.rs](kernel/src/scheduler/task.rs) through four canonical states:
   - `Ready`: In the scheduler's run queue, waiting to be allocated execution time.
@@ -366,19 +430,29 @@ The `otadata` partition is split into **2 sectors** of **4 KB** each. Every sect
 - **GPIO** ([drivers/gpio.rs](kernel/src/drivers/gpio.rs)): Pin input, output, pull-up, and pull-down configurations.
 - **Flash SPI** ([drivers/flash.rs](kernel/src/drivers/flash.rs)): SPI helper routines interacting directly with the chip's internal boot ROM functions to write/erase memory blocks.
 
-### SSH Server (Skeleton & Wire-Format)
-A minimal SSH-2.0 server ([drivers/ssh](kernel/src/drivers/ssh)) designed to host the interactive REPL shell over a TCP connection (port 22).
+### Networking (WiFi + TCP/IP)
+The network stack ([drivers/wifi.rs](kernel/src/drivers/wifi.rs)) runs as a single cooperative kernel task (`net_task`) that owns the radio and the TCP/IP engine and yields the CPU on every poll, so it coexists with the shell and heartbeat tasks.
 
-- **Wire-Format Parser (`proto.rs`)**: Implements RFC 4251 base types (uint32, string, name-list, mpint) and the SSH Binary Packet Protocol (RFC 4253 §6), verified using a host-based Python test suite ([ssh_proto_tests.py](tools/tests/ssh_proto_tests.py)).
-- **Cryptographic Foundations (`kex.rs`, `crypt.rs`, `auth.rs`)**: Designs for key exchange (X25519-SHA256), host key verification (ssh-ed25519), and session decryption (ChaCha20-Poly1305 OpenSSH construction) using audited `no_std` crates.
-- **Shell Bridge (`shell::remote`)**: Introduces a unified `ShellIo` interface abstraction allowing the REPL shell to run on both the local console (`ConsoleIo`) and a remote SSH channel session (`SshChannelIo`).
-- *Note: Gated by Phase 7 (networking integration) and currently set up as a documented codebase skeleton.*
+- **Radio**: 802.11 b/g/n **station (STA)** mode via `esp-wifi` 0.12, associating to the SSID/password from `wifi_credentials.rs` (git-ignored; see the [`.example`](kernel/src/wifi_credentials.rs.example) template). esp-wifi runs its own firmware scheduler on `TIMG0` while the kernel scheduler uses `SYSTIMER` — the two coexist without conflict.
+- **TCP/IP**: the `smoltcp` 0.12 stack, fed by esp-wifi's `WifiDevice`, with a **DHCPv4** client that prints the assigned IP (`[net] IP = …`).
+- **Sockets**: a TCP **echo** server on port **2323** (a simple end-to-end reachability check) and the **SSH** server on port **22**, both driven from the same non-blocking poll loop.
+- **Memory**: esp-wifi's buffers are served from the kernel heap; the 8 MB PSRAM is registered as a heap region so the stack has room (internal SRAM is registered first so DMA-capable allocations stay in SRAM).
+
+### SSH Server (Working)
+A minimal, from-scratch **SSH-2.0 server** ([drivers/ssh](kernel/src/drivers/ssh)) that serves the interactive REPL shell over TCP port 22. The full handshake is **verified end-to-end against OpenSSH 9.5** on real hardware. All cryptographic primitives are delegated to audited `no_std` crates (RustCrypto / dalek) — the kernel implements the SSH **protocol**, never the crypto itself.
+
+- **Transport (`proto.rs`, `crypt.rs`)**: RFC 4251 base types (uint32, string, name-list, mpint) and the SSH Binary Packet Protocol (RFC 4253 §6), verified by a host-side Python suite ([ssh_proto_tests.py](tools/tests/ssh_proto_tests.py)). Session AEAD uses the **`chacha20-poly1305@openssh.com`** construction (`chacha20` + `poly1305`, standard/unpadded Poly1305 tag, per-direction 512-bit keys, sequence-number nonce).
+- **Key Exchange (`kex.rs`)**: `curve25519-sha256` ECDH (`x25519-dalek`) with the exchange hash `H` signed by an **`ssh-ed25519`** host key (`ed25519-dalek`); session keys derived per RFC 4253 §7.2 (`sha2`). Ephemeral keys are seeded from the ESP32-S3 **hardware TRNG** ([crypto_rng.rs](kernel/src/drivers/ssh/crypto_rng.rs)).
+- **Authentication (`auth.rs`)**: `password` (constant-time compare via `subtle`) and `publickey` (`ssh-ed25519`, `verify_strict`). Credentials in [config.rs](kernel/src/drivers/ssh/config.rs).
+- **Connection (`mod.rs`)**: a non-blocking state machine (VersionExchange → KexInit → Kex → NewKeys → UserAuth → Session) pumped from the network task; `session` channel + `pty-req` + `shell`.
+- **Shell Bridge (`shell::remote`)**: a unified `ShellIo` abstraction so the **same** REPL runs on the local console (`ConsoleIo`) and over an SSH channel (`SshChannelIo`).
+- **Host key stability**: derived from a fixed dev seed (`HOST_KEY_SEED`) so the fingerprint is constant across reboots (persistent, TRNG-generated keys arrive with LittleFS).
 
 ---
 
 ## Interactive REPL Shell
 
-EspressoOS starts a CLI shell on the primary console channel upon boot. The REPL loop is located inside [shell/mod.rs](kernel/src/shell/mod.rs) and monitors console characters.
+EspressoOS starts a CLI shell as a scheduler task on boot. The **same** REPL ([shell/mod.rs](kernel/src/shell/mod.rs), generic over the `ShellIo` trait in [shell/remote.rs](kernel/src/shell/remote.rs)) serves both the local serial console and **remote SSH sessions** — over SSH it is the shell you land in after `ssh <user>@<ip>`.
 
 - **Terminal Control**: Includes support for character deleting (Backspace), execution interruption (`Ctrl-C`), and limits input strings to **256 characters** to prevent stack overflow.
 - **Output Redirection**: The parser ([shell/parser.rs](kernel/src/shell/parser.rs)) supports writing redirection `>` (overwrite) and `>>` (append), setting up descriptors on the targeted VFS nodes before calling commands.
@@ -395,14 +469,35 @@ EspressoOS CLI Commands
 │   ├── free              # Displays memory usage status of the kernel heap
 │   ├── ps                # Lists all active tasks and execution states
 │   └── reboot            # Restarts the CPU via software reset
-└── Filesystem / VFS
-    ├── ls [path]         # Lists files in a directory (defaults to `/`)
-    ├── cat <file>        # Prints file content to console
-    ├── mkdir <dir>       # Creates a directory at path
-    ├── touch <file>      # Creates an empty file or updates its timestamp
-    ├── rm <file>         # Deletes a file or an empty directory
-    ├── write <file> <tx> # Writes string data into a file
+├── Filesystem / VFS
+│   ├── pwd               # Prints the current working directory
+│   ├── cd [path]         # Changes the working directory (defaults to `/`)
+│   ├── ls [path]         # Lists a directory (defaults to the current directory)
+│   ├── cat <file>        # Prints file content
+│   ├── mkdir <dir>       # Creates a directory
+│   ├── touch <file>      # Creates an empty file
+│   ├── rm <file>         # Deletes a file or an empty directory
+│   └── write <file> <tx> # Writes string data into a file (truncates)
+└── Text
     └── echo [-n] <text>  # Prints a line of text (use `-n` to omit newline)
+```
+
+The shell maintains a **working directory (CWD)** shown in the prompt (e.g. `esp32s3-os:/tmp> `). Filesystem commands accept **relative paths**, which are resolved against the CWD before hitting the VFS (the VFS itself only accepts absolute, normalized paths). Command errors are routed to the active session — including the remote SSH channel — so you see them wherever you're connected.
+
+Example over SSH:
+```
+esp32s3-os:/> mkdir demo
+esp32s3-os:/> cd demo
+esp32s3-os:/demo> write hello.txt hola mundo
+esp32s3-os:/demo> cat hello.txt
+hola mundo
+esp32s3-os:/demo> ls
+hello.txt
+esp32s3-os:/demo> cd ..
+esp32s3-os:/> ls /dev
+console@
+null@
+zero@
 ```
 
 ---

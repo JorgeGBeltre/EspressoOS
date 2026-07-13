@@ -1,18 +1,3 @@
-//! Abstracción de E/S para la shell: local (consola) o remota (canal SSH).
-// COMPILE-STATUS: borrador (implementado, sin compilar contra HW)
-//!
-//! La MISMA REPL sirve a la consola y a un canal SSH tras el trait [`ShellIo`].
-//! `shell::run` es un wrapper sobre [`run_with_io`] con [`ConsoleIo`]; la sesión
-//! SSH llama a `run_with_io(&mut SshChannelIo{..})`.
-//!
-//! PUENTE SSH (`BRIDGE`): la máquina de estados SSH (que vive en `net_task`) y la
-//! tarea de la shell remota se comunican por dos colas de bytes globales:
-//!   - `to_shell`:   bytes de `CHANNEL_DATA` entrantes -> los lee `SshChannelIo`.
-//!   - `from_shell`: salida de la shell -> `net_task` la envía como `CHANNEL_DATA`.
-//! Se protegen con el `Mutex` canónico del kernel (enmascara IRQs brevemente). El
-//! lock NUNCA se mantiene a través de un `yield_now` (se toma, se copia, se suelta).
-//!
-//! MVP: UNA sola sesión SSH a la vez (una única instancia de puente).
 #![allow(dead_code)]
 
 use alloc::collections::VecDeque;
@@ -22,32 +7,21 @@ use crate::drivers::uart;
 use crate::prelude::*;
 use crate::scheduler;
 
-/// Fuente/destino de bytes de una sesión de shell.
-///
-/// `read_byte` NO bloquea: devuelve `None` cuando no hay datos, para que el
-/// llamador ceda la CPU (`scheduler::yield_now`) igual que la shell local.
 pub trait ShellIo {
-    /// Siguiente byte de entrada, o `None` si no hay ninguno disponible aún.
+
     fn read_byte(&mut self) -> Option<u8>;
-    /// Escribe bytes de salida; devuelve cuántos se aceptaron.
+
     fn write(&mut self, bytes: &[u8]) -> usize;
-    /// ¿Es una sesión remota (SSH)? La REPL usa esto para enrutar la salida de
-    /// los comandos al canal en vez de a la consola. Por defecto, no.
+
     fn is_ssh(&self) -> bool {
         false
     }
-    /// ¿Sigue viva la sesión? La REPL sale del bucle cuando devuelve `false`
-    /// (p. ej. el canal SSH se cerró). Por defecto, siempre viva (consola).
+
     fn alive(&self) -> bool {
         true
     }
 }
 
-// ===========================================================================
-// E/S local sobre la consola (UART0) — `drivers::uart`.
-// ===========================================================================
-
-/// E/S local sobre la consola serie (`drivers::uart`).
 pub struct ConsoleIo;
 
 impl ShellIo for ConsoleIo {
@@ -59,27 +33,19 @@ impl ShellIo for ConsoleIo {
     }
 }
 
-// ===========================================================================
-// Puente de bytes entre la máquina de estados SSH y la tarea de la shell.
-// ===========================================================================
-
-/// Colas de una sesión SSH activa.
 struct Bridge {
-    /// Bytes del cliente (CHANNEL_DATA entrante) hacia la shell.
+
     to_shell: VecDeque<u8>,
-    /// Bytes de la shell hacia el cliente (se enviarán como CHANNEL_DATA).
+
     from_shell: VecDeque<u8>,
-    /// La sesión sigue abierta.
+
     open: bool,
 }
 
-/// Puente global (una sesión a la vez en el MVP).
 static BRIDGE: Mutex<Option<Bridge>> = Mutex::new(None);
 
-/// Límite de bytes en cada cola para no crecer sin control (backpressure basto).
 const BRIDGE_CAP: usize = 16 * 1024;
 
-/// Abre el puente (lo llama `net_task` cuando arranca la shell del canal).
 pub fn bridge_open() {
     let mut g = BRIDGE.lock();
     *g = Some(Bridge {
@@ -89,8 +55,6 @@ pub fn bridge_open() {
     });
 }
 
-/// Cierra el puente (canal/conexión cerrados). La tarea de la shell lo detecta
-/// vía `SshChannelIo::alive()` y sale de la REPL.
 pub fn bridge_close() {
     let mut g = BRIDGE.lock();
     if let Some(b) = g.as_mut() {
@@ -98,13 +62,10 @@ pub fn bridge_close() {
     }
 }
 
-/// ¿Hay una sesión SSH abierta ahora mismo?
 pub fn bridge_is_open() -> bool {
     BRIDGE.lock().as_ref().map(|b| b.open).unwrap_or(false)
 }
 
-/// `net_task` empuja aquí los datos de `CHANNEL_DATA` entrantes. Devuelve cuántos
-/// bytes se aceptaron (los que exceden `BRIDGE_CAP` se descartan: backpressure).
 pub fn bridge_push_input(data: &[u8]) -> usize {
     let mut g = BRIDGE.lock();
     if let Some(b) = g.as_mut() {
@@ -117,8 +78,6 @@ pub fn bridge_push_input(data: &[u8]) -> usize {
     }
 }
 
-/// `net_task` extrae hasta `max` bytes de salida de la shell para enviarlos como
-/// `CHANNEL_DATA`. Devuelve un `Vec` (posiblemente vacío).
 pub fn bridge_take_output(max: usize) -> Vec<u8> {
     let mut g = BRIDGE.lock();
     if let Some(b) = g.as_mut() {
@@ -135,7 +94,6 @@ pub fn bridge_take_output(max: usize) -> Vec<u8> {
     }
 }
 
-/// ¿Hay salida pendiente de enviar al cliente?
 pub fn bridge_has_output() -> bool {
     BRIDGE
         .lock()
@@ -144,14 +102,10 @@ pub fn bridge_has_output() -> bool {
         .unwrap_or(false)
 }
 
-// -- Acceso interno usado por SshChannelIo. --
-
-/// Saca un byte de entrada (de `to_shell`), o `None`.
 fn bridge_pop_input_byte() -> Option<u8> {
     BRIDGE.lock().as_mut().and_then(|b| b.to_shell.pop_front())
 }
 
-/// Encola bytes de salida (a `from_shell`). Devuelve cuántos se aceptaron.
 fn bridge_write_output(bytes: &[u8]) -> usize {
     let mut g = BRIDGE.lock();
     if let Some(b) = g.as_mut() {
@@ -164,19 +118,12 @@ fn bridge_write_output(bytes: &[u8]) -> usize {
     }
 }
 
-/// Escribe la salida de un COMANDO al canal SSH (lo usa el sink de `commands`).
 pub fn command_output_to_ssh(bytes: &[u8]) -> usize {
     bridge_write_output(bytes)
 }
 
-// ===========================================================================
-// E/S remota sobre un canal SSH.
-// ===========================================================================
-
-/// E/S remota sobre un canal SSH: lee del puente `to_shell`, escribe en
-/// `from_shell`. Un `SshChannelIo` sólo tiene sentido con el puente abierto.
 pub struct SshChannelIo {
-    /// Id local del canal (informativo; el puente es global en el MVP).
+
     pub channel_id: u32,
 }
 
@@ -201,16 +148,8 @@ impl ShellIo for SshChannelIo {
     }
 }
 
-// ===========================================================================
-// REPL genérica sobre `ShellIo` (canónica: la usan consola y SSH).
-// ===========================================================================
-
-/// Bucle REPL parametrizado por la E/S. Idéntica lógica de línea/eco/parseo que la
-/// shell local; sólo cambia el origen/destino de bytes y el enrutado de la salida
-/// de los comandos.
 pub fn run_with_io(io: &mut dyn ShellIo) {
-    // Si es una sesión SSH, la salida de los comandos (sink global de `commands`)
-    // se enruta al canal mientras dure la sesión.
+
     if io.is_ssh() {
         crate::shell::commands::set_base_ssh();
     }
@@ -222,28 +161,26 @@ pub fn run_with_io(io: &mut dyn ShellIo) {
         if !io.alive() {
             break;
         }
-        io.write(super::prompt_bytes());
+
+        let prompt = alloc::format!("esp32s3-os:{}> ", crate::shell::commands::cwd_get());
+        io.write(prompt.as_bytes());
         line.clear();
         if !read_line_io(io, &mut line) {
-            break; // sesión cerrada mientras leíamos
+            break;
         }
         let trimmed = line.trim();
         if trimmed.is_empty() {
             continue;
         }
-        // `execute_line` despacha el comando; su salida va al sink global de
-        // `commands`, que ya apunta al canal si es sesión SSH.
+
         super::execute_line(trimmed);
     }
 
-    // Restaurar el sink de la consola al terminar una sesión SSH.
     if io.is_ssh() {
         crate::shell::commands::set_base_console();
     }
 }
 
-/// Lee una línea a través de `io` (eco, backspace, Ctrl-C). Devuelve `false` si la
-/// sesión se cerró durante la lectura (el llamador debe salir de la REPL).
 fn read_line_io(io: &mut dyn ShellIo, buf: &mut String) -> bool {
     loop {
         match io.read_byte() {
@@ -274,7 +211,7 @@ fn read_line_io(io: &mut dyn ShellIo, buf: &mut String) -> bool {
                 if !io.alive() {
                     return false;
                 }
-                // Sin datos: cedemos la CPU (cooperativo).
+
                 scheduler::yield_now();
             }
         }

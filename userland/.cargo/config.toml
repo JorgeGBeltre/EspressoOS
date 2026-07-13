@@ -1,0 +1,13 @@
+[target.xtensa-esp32s3-none-elf]
+
+[build]
+target = "xtensa-esp32s3-none-elf"
+rustflags = [
+  "-C", "link-arg=-nostartfiles",
+  "-C", "force-frame-pointers",
+  "-C", "link-arg=-Tuser.x",
+]
+
+[unstable]
+build-std = ["core", "alloc"]
+build-std-features = ["compiler-builtins-mem"]

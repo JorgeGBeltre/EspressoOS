@@ -1,39 +1,17 @@
-//! Parser de línea de comandos de la shell.
-// COMPILE-STATUS: borrador (sin compilar)
-//!
-//! Tokenizador REAL que respeta comillas simples (`'…'`) y dobles (`"…"`),
-//! escapes con barra invertida (`\`), y detecta los operadores de la shell:
-//! redirección de salida `>` (truncar) y `>>` (añadir), y tubería `|`.
-//!
-//! El resultado es un [`Command`] OWNED (usa `String`/`Vec` para sobrevivir a
-//! la línea de entrada) más su información de redirección. Para tuberías se
-//! ofrece [`parse_pipeline`], que devuelve una etapa [`Command`] por cada
-//! sección separada por `|`; [`parse`] (la firma canónica del contrato)
-//! devuelve la primera etapa.
-//!
-//! El tokenizador es puro y determinista (sólo depende del `&str` de entrada),
-//! por lo que es directamente testeable (ver `mod tests`).
 #![allow(dead_code)]
 
 use crate::prelude::*;
 
-/// Redirección de salida detectada por el parser. [CANÓNICO]
-///
-/// Los `String` contienen el nombre del archivo destino ya des-entrecomillado.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Redirect {
-    /// Sin redirección: la salida va a la consola.
+
     None,
-    /// `> archivo`: trunca el archivo y escribe desde el principio.
+
     Truncate(String),
-    /// `>> archivo`: crea si no existe y añade al final.
+
     Append(String),
 }
 
-/// Comando parseado (OWNED, para sobrevivir a la línea de entrada). [CANÓNICO]
-///
-/// `name` es el ejecutable/comando interno; `args` son SOLO los argumentos
-/// (no incluye `name`); `redirect` describe la redirección de su salida.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Command {
     pub name: String,
@@ -41,22 +19,18 @@ pub struct Command {
     pub redirect: Redirect,
 }
 
-/// Unidad léxica producida por el tokenizador.
-///
-/// Público para poder verificar el tokenizador de forma aislada.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Token {
-    /// Una palabra (comando, argumento o nombre de archivo) ya sin comillas.
+
     Word(String),
-    /// Operador `>` (redirección truncando).
+
     RedirectOut,
-    /// Operador `>>` (redirección añadiendo).
+
     RedirectAppend,
-    /// Operador `|` (tubería).
+
     Pipe,
 }
 
-/// Estado del tokenizador respecto a comillas.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Quote {
     No,
@@ -64,23 +38,10 @@ enum Quote {
     Double,
 }
 
-/// Tokeniza una línea en [`Token`]s, respetando comillas y escapes.
-///
-/// Reglas:
-/// - Espacios/tabuladores separan palabras (fuera de comillas).
-/// - `'…'`: todo literal hasta la siguiente comilla simple (ni escapes).
-/// - `"…"`: literal, pero `\"` y `\\` se interpretan como `"` y `\`.
-/// - `\c` fuera de comillas: inserta `c` literalmente (permite espacios en
-///   argumentos, p. ej. `a\ b` es la palabra `a b`).
-/// - `>` / `>>` y `|` son operadores incluso pegados a una palabra
-///   (`echo hi>out` ⇒ `echo`, `hi`, `>`, `out`).
-///
-/// Devuelve `Err(KError::InvalidArgument)` si queda una comilla sin cerrar.
 pub fn tokenize(line: &str) -> KResult<Vec<Token>> {
     let mut tokens: Vec<Token> = Vec::new();
     let mut current = String::new();
-    // `has_word` distingue "no hay palabra en curso" de "palabra vacía en
-    // curso" (necesario para que `""` produzca una palabra vacía).
+
     let mut has_word = false;
     let mut quote = Quote::No;
 
@@ -99,8 +60,7 @@ pub fn tokenize(line: &str) -> KResult<Vec<Token>> {
                 if c == '"' {
                     quote = Quote::No;
                 } else if c == '\\' {
-                    // En comillas dobles sólo `\"` y `\\` son escapes; el resto
-                    // de barras se conservan literales.
+
                     match chars.peek() {
                         Some(&n) if n == '"' || n == '\\' => {
                             current.push(n);
@@ -129,7 +89,7 @@ pub fn tokenize(line: &str) -> KResult<Vec<Token>> {
                     has_word = true;
                 }
                 '\\' => {
-                    // Escapa el siguiente carácter literalmente.
+
                     match chars.next() {
                         Some(n) => current.push(n),
                         None => current.push('\\'),
@@ -164,7 +124,7 @@ pub fn tokenize(line: &str) -> KResult<Vec<Token>> {
     }
 
     if quote != Quote::No {
-        // Comilla sin cerrar: entrada malformada.
+
         return Err(KError::InvalidArgument);
     }
     if has_word {
@@ -173,16 +133,11 @@ pub fn tokenize(line: &str) -> KResult<Vec<Token>> {
     Ok(tokens)
 }
 
-/// Construye un [`Command`] a partir de las palabras y la redirección
-/// acumuladas de una etapa. Consume (vacía) ambos acumuladores.
-///
-/// Devuelve `Err(KError::InvalidArgument)` si no hay ninguna palabra (etapa
-/// vacía, p. ej. tubería sin comando: `| ls` o `ls |`).
 fn build_command(words: &mut Vec<String>, redirect: &mut Redirect) -> KResult<Command> {
     if words.is_empty() {
         return Err(KError::InvalidArgument);
     }
-    // `remove(0)` es seguro: acabamos de comprobar que no está vacío.
+
     let name = words.remove(0);
     let args = core::mem::take(words);
     let redir = core::mem::replace(redirect, Redirect::None);
@@ -193,12 +148,6 @@ fn build_command(words: &mut Vec<String>, redirect: &mut Redirect) -> KResult<Co
     })
 }
 
-/// Parsea la línea como una tubería completa: una etapa [`Command`] por cada
-/// sección separada por `|`.
-///
-/// - Línea vacía o sólo espacios ⇒ `Ok(vec![])`.
-/// - Comilla sin cerrar, redirección sin archivo, o etapa vacía ⇒
-///   `Err(KError::InvalidArgument)`.
 pub fn parse_pipeline(line: &str) -> KResult<Vec<Command>> {
     let tokens = tokenize(line)?;
     if tokens.is_empty() {
@@ -208,15 +157,11 @@ pub fn parse_pipeline(line: &str) -> KResult<Vec<Command>> {
     let mut commands: Vec<Command> = Vec::new();
     let mut words: Vec<String> = Vec::new();
     let mut redirect = Redirect::None;
-    // Operador de redirección a la espera de su nombre de archivo:
-    //   None            => ninguno pendiente
-    //   Some(false)     => `>`  (truncar)
-    //   Some(true)      => `>>` (añadir)
+
     let mut pending: Option<bool> = None;
 
     for tok in tokens {
-        // Si esperamos el archivo de una redirección, el siguiente token debe
-        // ser una palabra.
+
         if let Some(append) = pending {
             match tok {
                 Token::Word(w) => {
@@ -244,7 +189,7 @@ pub fn parse_pipeline(line: &str) -> KResult<Vec<Command>> {
     }
 
     if pending.is_some() {
-        // Redirección al final de la línea sin nombre de archivo.
+
         return Err(KError::InvalidArgument);
     }
 
@@ -253,27 +198,19 @@ pub fn parse_pipeline(line: &str) -> KResult<Vec<Command>> {
     Ok(commands)
 }
 
-/// Parsea una línea. `Ok(None)` = línea vacía / solo espacios. [CANÓNICO]
-///
-/// Respeta comillas simples/dobles y detecta `>`, `>>` y `|`. Devuelve la
-/// PRIMERA etapa de la tubería (normalmente la única). Para operar con todas
-/// las etapas, la shell usa [`parse_pipeline`].
 pub fn parse(line: &str) -> KResult<Option<Command>> {
     let mut pipeline = parse_pipeline(line)?;
     if pipeline.is_empty() {
         Ok(None)
     } else {
-        // `remove(0)` seguro: la tubería no está vacía.
+
         Ok(Some(pipeline.remove(0)))
     }
 }
 
 #[cfg(test)]
 mod tests {
-    //! Tests unitarios del tokenizador y el parser.
-    //!
-    //! Son lógica pura sobre `&str`; se ejecutan en el host (`cargo test`).
-    //! No forman parte de la compilación del firmware (`cfg(test)` off).
+
     use super::{parse, parse_pipeline, tokenize, Command, Redirect, Token};
     use crate::prelude::*;
     use alloc::vec;

@@ -8,6 +8,23 @@ name = "kernel"
 path = "src/main.rs"
 
 # ============================================================================
+# Features opcionales (opt-in). El build por defecto NO activa ninguna, de modo
+# que la imagen por defecto es la conocida-buena (arranca + WiFi + SSH).
+#   syscall-trap: instala el trap real de la instrucción `syscall` (EXCCAUSE=1)
+#                 sobreescribiendo `__exception` y delegando el resto a
+#                 esp-backtrace. Sin esta feature, syscall::invoke es una puerta
+#                 software directa al despachador (misma ABI, sin trap de CPU).
+#   smp:          arranca el segundo núcleo (APP_CPU) y planifica en ambos.
+#   pms:          configura la protección de memoria PMS/World-Controller.
+# Todas requieren validación en hardware; ver docs/design/remaining-phases.md.
+# ============================================================================
+[features]
+default = ["syscall-trap"]
+syscall-trap = []
+smp = []
+pms = []
+
+# ============================================================================
 # Dependencias externas — CONSOLIDADAS por el agente de integración a partir de
 # lo que pidió cada subsistema. Todas las versiones pertenecen a la MISMA tanda
 # del ecosistema esp-rs, alineada con `esp-hal 0.23.x`. Coherencia verificada en
@@ -43,6 +60,7 @@ esp-alloc     = { version = "0.6.0" }
 # `fugit::HertzU32` lo usa drivers::spi directamente (Config::with_frequency).
 # Dependencia directa porque el módulo lo importa por su ruta (`fugit::...`).
 fugit = "0.3"
+nb = "1.1"
 
 # --- Backend de flash NOR (drivers::flash -> FS/OTA) ------------------------
 # esp-storage implementa los traits embedded-storage/NorFlash sobre las rutinas
@@ -56,12 +74,13 @@ embedded-storage = "0.3.1"
 # embedded-hal 1.0: para el trait `SpiBus` (transferencia full-duplex de 2 búferes)
 # que drivers/spi.rs usa; esp-hal 0.23 implementa este trait para su `Spi` bloqueante.
 embedded-hal     = "1.0.0"
+embedded-io      = "0.6.1"
 
 # --- Red (drivers::wifi, Fase 7): esp-wifi 802.11 + smoltcp TCP/IP ----------
 # Mismos features que solicitó el subsistema. `smoltcp`/`utils` conectan el
 # `WifiDevice` de esp-wifi con el stack smoltcp. esp-wifi usa el allocator global
 # (feature `esp-alloc`, activa por defecto) — el heap ya está listo en `main`.
-esp-wifi = { version = "0.12.0", features = ["esp32s3", "wifi", "utils", "smoltcp"] }
+esp-wifi = { version = "0.12.0", features = ["esp32s3", "wifi", "ble", "utils", "smoltcp"] }
 
 # smoltcp 0.12 usa `core::net` para direcciones. Solo lo que el driver necesita.
 # (esp-wifi también trae smoltcp como dep opcional con sus propias features; Cargo

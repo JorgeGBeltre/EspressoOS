@@ -7,6 +7,8 @@ pub mod devfs;
 pub mod file;
 pub mod inode;
 pub mod mount;
+pub mod pipe;
+pub mod socket;
 
 pub use file::{Fd, OpenFile, OpenFlags, SeekFrom};
 pub use inode::{DirEntry, FileSystem, Inode, InodeKind, VfsError};
@@ -64,10 +66,36 @@ impl FdTable {
     }
 }
 
-static FD_TABLE: Mutex<FdTable> = Mutex::new(FdTable::new());
+impl FdTable {
+    pub fn new_process_table() -> Self {
+        let mut table = Self::new();
+        if let Ok(inode) = mount::resolve("/dev/console") {
+            if let Ok(file_in) = OpenFile::new(inode.clone(), OpenFlags::RDONLY) {
+                let _ = table.insert(file_in);
+            }
+            if let Ok(file_out1) = OpenFile::new(inode.clone(), OpenFlags::WRONLY) {
+                let _ = table.insert(file_out1);
+            }
+            if let Ok(file_out2) = OpenFile::new(inode.clone(), OpenFlags::WRONLY) {
+                let _ = table.insert(file_out2);
+            }
+        }
+        table
+    }
+}
+
+use alloc::collections::BTreeMap;
+use crate::scheduler::process::Pid;
+
+static PROCESS_FD_TABLES: Mutex<BTreeMap<Pid, FdTable>> = Mutex::new(BTreeMap::new());
 
 pub fn init() -> KResult<()> {
     Ok(())
+}
+
+pub fn cleanup_process_fds(pid: Pid) {
+    let mut tables = PROCESS_FD_TABLES.lock();
+    tables.remove(&pid);
 }
 
 fn create_path(path: &str, kind: InodeKind) -> KResult<Arc<dyn Inode>> {
@@ -99,29 +127,39 @@ pub fn open(path: &str, flags: OpenFlags) -> KResult<Fd> {
     }
 
     let open = OpenFile::new(inode, flags)?;
-    let mut table = FD_TABLE.lock();
+    let pid = crate::scheduler::process::get_current_pid().unwrap_or(0);
+    let mut tables = PROCESS_FD_TABLES.lock();
+    let table = tables.entry(pid).or_insert_with(FdTable::new_process_table);
     table.insert(open)
 }
 
 pub fn close(fd: Fd) -> KResult<()> {
-    let mut table = FD_TABLE.lock();
+    let pid = crate::scheduler::process::get_current_pid().unwrap_or(0);
+    let mut tables = PROCESS_FD_TABLES.lock();
+    let table = tables.entry(pid).or_insert_with(FdTable::new_process_table);
     table.remove(fd)
 }
 
 pub fn read(fd: Fd, buf: &mut [u8]) -> KResult<usize> {
-    let mut table = FD_TABLE.lock();
+    let pid = crate::scheduler::process::get_current_pid().unwrap_or(0);
+    let mut tables = PROCESS_FD_TABLES.lock();
+    let table = tables.entry(pid).or_insert_with(FdTable::new_process_table);
     let file = table.get_mut(fd)?;
     file.read(buf)
 }
 
 pub fn write(fd: Fd, buf: &[u8]) -> KResult<usize> {
-    let mut table = FD_TABLE.lock();
+    let pid = crate::scheduler::process::get_current_pid().unwrap_or(0);
+    let mut tables = PROCESS_FD_TABLES.lock();
+    let table = tables.entry(pid).or_insert_with(FdTable::new_process_table);
     let file = table.get_mut(fd)?;
     file.write(buf)
 }
 
 pub fn seek(fd: Fd, pos: SeekFrom) -> KResult<u64> {
-    let mut table = FD_TABLE.lock();
+    let pid = crate::scheduler::process::get_current_pid().unwrap_or(0);
+    let mut tables = PROCESS_FD_TABLES.lock();
+    let table = tables.entry(pid).or_insert_with(FdTable::new_process_table);
     let file = table.get_mut(fd)?;
     file.seek(pos)
 }
@@ -166,4 +204,46 @@ pub fn mount(path: &str, fs: Arc<dyn FileSystem>) -> KResult<()> {
 
 pub fn unmount(path: &str) -> KResult<()> {
     mount::unmount(path)
+}
+
+pub fn create_pipe() -> KResult<(Fd, Fd)> {
+    let (read_inode, write_inode) = pipe::create_pipe(4096);
+    let read_file = OpenFile::new(read_inode, OpenFlags::RDONLY)?;
+    let write_file = OpenFile::new(write_inode, OpenFlags::WRONLY)?;
+    
+    let pid = crate::scheduler::process::get_current_pid().unwrap_or(0);
+    let mut tables = PROCESS_FD_TABLES.lock();
+    let table = tables.entry(pid).or_insert_with(FdTable::new_process_table);
+    
+    let r_fd = table.insert(read_file)?;
+    match table.insert(write_file) {
+        Ok(w_fd) => Ok((r_fd, w_fd)),
+        Err(e) => {
+            let _ = table.remove(r_fd);
+            Err(e)
+        }
+    }
+}
+
+pub fn insert_open_file(open: OpenFile) -> KResult<Fd> {
+    let pid = crate::scheduler::process::get_current_pid().unwrap_or(0);
+    let mut tables = PROCESS_FD_TABLES.lock();
+    let table = tables.entry(pid).or_insert_with(FdTable::new_process_table);
+    table.insert(open)
+}
+
+pub fn get_inode(fd: Fd) -> KResult<Arc<dyn Inode>> {
+    let pid = crate::scheduler::process::get_current_pid().unwrap_or(0);
+    let mut tables = PROCESS_FD_TABLES.lock();
+    let table = tables.entry(pid).or_insert_with(FdTable::new_process_table);
+    let open_file = table.get_mut(fd)?;
+    Ok(open_file.inode.clone())
+}
+
+pub fn remove_fd(fd: Fd) -> KResult<()> {
+    let pid = crate::scheduler::process::get_current_pid().unwrap_or(0);
+    let mut tables = PROCESS_FD_TABLES.lock();
+    let table = tables.entry(pid).or_insert_with(FdTable::new_process_table);
+    table.remove(fd)?;
+    Ok(())
 }

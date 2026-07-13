@@ -24,7 +24,7 @@ pub const MAX_ARGS: usize = 6;
 #[cfg(not(feature = "syscall-trap"))]
 #[inline]
 pub fn invoke(num: usize, args: [usize; MAX_ARGS]) -> isize {
-    dispatch(num, &args)
+    dispatch(num, &args, core::ptr::null_mut())
 }
 
 #[cfg(feature = "syscall-trap")]

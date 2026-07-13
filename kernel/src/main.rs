@@ -50,10 +50,16 @@ fn main() -> ! {
     mm::heap::init();
 
     let (psram_base, psram_len) = esp_hal::psram::psram_raw_parts(&peripherals.PSRAM);
-    mm::heap::add_psram(psram_base, psram_len);
+    
+    // Reservar el primer 1 MB de PSRAM (0x3c000000) para binarios estáticos de usuario (userland)
+    let user_psram_size = 1024 * 1024;
+    let heap_psram_base = unsafe { psram_base.add(user_psram_size) };
+    let heap_psram_len = psram_len - user_psram_size;
+    
+    mm::heap::add_psram(heap_psram_base, heap_psram_len);
     println!(
-        "[kernel] PSRAM añadida al heap: {} bytes @ {:p}",
-        psram_len, psram_base
+        "[kernel] PSRAM añadida al heap: {} bytes @ {:p} (1MB reservado para Userland @ {:p})",
+        heap_psram_len, heap_psram_base, psram_base
     );
 
     if let Err(e) = drivers::uart::init() {
@@ -99,6 +105,14 @@ fn main() -> ! {
     if let Err(e) = vfs::mount("/tmp", fs::ramfs::RamFs::new()) {
         println!("[kernel] aviso: mount /tmp fallo: {:?}", e);
     }
+    if let Err(e) = vfs::mount("/proc", alloc::sync::Arc::new(fs::ProcFs::new())) {
+        println!("[kernel] aviso: mount /proc fallo: {:?}", e);
+    }
+    if let Err(e) = vfs::mount("/sys", alloc::sync::Arc::new(fs::SysFs::new())) {
+        println!("[kernel] aviso: mount /sys fallo: {:?}", e);
+    }
+
+    init_etc_files();
 
     // Buses I2C/SPI (Fase 3): periféricos entregados desde aquí.
     if let Err(e) = drivers::i2c::init(peripherals.I2C0, peripherals.GPIO8, peripherals.GPIO9) {
@@ -115,10 +129,32 @@ fn main() -> ! {
 
     scheduler::init();
 
-    match scheduler::spawn("shell", shell_task, 0, layout::DEFAULT_STACK_SIZE, PRIO_DEFAULT) {
-        Ok(tid) => println!("[kernel] tarea 'shell' creada (tid={})", tid),
-        Err(e) => println!("[kernel] ERROR: no se pudo crear la shell: {:?}", e),
+    // Intentar cargar y ejecutar /bin/init en World-1
+    println!("[kernel] cargando /bin/init...");
+    let mut init_spawned = false;
+    match crate::fs::elf::load_elf("/bin/init") {
+        Ok((entry, size, addr)) => {
+            let entry_fn: fn(usize) = unsafe { core::mem::transmute(entry as usize) };
+            match scheduler::spawn("/bin/init", entry_fn, 0, layout::DEFAULT_STACK_SIZE, PRIO_DEFAULT) {
+                Ok(tid) => {
+                    let pid = scheduler::process::register_process("/bin/init", tid, true, addr, size);
+                    println!("[kernel] Proceso init (PID {}) creado con éxito", pid);
+                    init_spawned = true;
+                }
+                Err(e) => println!("[kernel] ERROR al spawnear init: {:?}", e),
+            }
+        }
+        Err(e) => println!("[kernel] /bin/init no encontrado en EspFs: {:?}", e),
     }
+
+    if !init_spawned {
+        println!("[kernel] Usando fallback a consola del kernel...");
+        match scheduler::spawn("shell", shell_task, 0, layout::DEFAULT_STACK_SIZE, PRIO_DEFAULT) {
+            Ok(tid) => println!("[kernel] tarea 'shell' creada (tid={})", tid),
+            Err(e) => println!("[kernel] ERROR: no se pudo crear la shell: {:?}", e),
+        }
+    }
+
     match scheduler::spawn(
         "heartbeat",
         heartbeat_task,
@@ -200,5 +236,27 @@ fn sleep_ms(ms: u64) {
     let inicio = arch::xtensa::timer::uptime_ms();
     while arch::xtensa::timer::uptime_ms().saturating_sub(inicio) < ms {
         scheduler::yield_now();
+    }
+}
+
+fn init_etc_files() {
+    let _ = vfs::mkdir("/etc");
+    
+    // Crear /etc/rc si no existe
+    if let Err(_) = vfs::mount::resolve("/etc/rc") {
+        if let Ok(fd) = vfs::open("/etc/rc", vfs::OpenFlags(vfs::OpenFlags::CREATE.0 | vfs::OpenFlags::WRONLY.0)) {
+            let rc_content = b"# EspressoOS Startup Script\n/bin/echo [rc] Sistema iniciado!\n/bin/ls\n";
+            let _ = vfs::write(fd, rc_content);
+            let _ = vfs::close(fd);
+        }
+    }
+    
+    // Crear /etc/passwd si no existe
+    if let Err(_) = vfs::mount::resolve("/etc/passwd") {
+        if let Ok(fd) = vfs::open("/etc/passwd", vfs::OpenFlags(vfs::OpenFlags::CREATE.0 | vfs::OpenFlags::WRONLY.0)) {
+            let passwd_content = b"root:root\nguest:guest\n";
+            let _ = vfs::write(fd, passwd_content);
+            let _ = vfs::close(fd);
+        }
     }
 }

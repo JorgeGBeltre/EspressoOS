@@ -33,6 +33,22 @@ pub enum Syscall {
     Sbrk = 13,
 
     Yield = 14,
+
+    Signal = 15,
+
+    Kill = 16,
+
+    Sigreturn = 17,
+
+    Socket = 18,
+
+    Bind = 19,
+
+    Listen = 20,
+
+    Accept = 21,
+
+    Connect = 22,
 }
 
 impl Syscall {
@@ -54,6 +70,14 @@ impl Syscall {
             12 => Syscall::UptimeMs,
             13 => Syscall::Sbrk,
             14 => Syscall::Yield,
+            15 => Syscall::Signal,
+            16 => Syscall::Kill,
+            17 => Syscall::Sigreturn,
+            18 => Syscall::Socket,
+            19 => Syscall::Bind,
+            20 => Syscall::Listen,
+            21 => Syscall::Accept,
+            22 => Syscall::Connect,
             _ => return None,
         };
         Some(sc)

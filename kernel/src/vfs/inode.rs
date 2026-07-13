@@ -32,6 +32,10 @@ pub trait Inode: Send + Sync {
 
     fn size(&self) -> u64;
 
+    fn as_socket(&self) -> Option<smoltcp::iface::SocketHandle> {
+        None
+    }
+
     fn read_at(&self, off: u64, buf: &mut [u8]) -> KResult<usize>;
 
     fn write_at(&self, off: u64, buf: &[u8]) -> KResult<usize>;

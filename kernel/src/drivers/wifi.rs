@@ -48,6 +48,17 @@ pub const OTA_PORT: u16 = 3300;
 const OTA_RX_SIZE: usize = 8192;
 const OTA_TX_SIZE: usize = 1024;
 
+pub enum NetCmd {
+    Connect {
+        handle: smoltcp::iface::SocketHandle,
+        ip: [u8; 4],
+        port: u16,
+    },
+}
+
+pub static NET_SOCKETS: Mutex<Option<SocketSet<'static>>> = Mutex::new(None);
+pub static NET_CMD_QUEUE: Mutex<Vec<NetCmd>> = Mutex::new(Vec::new());
+
 struct TcpTransport<'s> {
     sock: &'s mut tcp::Socket<'static>,
 }
@@ -281,8 +292,8 @@ pub fn net_task(_arg: usize) {
     if_cfg.random_seed = uptime_ms().wrapping_mul(0x9E37_79B9_7F4A_7C15);
     let mut iface = Interface::new(if_cfg, &mut device, now_smoltcp());
 
-    let mut sockets = SocketSet::new(Vec::new());
-    let dhcp_handle = sockets.add(dhcpv4::Socket::new());
+    let mut sockets_set = SocketSet::new(Vec::new());
+    let dhcp_handle = sockets_set.add(dhcpv4::Socket::new());
 
     let echo_rx = tcp::SocketBuffer::new(alloc::vec![0u8; ECHO_RX_SIZE]);
     let echo_tx = tcp::SocketBuffer::new(alloc::vec![0u8; ECHO_TX_SIZE]);
@@ -292,7 +303,7 @@ pub fn net_task(_arg: usize) {
         set_status(WifiStatus::Failed);
         return;
     }
-    let echo_handle = sockets.add(echo);
+    let echo_handle = sockets_set.add(echo);
 
     let ssh_rx = tcp::SocketBuffer::new(alloc::vec![0u8; SSH_RX_SIZE]);
     let ssh_tx = tcp::SocketBuffer::new(alloc::vec![0u8; SSH_TX_SIZE]);
@@ -300,7 +311,7 @@ pub fn net_task(_arg: usize) {
     if let Err(e) = ssh_sock.listen(SSH_PORT) {
         println!("[ssh] ERROR listen({}): {:?}", SSH_PORT, e);
     }
-    let ssh_handle = sockets.add(ssh_sock);
+    let ssh_handle = sockets_set.add(ssh_sock);
 
     // Socket de recepción OTA (Fase 5): bufferea la imagen en PSRAM.
     let ota_rx = tcp::SocketBuffer::new(alloc::vec![0u8; OTA_RX_SIZE]);
@@ -309,7 +320,7 @@ pub fn net_task(_arg: usize) {
     if let Err(e) = ota_sock.listen(OTA_PORT) {
         println!("[ota] ERROR listen({}): {:?}", OTA_PORT, e);
     }
-    let ota_handle = sockets.add(ota_sock);
+    let ota_handle = sockets_set.add(ota_sock);
     let mut ota_receiving = false;
 
     let host_key = HostKey::from_seed(&crate::drivers::ssh::config::HOST_KEY_SEED);
@@ -321,156 +332,170 @@ pub fn net_task(_arg: usize) {
     let mut next_link_check = uptime_ms().saturating_add(LINK_CHECK_MS);
     let mut buf = [0u8; ECHO_CHUNK];
 
+    *NET_SOCKETS.lock() = Some(sockets_set);
+
     loop {
+        {
+            let t = now_smoltcp();
+            
+            // Procesar comandos encolados
+            let mut cmds = Vec::new();
+            {
+                let mut q = NET_CMD_QUEUE.lock();
+                cmds.extend(q.drain(..));
+            }
+            
+            let mut sockets_guard = NET_SOCKETS.lock();
+            let sockets = sockets_guard.as_mut().unwrap();
+            
+            for cmd in cmds {
+                match cmd {
+                    NetCmd::Connect { handle, ip, port } => {
+                        let sock = sockets.get_mut::<tcp::Socket>(handle);
+                        let remote_addr = smoltcp::wire::IpAddress::Ipv4(smoltcp::wire::Ipv4Address::from_octets(ip));
+                        let remote_endpoint = smoltcp::wire::IpEndpoint::new(remote_addr, port);
+                        let local_port = 49152 + (uptime_ms() % 16384) as u16;
+                        let _ = sock.connect(iface.context(), remote_endpoint, local_port);
+                    }
+                }
+            }
+            
+            let _ = iface.poll(t, &mut device, sockets);
 
-        let t = now_smoltcp();
-        let _ = iface.poll(t, &mut device, &mut sockets);
-
-        let event = sockets.get_mut::<dhcpv4::Socket>(dhcp_handle).poll();
-        match event {
-            Some(dhcpv4::Event::Configured(config)) => {
-                iface.update_ip_addrs(|addrs| {
-                    addrs.clear();
-                    let _ = addrs.push(IpCidr::Ipv4(config.address));
-                });
-                if let Some(router) = config.router {
-                    let _ = iface.routes_mut().add_default_ipv4_route(router);
-                } else {
+            let event = sockets.get_mut::<dhcpv4::Socket>(dhcp_handle).poll();
+            match event {
+                Some(dhcpv4::Event::Configured(config)) => {
+                    iface.update_ip_addrs(|addrs| {
+                        addrs.clear();
+                        let _ = addrs.push(IpCidr::Ipv4(config.address));
+                    });
+                    if let Some(router) = config.router {
+                        let _ = iface.routes_mut().add_default_ipv4_route(router);
+                    } else {
+                        iface.routes_mut().remove_default_ipv4_route();
+                    }
+                    if !have_ip {
+                        if let Some(ip) = iface.ipv4_addr() {
+                            println!("[net] IP = {}", ip);
+                            println!(
+                                "[net] SSH escuchando en puerto {}, ECHO en {}, OTA en {}",
+                                SSH_PORT, ECHO_PORT, OTA_PORT
+                            );
+                            set_status(WifiStatus::Connected);
+                        }
+                        have_ip = true;
+                    }
+                }
+                Some(dhcpv4::Event::Deconfigured) => {
+                    iface.update_ip_addrs(|addrs| addrs.clear());
                     iface.routes_mut().remove_default_ipv4_route();
-                }
-                if !have_ip {
-                    if let Some(ip) = iface.ipv4_addr() {
-
-                        println!("[net] IP = {}", ip);
-                        println!(
-                            "[net] servidor de ECO TCP escuchando en el puerto {} (probar: nc {} {})",
-                            ECHO_PORT, ip, ECHO_PORT
-                        );
-                        println!(
-                            "[ssh] servidor SSH en el puerto {} (probar: ssh root@{})",
-                            SSH_PORT, ip
-                        );
-                        println!("[ssh] host key: {}", host_key.fingerprint());
-                        println!(
-                            "[ota] recepción OTA en el puerto {} (probar: nc {} {} < firmware.bin)",
-                            OTA_PORT, ip, OTA_PORT
-                        );
-                    }
-                    have_ip = true;
-                    set_status(WifiStatus::Connected);
-                }
-            }
-            Some(dhcpv4::Event::Deconfigured) => {
-                iface.update_ip_addrs(|addrs| addrs.clear());
-                iface.routes_mut().remove_default_ipv4_route();
-                have_ip = false;
-                if status() == WifiStatus::Connected {
-                    set_status(WifiStatus::Connecting);
-                }
-            }
-            None => {}
-        }
-
-        {
-            let sock = sockets.get_mut::<tcp::Socket>(echo_handle);
-
-            if !sock.is_open() {
-                let _ = sock.listen(ECHO_PORT);
-            }
-
-            if sock.can_recv() {
-                if let Ok(n) = sock.recv_slice(&mut buf) {
-                    if n > 0 && sock.can_send() {
-                        let _ = sock.send_slice(&buf[..n]);
+                    have_ip = false;
+                    if status() == WifiStatus::Connected {
+                        set_status(WifiStatus::Connecting);
                     }
                 }
+                None => {}
             }
 
-            if sock.may_send() && !sock.may_recv() {
-                sock.close();
+            {
+                let sock = sockets.get_mut::<tcp::Socket>(echo_handle);
+
+                if !sock.is_open() {
+                    let _ = sock.listen(ECHO_PORT);
+                }
+
+                if sock.can_recv() {
+                    if let Ok(n) = sock.recv_slice(&mut buf) {
+                        if n > 0 && sock.can_send() {
+                            let _ = sock.send_slice(&buf[..n]);
+                        }
+                    }
+                }
+
+                if sock.may_send() && !sock.may_recv() {
+                    sock.close();
+                }
             }
-        }
 
-        {
-            let sock = sockets.get_mut::<tcp::Socket>(ssh_handle);
+            {
+                let sock = sockets.get_mut::<tcp::Socket>(ssh_handle);
 
-            if !sock.is_open() {
-                let _ = sock.listen(SSH_PORT);
-                ssh_active = false;
-            }
-            if sock.is_active() {
-
-                if !ssh_active {
+                if !sock.is_open() {
+                    let _ = sock.listen(SSH_PORT);
+                    ssh_active = false;
+                }
+                if sock.is_active() && !ssh_active {
                     ssh_conn = Connection::new(HwRng::new(rng));
                     ssh_active = true;
                 }
-                let mut transport = TcpTransport { sock };
-
-                match ssh_conn.pump(&mut transport, &host_key) {
-                    Ok(()) => {
-
-                        if ssh_conn.is_closed() {
-                            transport.close();
-                            ssh_active = false;
+                if ssh_active {
+                    let mut transport = TcpTransport { sock };
+                    match ssh_conn.pump(&mut transport, &host_key) {
+                        Ok(()) => {
+                            if ssh_conn.is_closed() {
+                                transport.close();
+                                ssh_active = false;
+                            }
                         }
-                    }
-                    Err(e) => {
-
-                        println!("[ssh] pump ERROR en estado {:?}: {:?}", ssh_conn.state(), e);
-                        transport.close();
-                        ssh_active = false;
-                    }
-                }
-            }
-        }
-
-        {
-            let sock = sockets.get_mut::<tcp::Socket>(ota_handle);
-            if !sock.is_open() {
-                let _ = sock.listen(OTA_PORT);
-                ota_receiving = false;
-            }
-            if sock.is_active() {
-                if !ota_receiving {
-                    crate::ota::rx_begin();
-                    ota_receiving = true;
-                    println!("[ota] recibiendo imagen en el puerto {}...", OTA_PORT);
-                }
-                if sock.can_recv() {
-                    if let Ok(n) = sock.recv_slice(&mut buf) {
-                        if n > 0 {
-                            if let Err(e) = crate::ota::rx_push(&buf[..n]) {
-                                println!("[ota] ERROR al bufferear: {:?}", e);
-                                crate::ota::rx_clear();
-                                sock.close();
-                                ota_receiving = false;
+                        Err(e) => {
+                            if e != KError::WouldBlock {
+                                println!("[ssh] pump ERROR en estado {:?}: {:?}", ssh_conn.state(), e);
+                                transport.close();
+                                ssh_active = false;
                             }
                         }
                     }
                 }
-                // El remoto cerró su lado de escritura: fin de la imagen.
-                if ota_receiving && !sock.may_recv() {
-                    let total = crate::ota::rx_len();
-                    println!(
-                        "[ota] imagen recibida: {} bytes. Flashea con 'ota apply' (mejor por consola).",
-                        total
-                    );
-                    sock.close();
+            }
+
+            {
+                let sock = sockets.get_mut::<tcp::Socket>(ota_handle);
+
+                if !sock.is_open() {
+                    let _ = sock.listen(OTA_PORT);
                     ota_receiving = false;
                 }
-            }
-        }
-
-        if uptime_ms() >= next_link_check {
-            next_link_check = uptime_ms().saturating_add(LINK_CHECK_MS);
-            match controller.is_connected() {
-                Ok(true) => {}
-                _ => {
-                    set_status(WifiStatus::Connecting);
-                    let _ = controller.connect();
+                if sock.is_active() {
+                    if !ota_receiving {
+                        crate::ota::rx_begin();
+                        ota_receiving = true;
+                        println!("[ota] recibiendo imagen en el puerto {}...", OTA_PORT);
+                    }
+                    if sock.can_recv() {
+                        if let Ok(n) = sock.recv_slice(&mut buf) {
+                            if n > 0 {
+                                if let Err(e) = crate::ota::rx_push(&buf[..n]) {
+                                    println!("[ota] ERROR al bufferear: {:?}", e);
+                                    crate::ota::rx_clear();
+                                    sock.close();
+                                    ota_receiving = false;
+                                }
+                            }
+                        }
+                    }
+                    if ota_receiving && !sock.may_recv() {
+                        let total = crate::ota::rx_len();
+                        println!(
+                            "[ota] imagen recibida: {} bytes. Flashea con 'ota apply' (mejor por consola).",
+                            total
+                        );
+                        sock.close();
+                        ota_receiving = false;
+                    }
                 }
             }
-        }
+
+            if uptime_ms() >= next_link_check {
+                next_link_check = uptime_ms().saturating_add(LINK_CHECK_MS);
+                match controller.is_connected() {
+                    Ok(true) => {}
+                    _ => {
+                        set_status(WifiStatus::Connecting);
+                        let _ = controller.connect();
+                    }
+                }
+            }
+        } // guard drops here
 
         scheduler::yield_now();
     }

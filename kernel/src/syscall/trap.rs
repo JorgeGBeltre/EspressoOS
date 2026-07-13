@@ -39,26 +39,33 @@ unsafe extern "C" fn __exception(cause: ExceptionCause, save_frame: &mut Context
             save_frame.A7 as usize,
             save_frame.A8 as usize,
         ];
-        let ret = crate::syscall::dispatch(num, &args);
+        let ret = crate::syscall::dispatch(num, &args, save_frame as *mut Context);
         save_frame.A2 = ret as u32;
         // Avanzar EPC más allá de `syscall` para no re-ejecutarla al volver.
         save_frame.PC = save_frame.PC.wrapping_add(SYSCALL_INSN_LEN);
 
+        let mut next_sp: Option<u32> = None;
         if crate::scheduler::need_resched() {
-            if let Some(sp) = crate::scheduler::preempt_switch(save_frame) {
-                core::arch::asm!(
-                    "mov a5, {0}",
-                    "movi a4, 1",
-                    "rsr.windowbase a6",
-                    "ssl a6",
-                    "sll a4, a4",
-                    "wsr.windowstart a4",
-                    "rsync",
-                    in(reg) sp,
-                    out("a6") _,
-                    out("a4") _
-                );
-            }
+            next_sp = crate::scheduler::preempt_switch(save_frame);
+        }
+
+        if let Some(sp) = next_sp {
+            let next_frame = &mut *(sp as *mut Context);
+            let _ = crate::scheduler::process::check_signals(next_frame);
+            core::arch::asm!(
+                "mov a5, {0}",
+                "movi a4, 1",
+                "rsr.windowbase a6",
+                "ssl a6",
+                "sll a4, a4",
+                "wsr.windowstart a4",
+                "rsync",
+                in(reg) sp,
+                out("a6") _,
+                out("a4") _
+            );
+        } else {
+            let _ = crate::scheduler::process::check_signals(save_frame);
         }
         return;
     }

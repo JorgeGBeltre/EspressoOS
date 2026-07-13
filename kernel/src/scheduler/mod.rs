@@ -10,6 +10,7 @@ use crate::prelude::*;
 pub mod core_sync;
 pub mod policy;
 pub mod task;
+pub mod process;
 
 use task::{Task, TaskState, Tid};
 
@@ -465,4 +466,41 @@ pub fn run_secondary() -> ! {
     loop {
         core::hint::spin_loop();
     }
+}
+
+pub fn set_task_user(tid: Tid, is_user: bool) {
+    with_sched(|s| {
+        if let Some(t) = s.tasks.get_mut(&tid) {
+            t.is_user = is_user;
+        }
+    });
+}
+
+pub fn block_current() {
+    with_sched(|s| {
+        #[cfg(feature = "smp")]
+        let cur = if core_id() == 1 { s.current1 } else { s.current };
+        #[cfg(not(feature = "smp"))]
+        let cur = s.current;
+
+        if let Some(t) = s.tasks.get_mut(&cur) {
+            t.state = TaskState::Blocked;
+        }
+        s.ready.retain(|x| *x != cur);
+        #[cfg(feature = "smp")]
+        s.ready1.retain(|x| *x != cur);
+    });
+    set_need_resched();
+    yield_now();
+}
+
+pub fn unblock_task(tid: Tid) {
+    with_sched(|s| {
+        if let Some(t) = s.tasks.get_mut(&tid) {
+            if t.state == TaskState::Blocked {
+                t.state = TaskState::Ready;
+                s.ready.push(tid);
+            }
+        }
+    });
 }

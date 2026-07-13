@@ -136,6 +136,7 @@ fn main() -> ! {
     // preempción activa). Nunca restauramos aquí: `run()` no retorna.
     let _ = arch::xtensa::interrupts::disable();
     arch::xtensa::timer::init();
+    println!("[kernel] arrancando el planificador...");
 
     // -- §5.18 Arrancar el bucle del planificador. NO retorna. -----------------
     scheduler::run();
@@ -171,9 +172,20 @@ fn heartbeat_task(_arg: usize) {
     let _ = drivers::gpio::configure(LED_GPIO, drivers::gpio::PinMode::Output);
 
     let mut encendido = false;
+    let mut tick: u64 = 0;
     loop {
         encendido = !encendido;
         let _ = drivers::gpio::write(LED_GPIO, encendido);
+        // DIAGNÓSTICO (P1/P2): imprime por COM5 para confirmar que el scheduler,
+        // el cambio de contexto y el reloj (uptime_ms) funcionan de verdad. Si se
+        // ven ticks periódicos, la multitarea cooperativa está viva.
+        println!(
+            "[heartbeat] tick={} uptime={}ms led={}",
+            tick,
+            arch::xtensa::timer::uptime_ms(),
+            encendido as u8
+        );
+        tick = tick.wrapping_add(1);
         sleep_ms(HEARTBEAT_MS);
     }
 }

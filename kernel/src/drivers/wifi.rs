@@ -349,10 +349,11 @@ pub fn net_task(_arg: usize) {
     }
     let ssh_handle = sockets.add(ssh_sock);
 
-    // Host key ed25519 (generada al arranque con el TRNG; la radio está activa
-    // aquí, así que HwRng es un CSPRNG válido). Se imprime su huella para known_hosts.
-    let mut ssh_seed_rng = HwRng::new(rng);
-    let host_key = HostKey::generate(&mut ssh_seed_rng);
+    // Host key ed25519 con semilla FIJA (config::HOST_KEY_SEED) -> la HUELLA es
+    // ESTABLE entre reinicios/flasheos, así no hay que borrar known_hosts
+    // (`ssh-keygen -R`) en cada conexión. En producción se generaría con el TRNG
+    // y se persistiría en el FS.
+    let host_key = HostKey::from_seed(&crate::drivers::ssh::config::HOST_KEY_SEED);
     // Máquina de estados de la conexión SSH (una a la vez en el MVP).
     let mut ssh_conn = Connection::new(HwRng::new(rng));
     let mut ssh_active = false;

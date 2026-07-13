@@ -27,6 +27,7 @@ The system implements fundamental operating system concepts (a Virtual File Syst
   - [Syscall Mechanism (System Calls)](#syscall-mechanism-system-calls)
   - [A/B Update Scheme (OTA)](#ab-update-scheme-ota)
   - [Peripheral Device Drivers](#peripheral-device-drivers)
+  - [SSH Server (Skeleton \& Wire-Format)](#ssh-server-skeleton--wire-format)
 - [Interactive REPL Shell](#interactive-repl-shell)
 - [Verification and Mock Testing](#verification-and-mock-testing)
 - [Contribution and License](#contribution-and-license)
@@ -55,15 +56,15 @@ Bring-up       Memory         Multitasking   Bus Drivers    Storage & VFS
 | Phase | Title | Involved Components / Status |
 | :--- | :--- | :--- |
 | **Phase 0** | **Bring-up (Skeleton)** | **[CURRENT]** Repository directory tree configured. Xtensa CPU clock setup, kernel heap initialization (SRAM), console UART, VFS boot (mounting `/dev` and `/tmp`), scheduler setup with `idle` thread, interactive `shell`, and a `heartbeat` task (blinking LED). |
-| **Phase 1** | **Memory Management (PSRAM)** | Enabling mapping and heap integration for the 8 MB external PSRAM using `esp-alloc` as a secondary allocator region ([mm/heap.rs](file:///C:/Users/Jorge/Desktop/Firmware/EspressoOS/kernel/src/mm/heap.rs)). |
-| **Phase 2** | **Task Scheduler** | Fully preemptive multitasking driven by hardware interrupts (SYSTIMER at [timer.rs](file:///C:/Users/Jorge/Desktop/Firmware/EspressoOS/kernel/src/arch/xtensa/timer.rs)) and Round-Robin scheduler policies at [policy.rs](file:///C:/Users/Jorge/Desktop/Firmware/EspressoOS/kernel/src/scheduler/policy.rs). |
-| **Phase 3** | **Bus Drivers** | Implementing and integrating master bus drivers for I2C ([i2c.rs](file:///C:/Users/Jorge/Desktop/Firmware/EspressoOS/kernel/src/drivers/i2c.rs)) and SPI ([spi.rs](file:///C:/Users/Jorge/Desktop/Firmware/EspressoOS/kernel/src/drivers/spi.rs)) at the kernel level. |
-| **Phase 4** | **Storage & Filesystems** | Connecting the internal SPI flash NOR driver ([flash.rs](file:///C:/Users/Jorge/Desktop/Firmware/EspressoOS/kernel/src/drivers/flash.rs)) and mounting **LittleFS** ([fs/littlefs/mod.rs](file:///C:/Users/Jorge/Desktop/Firmware/EspressoOS/kernel/src/fs/littlefs/mod.rs)) as the primary persistent storage on `/`. |
-| **Phase 5** | **OTA A/B Updates** | OTA firmware partition selection, validation (checksum/signatures), writing, and failsafe rollback features inside [ota/partition.rs](file:///C:/Users/Jorge/Desktop/Firmware/EspressoOS/kernel/src/ota/partition.rs). |
+| **Phase 1** | **Memory Management (PSRAM)** | Enabling mapping and heap integration for the 8 MB external PSRAM using `esp-alloc` as a secondary allocator region ([mm/heap.rs](kernel/src/mm/heap.rs)). |
+| **Phase 2** | **Task Scheduler** | Fully preemptive multitasking driven by hardware interrupts (SYSTIMER at [timer.rs](kernel/src/arch/xtensa/timer.rs)) and Round-Robin scheduler policies at [policy.rs](kernel/src/scheduler/policy.rs). |
+| **Phase 3** | **Bus Drivers** | Implementing and integrating master bus drivers for I2C ([i2c.rs](kernel/src/drivers/i2c.rs)) and SPI ([spi.rs](kernel/src/drivers/spi.rs)) at the kernel level. |
+| **Phase 4** | **Storage & Filesystems** | Connecting the internal SPI flash NOR driver ([flash.rs](kernel/src/drivers/flash.rs)) and mounting **LittleFS** ([fs/littlefs/mod.rs](kernel/src/fs/littlefs/mod.rs)) as the primary persistent storage on `/`. |
+| **Phase 5** | **OTA A/B Updates** | OTA firmware partition selection, validation (checksum/signatures), writing, and failsafe rollback features inside [ota/partition.rs](kernel/src/ota/partition.rs). |
 | **Phase 6** | **Syscalls & Userland** | Isolation of system calls and execution of unprivileged user applications with separated kernel and user stacks. |
-| **Phase 7** | **Networking (WiFi)** | Enabling the 802.11 radio transceiver using `esp-wifi` bound to the `smoltcp` TCP/IP stack ([drivers/wifi.rs](file:///C:/Users/Jorge/Desktop/Firmware/EspressoOS/kernel/src/drivers/wifi.rs)). |
-| **Phase 8** | **Memory Protection (PMS)** | Configuring the ESP32-S3 PMS (Peripheral Memory System) / World Controller hardware registers to protect kernel address spaces from user space tasks ([mm/mpu.rs](file:///C:/Users/Jorge/Desktop/Firmware/EspressoOS/kernel/src/mm/mpu.rs)). |
-| **Phase 9** | **SMP Dual-Core** | Enabling Symmetric Multiprocessing across both Xtensa LX7 cores (PRO_CPU and APP_CPU) using atomic spinlocks and core affinity policies ([scheduler/core_sync.rs](file:///C:/Users/Jorge/Desktop/Firmware/EspressoOS/kernel/src/scheduler/core_sync.rs)). |
+| **Phase 7** | **Networking (WiFi)** | Enabling the 802.11 radio transceiver using `esp-wifi` bound to the `smoltcp` TCP/IP stack ([drivers/wifi.rs](kernel/src/drivers/wifi.rs)). |
+| **Phase 8** | **Memory Protection (PMS)** | Configuring the ESP32-S3 PMS (Peripheral Memory System) / World Controller hardware registers to protect kernel address spaces from user space tasks ([mm/mpu.rs](kernel/src/mm/mpu.rs)). |
+| **Phase 9** | **SMP Dual-Core** | Enabling Symmetric Multiprocessing across both Xtensa LX7 cores (PRO_CPU and APP_CPU) using atomic spinlocks and core affinity policies ([scheduler/core_sync.rs](kernel/src/scheduler/core_sync.rs)). |
 
 ---
 
@@ -71,11 +72,11 @@ Bring-up       Memory         Multitasking   Bus Drivers    Storage & VFS
 
 - **Pure Rust `no_std` Development**: Zero dependency on the C-based ESP-IDF framework or standard library; complete low-level control of the hardware.
 - **Virtual File System (VFS)**: Uniform abstractions for devices and file operations (`/dev/console`, `/dev/null`, `/dev/zero`, `/tmp`). Standardized file descriptors (`Fd`) supporting `open`/`close`/`read`/`write`/`seek`/`readdir`.
-- **Hybrid Task Scheduler**: Supports cooperative multitasking through `yield_now()` and preemptive scheduling triggered by the hardware SYSTIMER interrupt, managing Xtensa register frames directly in assembly ([context.rs](file:///C:/Users/Jorge/Desktop/Firmware/EspressoOS/kernel/src/arch/xtensa/context.rs)).
+- **Hybrid Task Scheduler**: Supports cooperative multitasking through `yield_now()` and preemptive scheduling triggered by the hardware SYSTIMER interrupt, managing Xtensa register frames directly in assembly ([context.rs](kernel/src/arch/xtensa/context.rs)).
 - **System Call ABI**: POSIX-like system calls utilizing registers (e.g., `a2` for syscall index) to transition from user mode to kernel mode safely.
 - **OTA Updates & Partition Mappings**: Core logic and structures compatible with the Espressif partition table format, prepared for safe, atomic OTA updates.
 - **Custom Partition Generator**: Bundled Python utility to generate and inspect bin tables compatible with the hardware ROM bootloader.
-- **Logical Verification Simulator**: A comprehensive Python-based mock test harness ([logic_tests.py](file:///C:/Users/Jorge/Desktop/Firmware/EspressoOS/tools/tests/logic_tests.py)) that mimics the exact behavior of key OS modules for verification in targetless host environments.
+- **Logical Verification Simulator**: A comprehensive Python-based mock test harness ([logic_tests.py](tools/tests/logic_tests.py)) that mimics the exact behavior of key OS modules for verification in targetless host environments.
 
 ---
 
@@ -110,6 +111,13 @@ EspressoOS/
 │   │   │   ├── spi.rs      # SPI master bus driver (skeleton)
 │   │   │   ├── i2c.rs      # I2C master bus driver (skeleton)
 │   │   │   ├── wifi.rs     # Network driver (esp-wifi + smoltcp) (draft)
+│   │   │   ├── ssh/        # Minimal SSH-2.0 server (skeleton, Phase 7+)
+│   │   │   │   ├── auth.rs    # User authentication (password / publickey ed25519)
+│   │   │   │   ├── channel.rs # Session channels & shell routing logic
+│   │   │   │   ├── crypt.rs   # Session encryption (ChaCha20-Poly1305 AEAD)
+│   │   │   │   ├── kex.rs     # Key Exchange (curve25519-sha256 ECDH & KDF)
+│   │   │   │   ├── proto.rs   # RFC 4251 types and Binary Packet Protocol
+│   │   │   │   └── mod.rs     # Connection state machine and server entry
 │   │   │   └── mod.rs
 │   │   ├── fs/             # Core File System Drivers
 │   │   │   ├── ramfs.rs    # In-memory RAM filesystem
@@ -129,6 +137,7 @@ EspressoOS/
 │   │   │   └── mod.rs
 │   │   ├── shell/          # Interactive REPL Environment
 │   │   │   ├── parser.rs   # CLI tokenizer and syntax parser (redirections, pipes)
+│   │   │   ├── remote.rs   # Shell Io trait and local/remote (SSH) adapters
 │   │   │   ├── commands/   # Shell built-in coreutils (echo, uptime, free, ps, etc.)
 │   │   │   └── mod.rs
 │   │   ├── syscall/        # Syscall Dispatcher
@@ -150,7 +159,9 @@ EspressoOS/
 │   ├── mkimage/            # Packaging tools for firmware binary creation (skeleton)
 │   │   └── README.md
 │   └── tests/              # Test suites
-│       └── logic_tests.py  # Python emulation suite to test OS logic
+│       ├── logic_tests.py  # Python emulation suite to test OS logic
+│       ├── ssh_proto_tests.py # Test suite for SSH packet formatting & types
+│       └── run_all.py         # Unified Python test runner
 ├── Cargo.toml              # Parent workspace Cargo configuration
 ├── partitions.csv          # Flash memory layout specification
 ├── rust-toolchain.toml     # Toolchain pin configuration
@@ -163,25 +174,56 @@ EspressoOS/
 
 To compile and flash EspressoOS, you will need the Espressif Xtensa Rust toolchain, flashing tools, and Python 3.
 
-1. **Install Rust + Espressif Xtensa Toolchain**:
-   Install using the official `espup` tool:
-   ```bash
-   cargo install espup
-   espup install
-   ```
-   *Note: Follow the terminal instructions to export variables (e.g. `source ~/export-esp.sh` or configure environment variables in Windows).*
+### 1. Install Rust + Espressif Xtensa Toolchain & Flashing Tools
 
-2. **Install Flashing Tools (`espflash`)**:
-   ```bash
-   cargo install espflash
-   ```
+Install `espup` (the toolchain installer) and `espflash` (flashing and monitoring utility) using Cargo:
 
-3. **Hardware Connections**:
-   Connect your **ESP32-S3** board to the host PC using the native **USB-Serial-JTAG** port directly (connected to the chip, not via external USB-to-UART bridging ICs if the board has two ports).
+```bash
+# Install toolchain and flashing utilities
+cargo install espup --locked
+cargo install espflash
+```
+
+Once installed, run `espup` to set up the toolchain on your system:
+```bash
+espup install
+```
+
+### 2. Configure Environment Variables
+
+Based on your operating system and shell, you must source the environment script to make the Xtensa toolchain accessible in your current terminal session:
+
+#### On Windows (PowerShell)
+You may need to adjust the execution policy in your session to run the script:
+```powershell
+# Allow local script execution (run as Administrator if needed, or CurrentUser)
+Set-ExecutionPolicy RemoteSigned -Scope CurrentUser
+
+# Load Espressif environment variables
+. $HOME\export-esp.ps1
+```
+
+#### On Linux / macOS
+```bash
+source $HOME/export-esp.sh
+```
+
+To verify that the tools and environment are set up correctly, check the flashing tool version:
+```bash
+espflash --version
+```
+
+### 3. Hardware Connections
+Connect your **ESP32-S3** board to the host PC using the native **USB-Serial-JTAG** port directly (connected to the chip, not via external USB-to-UART bridging ICs if the board has two ports).
 
 ---
 
 ## Building and Flashing
+
+Make sure you are in the repository directory before building:
+```bash
+cd EspressoOS
+```
 
 ### 1. Compile the Partition Table
 The flash memory must be partitioned before compiling and flashing the operating system. Run the Python generator from the repository root:
@@ -189,7 +231,7 @@ The flash memory must be partitioned before compiling and flashing the operating
 ```bash
 python tools/partition-gen/partition_gen.py
 ```
-This utility parses [partitions.csv](file:///C:/Users/Jorge/Desktop/Firmware/EspressoOS/partitions.csv) and compiles it into `partitions.bin`, validating partition alignments and boundary limits.
+This utility parses [partitions.csv](partitions.csv) and compiles it into `partitions.bin`, validating partition alignments and boundary limits.
 
 ### 2. Build the Kernel
 Compile the kernel binary optimized for the Xtensa architecture:
@@ -217,7 +259,7 @@ cargo run --release
 esp32s3-os shell. Escribe 'help' para ver los comandos.
 esp32s3-os> 
 ```
-The on-board LED will flash at approximately **1 Hz**. If the LED does not blink, check the `LED_GPIO` constant defined in [main.rs](file:///C:/Users/Jorge/Desktop/Firmware/EspressoOS/kernel/src/main.rs#L44) and change it to match your board layout (typically GPIO 2 or GPIO 48).
+The on-board LED will flash at approximately **1 Hz**. If the LED does not blink, check the `LED_GPIO` constant defined in [main.rs](kernel/src/main.rs#L44) and change it to match your board layout (typically GPIO 2 or GPIO 48).
 
 ---
 
@@ -237,7 +279,7 @@ Flash Address Map (16 MB):
 0xFF0000 ├────────────────────────────┤ 0x100000: coredump (Crash dumps, 64 KB)
 ```
 
-The matching flash map layout constants are declared in [prelude.rs](file:///C:/Users/Jorge/Desktop/Firmware/EspressoOS/kernel/src/prelude.rs#L83-L106):
+The matching flash map layout constants are declared in [prelude.rs](kernel/src/prelude.rs#L83-L106):
 
 | Name | Type | Subtype | Flash Offset | Size | Purpose |
 | :--- | :--- | :--- | :--- | :--- | :--- |
@@ -253,10 +295,10 @@ The matching flash map layout constants are declared in [prelude.rs](file:///C:/
 ## Kernel Subsystems
 
 ### VFS (Virtual File System)
-The VFS is the central hub for I/O routing. Filesystems and custom nodes implement the [Inode](file:///C:/Users/Jorge/Desktop/Firmware/EspressoOS/kernel/src/vfs/inode.rs) trait to interact with standard file handlers.
+The VFS is the central hub for I/O routing. Filesystems and custom nodes implement the [Inode](kernel/src/vfs/inode.rs) trait to interact with standard file handlers.
 
-- **File Descriptors (`Fd`)**: Aliased to `i32`. The global descriptor table (`FdTable` in [vfs/mod.rs](file:///C:/Users/Jorge/Desktop/Firmware/EspressoOS/kernel/src/vfs/mod.rs#L27)) permits up to **64** concurrently open descriptors.
-- **Mount points**: In Phase 0, VFS mounts a RAM-based volatile filesystem (`RamFs` at [fs/ramfs.rs](file:///C:/Users/Jorge/Desktop/Firmware/EspressoOS/kernel/src/fs/ramfs.rs)) at `/` and `/tmp`, and a devices filesystem (`DevFs` at [vfs/devfs.rs](file:///C:/Users/Jorge/Desktop/Firmware/EspressoOS/kernel/src/vfs/devfs.rs)) at `/dev`.
+- **File Descriptors (`Fd`)**: Aliased to `i32`. The global descriptor table (`FdTable` in [vfs/mod.rs](kernel/src/vfs/mod.rs#L27)) permits up to **64** concurrently open descriptors.
+- **Mount points**: In Phase 0, VFS mounts a RAM-based volatile filesystem (`RamFs` at [fs/ramfs.rs](kernel/src/fs/ramfs.rs)) at `/` and `/tmp`, and a devices filesystem (`DevFs` at [vfs/devfs.rs](kernel/src/vfs/devfs.rs)) at `/dev`.
 
 #### Supported Device Files in `/dev`
 1. `/dev/null`: Discards all inputs; returns EOF on read requests.
@@ -266,11 +308,11 @@ The VFS is the central hub for I/O routing. Filesystems and custom nodes impleme
 ---
 
 ### Task Scheduler
-Located in [scheduler/mod.rs](file:///C:/Users/Jorge/Desktop/Firmware/EspressoOS/kernel/src/scheduler/mod.rs), the scheduler performs task scheduling for multitasking in the kernel.
+Located in [scheduler/mod.rs](kernel/src/scheduler/mod.rs), the scheduler performs task scheduling for multitasking in the kernel.
 
 - **Hybrid Task Execution**: Supports cooperative context switching via `yield_now()` and preemptive switching driven by a periodic timer interrupt from the hardware SYSTIMER.
 - **Quantum**: The running task's time slice is set to **5 ticks**. At a tick rate of `TICK_HZ = 100`, this corresponds to **~50 ms**.
-- **Task Lifecycle**: Managed inside [scheduler/task.rs](file:///C:/Users/Jorge/Desktop/Firmware/EspressoOS/kernel/src/scheduler/task.rs) through four canonical states:
+- **Task Lifecycle**: Managed inside [scheduler/task.rs](kernel/src/scheduler/task.rs) through four canonical states:
   - `Ready`: In the scheduler's run queue, waiting to be allocated execution time.
   - `Running`: The thread currently holding the CPU context.
   - `Blocked`: Paused thread waiting for an event (timers, I/O lock).
@@ -279,9 +321,9 @@ Located in [scheduler/mod.rs](file:///C:/Users/Jorge/Desktop/Firmware/EspressoOS
 ---
 
 ### Syscall Mechanism (System Calls)
-The boundary between userland tasks and kernel operations is managed by a strict register-based ABI ([syscall/mod.rs](file:///C:/Users/Jorge/Desktop/Firmware/EspressoOS/kernel/src/syscall/mod.rs)).
+The boundary between userland tasks and kernel operations is managed by a strict register-based ABI ([syscall/mod.rs](kernel/src/syscall/mod.rs)).
 
-Syscalls are dispatched by loading the identifier index into register `a2`, storing inputs in registers `a3` through `a7`, and calling a software trap instruction. If a syscall fails, the kernel returns negative errno values (e.g. `-12` for `ENOMEM`, `-2` for `ENOENT`), translated via the [KError](file:///C:/Users/Jorge/Desktop/Firmware/EspressoOS/kernel/src/prelude.rs#L13-L50) enum.
+Syscalls are dispatched by loading the identifier index into register `a2`, storing inputs in registers `a3` through `a7`, and calling a software trap instruction. If a syscall fails, the kernel returns negative errno values (e.g. `-12` for `ENOMEM`, `-2` for `ENOENT`), translated via the [KError](kernel/src/prelude.rs#L13-L50) enum.
 
 #### Syscall ABI Table (Phase 0 / Phase 6+)
 
@@ -320,18 +362,26 @@ The `otadata` partition is split into **2 sectors** of **4 KB** each. Every sect
 ---
 
 ### Peripheral Device Drivers
-- **UART JTAG Serial** ([drivers/uart.rs](file:///C:/Users/Jorge/Desktop/Firmware/EspressoOS/kernel/src/drivers/uart.rs)): Console reader and writer. Operates asynchronously over native USB JTAG hardware channels.
-- **GPIO** ([drivers/gpio.rs](file:///C:/Users/Jorge/Desktop/Firmware/EspressoOS/kernel/src/drivers/gpio.rs)): Digital configuration controller providing Pin input, output, pull-up, and pull-down configurations.
-- **Flash SPI** ([drivers/flash.rs](file:///C:/Users/Jorge/Desktop/Firmware/EspressoOS/kernel/src/drivers/flash.rs)): SPI helper routines interacting directly with the chip's internal boot ROM functions to write/erase memory blocks.
+- **UART JTAG Serial** ([drivers/uart.rs](kernel/src/drivers/uart.rs)): Console reader and writer. Operates asynchronously over native USB JTAG hardware channels.
+- **GPIO** ([drivers/gpio.rs](kernel/src/drivers/gpio.rs)): Pin input, output, pull-up, and pull-down configurations.
+- **Flash SPI** ([drivers/flash.rs](kernel/src/drivers/flash.rs)): SPI helper routines interacting directly with the chip's internal boot ROM functions to write/erase memory blocks.
+
+### SSH Server (Skeleton & Wire-Format)
+A minimal SSH-2.0 server ([drivers/ssh](kernel/src/drivers/ssh)) designed to host the interactive REPL shell over a TCP connection (port 22).
+
+- **Wire-Format Parser (`proto.rs`)**: Implements RFC 4251 base types (uint32, string, name-list, mpint) and the SSH Binary Packet Protocol (RFC 4253 §6), verified using a host-based Python test suite ([ssh_proto_tests.py](tools/tests/ssh_proto_tests.py)).
+- **Cryptographic Foundations (`kex.rs`, `crypt.rs`, `auth.rs`)**: Designs for key exchange (X25519-SHA256), host key verification (ssh-ed25519), and session decryption (ChaCha20-Poly1305 OpenSSH construction) using audited `no_std` crates.
+- **Shell Bridge (`shell::remote`)**: Introduces a unified `ShellIo` interface abstraction allowing the REPL shell to run on both the local console (`ConsoleIo`) and a remote SSH channel session (`SshChannelIo`).
+- *Note: Gated by Phase 7 (networking integration) and currently set up as a documented codebase skeleton.*
 
 ---
 
 ## Interactive REPL Shell
 
-EspressoOS starts a CLI shell on the primary console channel upon boot. The REPL loop is located inside [shell/mod.rs](file:///C:/Users/Jorge/Desktop/Firmware/EspressoOS/kernel/src/shell/mod.rs) and monitors console characters.
+EspressoOS starts a CLI shell on the primary console channel upon boot. The REPL loop is located inside [shell/mod.rs](kernel/src/shell/mod.rs) and monitors console characters.
 
 - **Terminal Control**: Includes support for character deleting (Backspace), execution interruption (`Ctrl-C`), and limits input strings to **256 characters** to prevent stack overflow.
-- **Output Redirection**: The parser ([shell/parser.rs](file:///C:/Users/Jorge/Desktop/Firmware/EspressoOS/kernel/src/shell/parser.rs)) supports writing redirection `>` (overwrite) and `>>` (append), setting up descriptors on the targeted VFS nodes before calling commands.
+- **Output Redirection**: The parser ([shell/parser.rs](kernel/src/shell/parser.rs)) supports writing redirection `>` (overwrite) and `>>` (append), setting up descriptors on the targeted VFS nodes before calling commands.
 - **Pipes**: Pipe operators `|` are parsed by the shell syntax parser, but their inter-process communication logic will be completed during the userland multi-tasking phase.
 
 ### Shell Commands Tree
@@ -359,25 +409,31 @@ EspressoOS CLI Commands
 
 ## Verification and Mock Testing
 
-As a bare-metal OS running on target silicon, compiling and running tests directly on the development environment is difficult. To address this, EspressoOS includes a **Python validation harness** ([logic_tests.py](file:///C:/Users/Jorge/Desktop/Firmware/EspressoOS/tools/tests/logic_tests.py)).
+As a bare-metal OS running on target silicon, compiling and running tests directly on the development environment is difficult. To address this, EspressoOS includes **Python validation harnesses** located in [tools/tests](tools/tests).
 
-This harness contains Python translations of the kernel's critical algorithms, allowing developers to verify OS logic offline:
+These harnesses contain offline verification logic for the kernel's pure modules:
 
 ### Simulated Algorithms and Checked Tests
-1. **Shell Parser & Tokenizer**: Tests parsing of single/double quotes, escape slashes `\`, redirection parsing, and pipe parsing.
-2. **VFS Path Normalization**: Validates resolution of relative paths, absolute paths, directory symbols `.`, and folder parent elements `..`.
-3. **OTA Selection Logic**: Tests CRC-32 parsing and selection calculations to verify bootloader decisions during power failures.
-4. **RamFs File System Semantics**: Simulates reading, writing, and offsets of virtual VFS nodes.
+1. **Shell Parser & Tokenizer** ([logic_tests.py](tools/tests/logic_tests.py)): Tests parsing of single/double quotes, escape slashes `\`, redirection parsing, and pipe parsing.
+2. **VFS Path Normalization** ([logic_tests.py](tools/tests/logic_tests.py)): Validates resolution of relative paths, absolute paths, directory symbols `.`, and folder parent elements `..`.
+3. **OTA Selection Logic** ([logic_tests.py](tools/tests/logic_tests.py)): Tests CRC-32 parsing and selection calculations to verify bootloader decisions during power failures.
+4. **RamFs File System Semantics** ([logic_tests.py](tools/tests/logic_tests.py)): Simulates reading, writing, and offsets of virtual VFS nodes.
+5. **SSH Binary Packet Protocol & Codecs** ([ssh_proto_tests.py](tools/tests/ssh_proto_tests.py)): Verifies RFC 4251 data representations (uint32, string, name-list, mpint) and framing rules (padding, block alignment, lengths) for SSH packets.
 
 ### Running Logical Tests
 
-Execute the validation suite in your local development workspace using:
+You can run the unified test runner to execute all harnesses:
 ```bash
-# Via native Python unittest
+python tools/tests/run_all.py
+```
+
+Alternatively, run specific suites using:
+```bash
+# Run shell, VFS, RamFs and OTA tests
 python tools/tests/logic_tests.py
 
-# Or via pytest
-pytest tools/tests/logic_tests.py
+# Run SSH protocol codec and framing tests
+python tools/tests/ssh_proto_tests.py
 ```
 
 ---

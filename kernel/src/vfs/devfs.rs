@@ -1,15 +1,3 @@
-//! Sistema de archivos de dispositivos `/dev` (DevFs).
-// COMPILE-STATUS: borrador (sin compilar)
-//!
-//! Expone los drivers como nodos siguiendo la filosofía "todo-es-un-archivo".
-//! Un [`Device`] es la abstracción mínima (read/write/ioctl); DevFs lo envuelve
-//! en un [`Inode`] de tipo [`InodeKind::Device`]. La raíz de DevFs es un
-//! directorio virtual que lista los dispositivos registrados.
-//!
-//! Dispositivos base creados por [`init`]:
-//!  - `/dev/null`    — descarta escrituras, lecturas dan EOF (0 bytes).
-//!  - `/dev/zero`    — lecturas rellenan con ceros, escrituras se descartan.
-//!  - `/dev/console` — delega en `drivers::uart` (consola USB-Serial-JTAG).
 #![allow(dead_code)]
 
 use crate::prelude::*;
@@ -17,32 +5,29 @@ use crate::arch::xtensa::sync::Mutex;
 use super::inode::{DirEntry, FileSystem, FsStat, Inode, InodeKind};
 use super::mount::MAX_NAME_LEN;
 
-/// Un dispositivo de carácter/bloque expuesto en `/dev`.
 pub trait Device: Send + Sync {
-    /// Lee desde el dispositivo. `off` puede ignorarse en dispositivos de flujo.
+
     fn read(&self, off: u64, buf: &mut [u8]) -> KResult<usize>;
-    /// Escribe en el dispositivo. Devuelve bytes aceptados.
+
     fn write(&self, off: u64, buf: &[u8]) -> KResult<usize>;
-    /// Control de dispositivo. Por defecto: no soportado.
+
     fn ioctl(&self, cmd: u32, arg: usize) -> KResult<usize> {
         let _ = (cmd, arg);
         Err(KError::NotSupported)
     }
 }
 
-/// Tabla compartida nombre -> dispositivo. Compartida entre el FS y su raíz.
 type DevTable = Arc<Mutex<Vec<(String, Arc<dyn Device>)>>>;
 
-/// FS especial que expone los dispositivos registrados. Montar en `/dev`.
 pub struct DevFs {
-    /// Tabla de dispositivos registrados.
+
     table: DevTable,
-    /// Inodo raíz (directorio virtual) que referencia la tabla.
+
     root: Arc<DevRoot>,
 }
 
 impl DevFs {
-    /// Crea un DevFs vacío listo para montar.
+
     pub fn new() -> Arc<DevFs> {
         let table: DevTable = Arc::new(Mutex::new(Vec::new()));
         let root = Arc::new(DevRoot {
@@ -66,12 +51,11 @@ impl FileSystem for DevFs {
     }
 
     fn stat(&self) -> FsStat {
-        // DevFs no consume almacenamiento persistente.
+
         FsStat::default()
     }
 }
 
-/// Inodo raíz de DevFs: directorio virtual sobre la tabla de dispositivos.
 struct DevRoot {
     table: DevTable,
 }
@@ -116,7 +100,7 @@ impl Inode for DevRoot {
     }
 
     fn create(&self, _name: &str, _kind: InodeKind) -> KResult<Arc<dyn Inode>> {
-        // Los nodos de /dev se registran vía `register`, no se crean por VFS.
+
         Err(KError::PermissionDenied)
     }
 
@@ -125,7 +109,6 @@ impl Inode for DevRoot {
     }
 }
 
-/// Inodo que envuelve un [`Device`] concreto (nodo `/dev/<name>`).
 struct DevNode {
     dev: Arc<dyn Device>,
 }
@@ -148,16 +131,12 @@ impl Inode for DevNode {
     }
 
     fn truncate(&self, _len: u64) -> KResult<()> {
-        // Los dispositivos ignoran el truncado (permite abrir con TRUNC).
+
         Ok(())
     }
-    // readdir/lookup/create/unlink usan el default (NotADirectory).
+
 }
 
-/// Registra un dispositivo bajo `name` (aparece como `/dev/<name>`).
-///
-/// Errores: [`KError::AlreadyExists`] si el nombre ya existe;
-/// [`KError::NameTooLong`] si excede [`MAX_NAME_LEN`].
 pub fn register(devfs: &Arc<DevFs>, name: &str, dev: Arc<dyn Device>) -> KResult<()> {
     if name.len() > MAX_NAME_LEN {
         return Err(KError::NameTooLong);
@@ -170,18 +149,18 @@ pub fn register(devfs: &Arc<DevFs>, name: &str, dev: Arc<dyn Device>) -> KResult
     Ok(())
 }
 
-/// Crea el DevFs y registra los dispositivos base (`null`, `zero`, `console`).
 pub fn init() -> KResult<Arc<DevFs>> {
     let devfs = DevFs::new();
     register(&devfs, "null", Arc::new(NullDevice))?;
     register(&devfs, "zero", Arc::new(ZeroDevice))?;
     register(&devfs, "console", Arc::new(ConsoleDevice))?;
+    // Buses (Fase 3): los nodos existen aunque el bus no esté inicializado;
+    // las operaciones devuelven IoError hasta que `main` llame a `init`.
+    register(&devfs, "i2c0", crate::drivers::i2c::devfs_device())?;
+    register(&devfs, "spi0", crate::drivers::spi::devfs_device())?;
     Ok(devfs)
 }
 
-// --------------------------- Dispositivos base -----------------------------
-
-/// `/dev/null`: descarta escrituras; las lecturas devuelven EOF.
 struct NullDevice;
 impl Device for NullDevice {
     fn read(&self, _off: u64, _buf: &mut [u8]) -> KResult<usize> {
@@ -192,7 +171,6 @@ impl Device for NullDevice {
     }
 }
 
-/// `/dev/zero`: lecturas rellenan con ceros; escrituras se descartan.
 struct ZeroDevice;
 impl Device for ZeroDevice {
     fn read(&self, _off: u64, buf: &mut [u8]) -> KResult<usize> {
@@ -206,10 +184,6 @@ impl Device for ZeroDevice {
     }
 }
 
-/// `/dev/console`: delega en el driver de consola (`drivers::uart`).
-///
-/// RIESGO/ASUNCIÓN: usa `drivers::uart::{read, write}` (contrato §3.9). En Fase 0
-/// `write` puede apoyarse en esp-println y `read` no bloquea (0 si no hay datos).
 struct ConsoleDevice;
 impl Device for ConsoleDevice {
     fn read(&self, _off: u64, buf: &mut [u8]) -> KResult<usize> {

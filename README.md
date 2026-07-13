@@ -29,7 +29,7 @@ EspressoOS **boots and runs on a physical ESP32-S3** and is reachable over the n
 
 > **Log in with a standard client:** `ssh youareme@<board-ip>` (dev credentials in [`ssh/config.rs`](kernel/src/drivers/ssh/config.rs); see [Connecting via SSH](#3-connect-over-ssh)).
 
-Pending / in progress: safe **preemptive** scheduling (`need_resched` in the interrupt-vector epilogue), persistent **LittleFS**, wiring the **syscall** vector, **PMS** memory protection, and **SMP** dual-core. See the [roadmap](#project-status-and-development-roadmap).
+**Implemented since (compile-clean, pending on-device checks):** persistent storage (`EspFs` mounted at `/`, survives reboot), I2C/SPI bus drivers with `/dev/i2c0` · `/dev/spi0` nodes, the **syscall ABI** (+ an optional real `syscall`-instruction trap under `--features syscall-trap`), OTA `otadata` commands, and — behind opt-in features — **PMS** memory protection (`--features pms`) and **SMP** dual-core (`--features smp`). **Still open:** safe **preemptive** scheduling (`need_resched` in the vector epilogue), OTA boot-switching (needs the custom 2nd-stage bootloader), and full cross-core scheduling. See the [roadmap](#project-status-and-development-roadmap).
 
 ---
 
@@ -60,32 +60,32 @@ Pending / in progress: safe **preemptive** scheduling (`need_resched` in the int
 
 ## Project Status and Development Roadmap
 
-EspressoOS development is structured into **10 incremental phases**. Bring-up (P0), memory/PSRAM (P1), multitasking (P2, cooperative), and networking with an SSH server (P7) are **working on hardware**; the remaining phases are in progress. Progress does not have to be strictly sequential — SSH was brought up early because the core scheduler and network stack were ready.
+EspressoOS development is structured into **10 incremental phases**. Bring-up (P0), memory/PSRAM (P1), multitasking (P2, cooperative), and networking with an SSH server (P7) are **verified on hardware**. Bus drivers (P3), persistent storage (P4, `EspFs`), and the syscall ABI (P6) are **wired and compile-clean** (pending on-device checks). OTA (P5) is partially wired; memory protection (P8) and SMP (P9) are implemented **behind opt-in cargo features** so the default image stays the known-good one. Progress is not strictly sequential — SSH was brought up early because the scheduler and network stack were ready.
 
 ```
 Phase 0 ──────► Phase 1 ──────► Phase 2 ──────► Phase 3 ──────► Phase 4 
 Bring-up       Memory         Multitasking   Bus Drivers    Storage & VFS
-(Current)      (PSRAM)        (Scheduler)    (I2C/SPI)      (Flash/LittleFS)
+(✅ done)       (✅ PSRAM)      (✅ sched.)     (✅ I2C/SPI)    (✅ EspFs)
   │
   ├──────────► Phase 5 ──────► Phase 6 ──────► Phase 7 ──────► Phase 8 ──────► Phase 9
                OTA A/B        Syscalls/      Networking     Memory         SMP Dual-Core
-               Firmware       Userland       (WiFi/smoltcp) Protection     Multiprocessing
+               (~otadata)     (✅ ABI)        (✅ WiFi+SSH)   (feat: pms)     (feat: smp)
 ```
 
 ### Development Phases Roadmap Table
 
 | Phase | Title | Involved Components / Status |
 | :--- | :--- | :--- |
-| **Phase 0** | **Bring-up** | **✅ DONE (on hardware).** Xtensa CPU clock setup, kernel heap (SRAM), console over UART0, VFS boot (mounting `/dev`, `/`, `/tmp`), scheduler with `idle` thread, interactive `shell`, and a `heartbeat` task. Requires `build-std` + the `-Tlinkall.x` linker script (see [Building](#building-and-flashing)). |
-| **Phase 1** | **Memory Management (PSRAM)** | **✅ DONE.** The 8 MB external octal PSRAM is mapped in `esp_hal::init` and registered as a secondary `esp-alloc` heap region ([mm/heap.rs](kernel/src/mm/heap.rs)). |
-| **Phase 2** | **Task Scheduler** | **✅ DONE (cooperative, on hardware).** Round-robin scheduling ([policy.rs](kernel/src/scheduler/policy.rs)) over a hand-written Xtensa windowed-register context switch ([context.rs](kernel/src/arch/xtensa/context.rs), FreeRTOS/esp-idf-style `XT_STK` frame + `rfe`/`retw`). **Pending:** safe preemption (`need_resched` in the vector epilogue) instead of switching inside the SYSTIMER ISR. |
-| **Phase 3** | **Bus Drivers** | *In progress (draft).* Master bus drivers for I2C ([i2c.rs](kernel/src/drivers/i2c.rs)) and SPI ([spi.rs](kernel/src/drivers/spi.rs)) at the kernel level. |
-| **Phase 4** | **Storage & Filesystems** | *In progress.* `ramfs` works; connecting the internal SPI flash NOR driver ([flash.rs](kernel/src/drivers/flash.rs)) and mounting **LittleFS** ([fs/littlefs/mod.rs](kernel/src/fs/littlefs/mod.rs)) for persistent storage on `/` is pending. |
-| **Phase 5** | **OTA A/B Updates** | *Logic implemented, not wired.* OTA partition selection with CRC-32 + `ota_seq` inside [ota/partition.rs](kernel/src/ota/partition.rs). |
-| **Phase 6** | **Syscalls & Userland** | *Dispatcher written, not wired.* The syscall table/handler exist but are not yet hooked to an exception vector; shell commands currently call the VFS directly. |
-| **Phase 7** | **Networking (WiFi) + SSH** | **✅ DONE (on hardware).** 802.11 STA radio via `esp-wifi` bound to the `smoltcp` TCP/IP stack ([drivers/wifi.rs](kernel/src/drivers/wifi.rs)); DHCP-assigned IP; a **working SSH-2.0 server** on port 22 ([drivers/ssh](kernel/src/drivers/ssh)) serving the shell. |
-| **Phase 8** | **Memory Protection (PMS)** | Configuring the ESP32-S3 PMS (Peripheral Memory System) / World Controller hardware registers to protect kernel address spaces from user space tasks ([mm/mpu.rs](kernel/src/mm/mpu.rs)). |
-| **Phase 9** | **SMP Dual-Core** | Enabling Symmetric Multiprocessing across both Xtensa LX7 cores (PRO_CPU and APP_CPU) using atomic spinlocks and core affinity policies ([scheduler/core_sync.rs](kernel/src/scheduler/core_sync.rs)). |
+| **Phase 0** | **Bring-up** | **DONE (on hardware).** Xtensa CPU clock setup, kernel heap (SRAM), console over UART0, VFS boot (mounting `/dev`, `/`, `/tmp`), scheduler with `idle` thread, interactive `shell`, and a `heartbeat` task. Requires `build-std` + the `-Tlinkall.x` linker script (see [Building](#building-and-flashing)). |
+| **Phase 1** | **Memory Management (PSRAM)** | **DONE.** The 8 MB external octal PSRAM is mapped in `esp_hal::init` and registered as a secondary `esp-alloc` heap region ([mm/heap.rs](kernel/src/mm/heap.rs)). |
+| **Phase 2** | **Task Scheduler** | **DONE (cooperative, on hardware).** Round-robin scheduling ([policy.rs](kernel/src/scheduler/policy.rs)) over a hand-written Xtensa windowed-register context switch ([context.rs](kernel/src/arch/xtensa/context.rs), FreeRTOS/esp-idf-style `XT_STK` frame + `rfe`/`retw`). **Pending:** safe preemption (`need_resched` in the vector epilogue) instead of switching inside the SYSTIMER ISR. |
+| **Phase 3** | **Bus Drivers** | **Wired (compiles; needs a device to verify on hardware).** Master I2C ([i2c.rs](kernel/src/drivers/i2c.rs)) and SPI ([spi.rs](kernel/src/drivers/spi.rs)) drivers now receive their peripherals from `main` (no `Peripherals::steal()`), are exposed as `/dev/i2c0` and `/dev/spi0`, and driven by the `i2c` / `spi` shell commands (`i2c scan`, `spi transfer …`). |
+| **Phase 4** | **Storage & Filesystems** | **Wired (compiles + logic-tested; verify persistence on hardware).** `EspFs` ([fs/espfs](kernel/src/fs/espfs/mod.rs)) — a pure-Rust **log-structured, wear-leveled** filesystem over the internal NOR flash ([flash.rs](kernel/src/drivers/flash.rs)) — is mounted at `/` (RamFs fallback), so files survive reboots. Chosen over the C `littlefs2` (kept as a stub) to avoid a bindgen/cc build on this `no_std` Xtensa target. 11 logic tests in `tools/tests/espfs_tests.py`. |
+| **Phase 5** | **OTA A/B Updates** | *Partially wired.* `ota status` / `ota set` shell commands read and update `otadata` ([ota/partition.rs](kernel/src/ota/partition.rs)); the image-write path (`OtaUpdate`) + header validation exist. **Gap:** true A/B boot-switching requires the project's own 2nd-stage bootloader; a WiFi image receiver is intentionally omitted (multi-MB flash writes with the radio active are unsafe on this setup). |
+| **Phase 6** | **Syscalls & Userland** | **Wired.** `syscall::invoke` + the `syscalltest` command exercise the full ABI (arg marshalling → `dispatch` → errno). A real Xtensa `syscall`-instruction trap (EXCCAUSE=1, overriding the weak `__exception` and delegating other causes to esp-backtrace) is available behind `--features syscall-trap` ([syscall/trap.rs](kernel/src/syscall/trap.rs)). No privilege rings yet, so it is a mechanism, not isolation. |
+| **Phase 7** | **Networking (WiFi) + SSH** | **DONE (on hardware).** 802.11 STA radio via `esp-wifi` bound to the `smoltcp` TCP/IP stack ([drivers/wifi.rs](kernel/src/drivers/wifi.rs)); DHCP-assigned IP; a **working SSH-2.0 server** on port 22 ([drivers/ssh](kernel/src/drivers/ssh)) serving the shell. |
+| **Phase 8** | **Memory Protection (PMS)** | **Behind `--features pms`.** [mm/mpu.rs](kernel/src/mm/mpu.rs) enables the ESP32-S3 DRAM0 PMS **violation monitor** (safe observability, via the `pms` command) and can restrict **World-1** SRAM access (`pms world1`) — safe because the kernel runs in **World-0**, laying the groundwork to confine a future userland. The exact permission-field encoding still needs TRM validation on hardware. |
+| **Phase 9** | **SMP Dual-Core** | **Behind `--features smp`.** [scheduler/core_sync.rs](kernel/src/scheduler/core_sync.rs) starts the **APP_CPU (core 1)** via `esp_hal::CpuControl` with a per-core heartbeat and a shared atomic counter (visible via the `smp` command) — a real dual-core bring-up. Full cross-core task scheduling (per-core run state, load balancing) is the next hardware-validated step. |
 
 ---
 

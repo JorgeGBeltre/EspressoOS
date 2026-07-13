@@ -8,6 +8,23 @@ name = "kernel"
 path = "src/main.rs"
 
 # ============================================================================
+# Features opcionales (opt-in). El build por defecto NO activa ninguna, de modo
+# que la imagen por defecto es la conocida-buena (arranca + WiFi + SSH).
+#   syscall-trap: instala el trap real de la instrucción `syscall` (EXCCAUSE=1)
+#                 sobreescribiendo `__exception` y delegando el resto a
+#                 esp-backtrace. Sin esta feature, syscall::invoke es una puerta
+#                 software directa al despachador (misma ABI, sin trap de CPU).
+#   smp:          arranca el segundo núcleo (APP_CPU) y planifica en ambos.
+#   pms:          configura la protección de memoria PMS/World-Controller.
+# Todas requieren validación en hardware; ver docs/design/remaining-phases.md.
+# ============================================================================
+[features]
+default = []
+syscall-trap = []
+smp = []
+pms = []
+
+# ============================================================================
 # Dependencias externas — CONSOLIDADAS por el agente de integración a partir de
 # lo que pidió cada subsistema. Todas las versiones pertenecen a la MISMA tanda
 # del ecosistema esp-rs, alineada con `esp-hal 0.23.x`. Coherencia verificada en

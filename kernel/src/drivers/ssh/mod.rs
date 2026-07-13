@@ -1,24 +1,11 @@
-//! Servidor SSH-2.0: listener + máquina de estados de la conexión.
-// COMPILE-STATUS: borrador (implementado, sin compilar contra HW)
-//!
-//! Conduce la conexión SSH (ver `docs/ssh-design.md` §4):
-//!   VersionExchange -> KexInit -> Kex -> Encrypted -> UserAuth -> Session.
-//! La criptografía se delega a `kex`/`crypt`/`auth` (crates auditadas). La E/S de
-//! la shell remota se puentea vía `shell::remote` (colas globales).
-//!
-//! DECISIÓN DE INTEGRACIÓN: la máquina de estados se BOMBEA de forma no bloqueante
-//! desde `net_task` (`drivers::wifi`), sobre un `Transport` (socket TCP de smoltcp).
-//! Cada `Connection::pump` hace TODO el trabajo disponible sin bloquear y regresa,
-//! para que `net_task` siga atendiendo el resto del stack (mismo criterio que el
-//! servidor de eco). Una sola conexión SSH a la vez basta para el MVP.
 #![allow(dead_code)]
 
 pub mod auth;
 pub mod channel;
 pub mod config;
 pub mod crypt;
-pub mod crypto_rng; // adaptador TRNG -> rand_core 0.6 (fuente de entropía)
-pub mod crypto_smoke; // PASO 1 de-riesgo: ejercita/enlaza las crates de cripto
+pub mod crypto_rng;
+pub mod crypto_smoke;
 pub mod kex;
 pub mod proto;
 
@@ -37,53 +24,42 @@ use crypto_rng::HwRng;
 use ed25519_dalek::SigningKey;
 use proto::{frame_packet, Reader, Writer};
 
-/// Puerto TCP estándar de SSH.
 pub const SSH_PORT: u16 = 22;
 
-/// Mensaje adicional no declarado en `proto` (RFC 4252 §7): PK_OK del sondeo.
 const SSH_MSG_USERAUTH_PK_OK: u8 = 60;
 
-/// Máximo de intentos de autenticación antes de cerrar la conexión.
 const MAX_AUTH_ATTEMPTS: u32 = 6;
 
-/// Razones de DISCONNECT (RFC 4253 §11.1) que usamos.
 const DISCONNECT_KEY_EXCHANGE_FAILED: u32 = 3;
 const DISCONNECT_PROTOCOL_ERROR: u32 = 2;
 const DISCONNECT_BY_APPLICATION: u32 = 11;
 
-/// Transporte de bytes fiable subyacente (un socket TCP de smoltcp).
 pub trait Transport {
-    /// Lee hasta llenar `buf` o hasta que no haya más datos ahora (`Ok(0)`).
+
     fn read(&mut self, buf: &mut [u8]) -> KResult<usize>;
-    /// Escribe `buf`; devuelve cuántos bytes aceptó.
+
     fn write(&mut self, buf: &[u8]) -> KResult<usize>;
-    /// Cierra el envío (half-close).
+
     fn close(&mut self);
 }
 
-/// Fase de la conexión SSH.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum State {
     VersionExchange,
     KexInit,
     Kex,
-    Encrypted, // NEWKEYS intercambiado; esperando SERVICE_REQUEST
+    Encrypted,
     UserAuth,
     Session,
     Closed,
 }
 
-/// Clave de host persistente del servidor (ssh-ed25519).
-///
-/// En el MVP se genera al arranque con el TRNG (no se persiste todavía; cuando
-/// esté LittleFS se guardará la semilla de 32 bytes y se recargará). Su huella se
-/// imprime por consola para que el operador la fije en `known_hosts`.
 pub struct HostKey {
     signing: SigningKey,
 }
 
 impl HostKey {
-    /// Genera una clave de host nueva con el TRNG (radio activa: `net_task`).
+
     pub fn generate(rng: &mut HwRng) -> Self {
         let mut seed = [0u8; 32];
         rng.fill_bytes(&mut seed);
@@ -91,7 +67,6 @@ impl HostKey {
         Self { signing }
     }
 
-    /// Carga una clave de host desde una semilla persistida (32 bytes).
     pub fn from_seed(seed: &[u8; 32]) -> Self {
         Self {
             signing: SigningKey::from_bytes(seed),
@@ -102,12 +77,10 @@ impl HostKey {
         &self.signing
     }
 
-    /// Blob público `K_S` (`string "ssh-ed25519" || string pub(32)`).
     pub fn public_blob(&self) -> Vec<u8> {
         kex::host_key_blob(&self.signing.verifying_key())
     }
 
-    /// Huella estilo openssh: `SHA256:<base64(sha256(K_S)) sin padding>`.
     pub fn fingerprint(&self) -> String {
         let blob = self.public_blob();
         let digest: [u8; 32] = Sha256::digest(&blob).into();
@@ -117,7 +90,6 @@ impl HostKey {
     }
 }
 
-/// Codifica en base64 estándar SIN padding (huella openssh).
 fn base64_nopad(data: &[u8]) -> String {
     const ALPHABET: &[u8; 64] =
         b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
@@ -140,43 +112,34 @@ fn base64_nopad(data: &[u8]) -> String {
     out
 }
 
-/// Estado de una conexión SSH en curso, bombeada por `net_task`.
 pub struct Connection {
     state: State,
     started: bool,
 
-    // Buffers de E/S sin bloqueo.
     rx: Vec<u8>,
     tx: Vec<u8>,
 
-    // Transcripción para el hash de intercambio.
-    v_c: Vec<u8>, // ident del cliente (sin CRLF)
-    i_c: Vec<u8>, // payload del KEXINIT del cliente
-    i_s: Vec<u8>, // payload del KEXINIT del servidor
+    v_c: Vec<u8>,
+    i_c: Vec<u8>,
+    i_s: Vec<u8>,
 
-    // Resultado del kex.
     session_id: Option<[u8; 32]>,
 
-    // Contadores de secuencia GLOBALES (NO se reinician con NEWKEYS).
     send_seq: u32,
     recv_seq: u32,
 
-    // Estado de cifrado por sentido.
     out_encrypted: bool,
     in_encrypted: bool,
-    enc_out: Option<Aead>, // s2c (seal)
-    enc_in: Option<Aead>,  // c2s (open)
+    enc_out: Option<Aead>,
+    enc_in: Option<Aead>,
     awaiting_client_newkeys: bool,
 
-    // Autenticación.
     authed: bool,
     auth_user: String,
     auth_fails: u32,
 
-    // Canal de sesión (uno solo en el MVP).
     channel: Option<Channel>,
 
-    // Fuente de entropía (para padding y el par efímero del kex).
     rng: HwRng,
 }
 
@@ -214,30 +177,23 @@ impl Connection {
         self.state == State::Closed
     }
 
-    // -----------------------------------------------------------------------
-    // Bucle de bombeo (no bloqueante). Lo llama `net_task` en cada pasada.
-    // -----------------------------------------------------------------------
-
     pub fn pump<T: Transport>(&mut self, t: &mut T, host: &HostKey) -> KResult<()> {
         if self.state == State::Closed {
             return Ok(());
         }
 
-        // 0. Saludo inicial: ident + KEXINIT del servidor (una sola vez).
         if !self.started {
             self.started = true;
-            // El ident NO es un paquete binario (no cuenta para `send_seq`).
+
             self.tx.extend_from_slice(proto::IDENT.as_bytes());
             self.tx.extend_from_slice(b"\r\n");
             let kexinit = self.build_server_kexinit();
             self.i_s = kexinit.clone();
-            self.send_packet(&kexinit)?; // primer paquete binario -> seq 0
+            self.send_packet(&kexinit)?;
         }
 
-        // 1. Drenar el transporte hacia `rx`.
         self.read_all(t)?;
 
-        // 2. Intercambio de versión (líneas de texto, no paquetes).
         if self.state == State::VersionExchange {
             match self.try_take_version_line()? {
                 Some(vc) => {
@@ -246,12 +202,11 @@ impl Connection {
                 }
                 None => {
                     self.flush(t)?;
-                    return Ok(()); // faltan bytes de la línea de versión
+                    return Ok(());
                 }
             }
         }
 
-        // 3. Procesar todos los paquetes disponibles.
         while self.state != State::Closed {
             let payload = match self.next_packet()? {
                 Some(p) => p,
@@ -260,17 +215,14 @@ impl Connection {
             self.handle_packet(&payload, host)?;
         }
 
-        // 4. Empujar la salida de la shell hacia el cliente.
         if self.state == State::Session {
             self.pump_shell_output()?;
         }
 
-        // 5. Volcar `tx` al transporte.
         self.flush(t)?;
         Ok(())
     }
 
-    /// Lee todo lo disponible del transporte a `rx` (sin bloquear).
     fn read_all<T: Transport>(&mut self, t: &mut T) -> KResult<()> {
         let mut tmp = [0u8; 1024];
         loop {
@@ -289,7 +241,6 @@ impl Connection {
         Ok(())
     }
 
-    /// Vuelca `tx` al transporte, conservando lo que el socket no acepte aún.
     fn flush<T: Transport>(&mut self, t: &mut T) -> KResult<()> {
         if self.tx.is_empty() {
             return Ok(());
@@ -309,20 +260,10 @@ impl Connection {
         Ok(())
     }
 
-    // -----------------------------------------------------------------------
-    // Envío/recepción de paquetes (framing + AEAD).
-    // -----------------------------------------------------------------------
-
-    /// Enmarca `payload`, lo cifra si procede y lo encola en `tx`. Incrementa el
-    /// contador de secuencia de envío SIEMPRE (cuente o no como cifrado).
     fn send_packet(&mut self, payload: &[u8]) -> KResult<()> {
-        // Padding: `frame_packet` sólo admite un byte de relleno. Usamos un byte
-        // aleatorio del TRNG. LIMITACIÓN: el padding ideal es TODO aleatorio; para
-        // los paquetes cifrados el padding va cifrado (irrelevante), y para los
-        // pocos paquetes en claro (KEXINIT/…) es una desviación menor de RFC 4253.
+
         let pad_fill = (self.rng.next_u32() & 0xff) as u8;
-        // Para paquetes cifrados, el AEAD chacha20-poly1305@openssh exige alinear
-        // `packet_length` (no `4+packet_length`): la longitud va cifrada aparte.
+
         let framed = if self.out_encrypted {
             proto::frame_packet_aead(payload, proto::MIN_BLOCK, pad_fill)
         } else {
@@ -340,8 +281,6 @@ impl Connection {
         Ok(())
     }
 
-    /// Extrae el siguiente paquete disponible de `rx` (descifrando si procede).
-    /// `Ok(None)` si aún no hay un paquete completo. Incrementa `recv_seq`.
     fn next_packet(&mut self) -> KResult<Option<Vec<u8>>> {
         if self.in_encrypted {
             let aead = self.enc_in.clone().ok_or(KError::InvalidArgument)?;
@@ -383,25 +322,18 @@ impl Connection {
         }
     }
 
-    // -----------------------------------------------------------------------
-    // Intercambio de versión.
-    // -----------------------------------------------------------------------
-
-    /// Busca en `rx` una línea `SSH-2.0-…` terminada en `\n`. Descarta líneas de
-    /// banner previas. Devuelve el ident del cliente (sin CRLF) o `None` si aún no
-    /// hay una línea completa.
     fn try_take_version_line(&mut self) -> KResult<Option<Vec<u8>>> {
         loop {
             let nl = match self.rx.iter().position(|&b| b == b'\n') {
                 Some(i) => i,
                 None => {
                     if self.rx.len() > 255 {
-                        return Err(KError::InvalidArgument); // línea desmesurada
+                        return Err(KError::InvalidArgument);
                     }
                     return Ok(None);
                 }
             };
-            // Extraer la línea (sin el \n) y quitar un \r final.
+
             let mut line: Vec<u8> = self.rx[..nl].to_vec();
             self.rx.drain(0..=nl);
             if line.last() == Some(&b'\r') {
@@ -413,45 +345,39 @@ impl Connection {
             if line.starts_with(b"SSH-") {
                 return Ok(Some(line));
             }
-            // Línea de banner anterior al ident: se descarta y se sigue buscando.
+
         }
     }
-
-    // -----------------------------------------------------------------------
-    // Construcción y negociación del KEXINIT.
-    // -----------------------------------------------------------------------
 
     fn build_server_kexinit(&mut self) -> Vec<u8> {
         let mut cookie = [0u8; 16];
         self.rng.fill_bytes(&mut cookie);
         let mut w = Writer::new();
         w.put_u8(proto::SSH_MSG_KEXINIT);
-        // cookie (16 bytes crudos).
+
         for b in cookie.iter() {
             w.put_u8(*b);
         }
-        w.put_name_list(&[kex::KEX_NAME, kex::KEX_NAME_ALIAS]) // kex_algorithms
-            .put_name_list(&[kex::HOSTKEY_NAME]) // server_host_key_algorithms
-            .put_name_list(&[crypt::CIPHER_NAME]) // enc c2s
-            .put_name_list(&[crypt::CIPHER_NAME]) // enc s2c
-            .put_name_list(&[]) // mac c2s (AEAD -> vacío)
-            .put_name_list(&[]) // mac s2c
-            .put_name_list(&["none"]) // comp c2s
-            .put_name_list(&["none"]) // comp s2c
-            .put_name_list(&[]) // languages c2s
-            .put_name_list(&[]) // languages s2c
-            .put_bool(false) // first_kex_packet_follows
-            .put_u32(0); // reserved
+        w.put_name_list(&[kex::KEX_NAME, kex::KEX_NAME_ALIAS])
+            .put_name_list(&[kex::HOSTKEY_NAME])
+            .put_name_list(&[crypt::CIPHER_NAME])
+            .put_name_list(&[crypt::CIPHER_NAME])
+            .put_name_list(&[])
+            .put_name_list(&[])
+            .put_name_list(&["none"])
+            .put_name_list(&["none"])
+            .put_name_list(&[])
+            .put_name_list(&[])
+            .put_bool(false)
+            .put_u32(0);
         w.into_bytes()
     }
 
-    /// Comprueba que el KEXINIT del cliente ofrece los algoritmos que exigimos.
-    /// Devuelve `Err` si falta alguno esencial (kex o cifrado).
     fn negotiate(&self, client_kexinit: &[u8]) -> KResult<()> {
         let mut r = Reader::new(client_kexinit);
-        let _msg = r.get_u8()?; // 20
+        let _msg = r.get_u8()?;
         let _cookie = {
-            // saltar 16 bytes de cookie
+
             for _ in 0..16 {
                 let _ = r.get_u8()?;
             }
@@ -460,7 +386,6 @@ impl Connection {
         let _host_algs = r.get_name_list()?;
         let enc_c2s = r.get_name_list()?;
         let enc_s2c = r.get_name_list()?;
-        // El resto no lo necesitamos para la comprobación mínima.
 
         let kex_ok = kex_algs
             .iter()
@@ -474,17 +399,12 @@ impl Connection {
         }
     }
 
-    // -----------------------------------------------------------------------
-    // Despacho de mensajes por estado.
-    // -----------------------------------------------------------------------
-
     fn handle_packet(&mut self, payload: &[u8], host: &HostKey) -> KResult<()> {
         if payload.is_empty() {
             return Ok(());
         }
         let msg = payload[0];
 
-        // Mensajes globales aceptados en cualquier estado.
         match msg {
             proto::SSH_MSG_DISCONNECT => {
                 self.state = State::Closed;
@@ -492,7 +412,7 @@ impl Connection {
             }
             proto::SSH_MSG_IGNORE | proto::SSH_MSG_DEBUG => return Ok(()),
             proto::SSH_MSG_GLOBAL_REQUEST => {
-                // want_reply está tras un `string`; respondemos FAILURE si aplica.
+
                 let mut r = Reader::new(payload);
                 let _ = r.get_u8();
                 let _name = r.get_string();
@@ -523,7 +443,7 @@ impl Connection {
         if msg != proto::SSH_MSG_KEXINIT {
             return self.disconnect(DISCONNECT_PROTOCOL_ERROR, "se esperaba KEXINIT");
         }
-        // Guardar I_C (payload íntegro) y negociar.
+
         self.i_c = payload.to_vec();
         if self.negotiate(payload).is_err() {
             return self.disconnect(DISCONNECT_KEY_EXCHANGE_FAILED, "sin algoritmos comunes");
@@ -533,7 +453,7 @@ impl Connection {
     }
 
     fn on_kex(&mut self, payload: &[u8], msg: u8, host: &HostKey) -> KResult<()> {
-        // Puede llegar KEX_ECDH_INIT (30) o, después, el NEWKEYS del cliente (21).
+
         if msg == proto::SSH_MSG_NEWKEYS {
             if self.awaiting_client_newkeys {
                 self.in_encrypted = true;
@@ -547,12 +467,10 @@ impl Connection {
             return self.disconnect(DISCONNECT_PROTOCOL_ERROR, "se esperaba KEX_ECDH_INIT");
         }
 
-        // Extraer Q_C.
         let mut r = Reader::new(payload);
-        let _ = r.get_u8()?; // 30
+        let _ = r.get_u8()?;
         let q_c = r.get_string()?;
 
-        // Ejecutar el kex del lado servidor.
         let v_s = proto::IDENT.as_bytes();
         let result = kex::run_server(
             &mut self.rng,
@@ -568,13 +486,11 @@ impl Connection {
             Err(_) => return self.disconnect(DISCONNECT_KEY_EXCHANGE_FAILED, "fallo de kex"),
         };
 
-        // session_id = H del PRIMER kex (permanece fijo aunque haya rekeys).
         if self.session_id.is_none() {
             self.session_id = Some(kx.h);
         }
         let session_id = self.session_id.unwrap();
 
-        // Enviar KEX_ECDH_REPLY (en claro): K_S || Q_S || sig(H).
         let mut w = Writer::new();
         w.put_u8(proto::SSH_MSG_KEX_ECDH_REPLY)
             .put_string(&kx.k_s)
@@ -583,14 +499,11 @@ impl Connection {
         let reply = w.into_bytes();
         self.send_packet(&reply)?;
 
-        // Enviar NEWKEYS (en claro). A partir del SIGUIENTE envío ciframos.
         let mut nk = Writer::new();
         nk.put_u8(proto::SSH_MSG_NEWKEYS);
         let nk = nk.into_bytes();
         self.send_packet(&nk)?;
 
-        // Derivar claves (RFC 4253 §7.2): sólo hacen falta las de cifrado.
-        //  C = enc key c2s (nosotros abrimos), D = enc key s2c (nosotros sellamos).
         let mut c_key = [0u8; 64];
         let mut d_key = [0u8; 64];
         kex::derive_key(&kx.k_mpint, &kx.h, b'C', &session_id, &mut c_key);
@@ -598,9 +511,8 @@ impl Connection {
         self.enc_in = Some(Aead::new(&c_key));
         self.enc_out = Some(Aead::new(&d_key));
 
-        // Nuestro sentido de envío pasa a cifrado tras enviar NEWKEYS.
         self.out_encrypted = true;
-        // Esperamos el NEWKEYS del cliente para cifrar el sentido de recepción.
+
         self.awaiting_client_newkeys = true;
         Ok(())
     }
@@ -626,7 +538,7 @@ impl Connection {
 
     fn on_userauth(&mut self, payload: &[u8], msg: u8) -> KResult<()> {
         if msg != proto::SSH_MSG_USERAUTH_REQUEST {
-            // Ignorar otros mensajes en esta fase.
+
             return Ok(());
         }
         let mut r = Reader::new(payload);
@@ -634,7 +546,7 @@ impl Connection {
         let user_str = str::from_utf8(r.get_string()?)
             .map_err(|_| KError::InvalidArgument)?;
         let user = String::from(user_str);
-        let _service = r.get_string()?; // "ssh-connection"
+        let _service = r.get_string()?;
         let method = r.get_string()?;
 
         let session_id = match &self.session_id {
@@ -644,7 +556,7 @@ impl Connection {
 
         match method {
             b"password" => {
-                let _ = r.get_bool()?; // FALSE (sin cambio de contraseña)
+                let _ = r.get_bool()?;
                 let password = r.get_string()?;
                 match auth::check_password(&user, password) {
                     auth::AuthResult::Success => {
@@ -660,7 +572,7 @@ impl Connection {
                 let algo = r.get_string()?;
                 let key_blob = r.get_string()?;
                 if !has_sig {
-                    // Sondeo: si la clave está autorizada, responder PK_OK.
+
                     if auth::probe_publickey(&user, algo, key_blob) {
                         let mut w = Writer::new();
                         w.put_u8(SSH_MSG_USERAUTH_PK_OK)
@@ -683,7 +595,7 @@ impl Connection {
                     }
                 }
             }
-            // "none" y cualquier otro método -> FAILURE con la lista de métodos.
+
             _ => self.fail_auth()?,
         }
         Ok(())
@@ -700,7 +612,7 @@ impl Connection {
 
     fn fail_auth(&mut self) -> KResult<()> {
         self.auth_fails += 1;
-        // FAILURE: name-list de métodos que se pueden seguir intentando + partial.
+
         let mut w = Writer::new();
         w.put_u8(proto::SSH_MSG_USERAUTH_FAILURE)
             .put_name_list(&["publickey", "password"])
@@ -728,9 +640,9 @@ impl Connection {
                 }
                 Ok(())
             }
-            proto::SSH_MSG_CHANNEL_EOF => Ok(()), // el cliente no enviará más datos
+            proto::SSH_MSG_CHANNEL_EOF => Ok(()),
             proto::SSH_MSG_CHANNEL_CLOSE => {
-                // Responder CLOSE, cerrar el puente y la conexión.
+
                 if let Some(ch) = self.channel.as_ref() {
                     let remote_id = ch.remote_id;
                     let mut w = Writer::new();
@@ -755,11 +667,11 @@ impl Connection {
         let peer_max_packet = r.get_u32()?;
 
         if ch_type != b"session" || self.channel.is_some() {
-            // Rechazar: sólo un canal `session` en el MVP.
+
             let mut w = Writer::new();
             w.put_u8(proto::SSH_MSG_CHANNEL_OPEN_FAILURE)
                 .put_u32(remote_id)
-                .put_u32(3) // SSH_OPEN_UNKNOWN_CHANNEL_TYPE / administratively prohibited
+                .put_u32(3)
                 .put_string(b"solo se soporta un canal session")
                 .put_string(b"");
             let p = w.into_bytes();
@@ -772,8 +684,8 @@ impl Connection {
 
         let mut w = Writer::new();
         w.put_u8(proto::SSH_MSG_CHANNEL_OPEN_CONFIRMATION)
-            .put_u32(remote_id) // recipient_channel
-            .put_u32(local_id) // sender_channel
+            .put_u32(remote_id)
+            .put_u32(local_id)
             .put_u32(channel::INITIAL_WINDOW)
             .put_u32(channel::MAX_CHANNEL_PACKET);
         let p = w.into_bytes();
@@ -787,7 +699,6 @@ impl Connection {
         let req_type = r.get_string()?.to_vec();
         let want_reply = r.get_bool()?;
 
-        // Para pty-req extraemos TERM y dimensiones; para el resto, ignoramos.
         let (cols, rows) = if req_type == b"pty-req" {
             let _term = r.get_string()?;
             let cols = r.get_u32()?;
@@ -838,8 +749,6 @@ impl Connection {
         Ok(())
     }
 
-    /// Empuja la salida pendiente de la shell como CHANNEL_DATA, respetando la
-    /// ventana de envío y el tamaño máximo de paquete del cliente.
     fn pump_shell_output(&mut self) -> KResult<()> {
         let (remote_id, mut window, maxp, started) = match self.channel.as_ref() {
             Some(ch) => (ch.remote_id, ch.send_window, ch.peer_max_packet, ch.shell_started),
@@ -852,7 +761,7 @@ impl Connection {
             if window == 0 || !remote::bridge_has_output() {
                 break;
             }
-            // Reservamos margen para la cabecera CHANNEL_DATA dentro de maxp.
+
             let cap = core::cmp::min(window as usize, maxp.saturating_sub(64) as usize).min(4096);
             if cap == 0 {
                 break;
@@ -875,17 +784,16 @@ impl Connection {
         Ok(())
     }
 
-    /// Envía DISCONNECT y marca la conexión como cerrada.
     fn disconnect(&mut self, reason: u32, desc: &str) -> KResult<()> {
-        // [DBG-SSH] razón exacta del cierre, visible en el monitor de la placa.
+
         println!("[ssh] DISCONNECT (reason={}): {}", reason, desc);
         let mut w = Writer::new();
         w.put_u8(proto::SSH_MSG_DISCONNECT)
             .put_u32(reason)
             .put_string(desc.as_bytes())
-            .put_string(b""); // language tag
+            .put_string(b"");
         let p = w.into_bytes();
-        // Ignoramos el error de envío: vamos a cerrar de todos modos.
+
         let _ = self.send_packet(&p);
         remote::bridge_close();
         self.state = State::Closed;
@@ -893,7 +801,6 @@ impl Connection {
     }
 }
 
-/// Imprime por consola la huella de la clave de host (para `known_hosts`).
 pub fn announce_host_key(host: &HostKey) {
     println!(
         "[ssh] host key ssh-ed25519 fingerprint: {}",

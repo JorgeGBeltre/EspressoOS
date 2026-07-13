@@ -625,9 +625,9 @@ impl Connection {
         }
         let mut r = Reader::new(payload);
         let _ = r.get_u8()?;
-        let user = str::from_utf8(r.get_string()?)
-            .map_err(|_| KError::InvalidArgument)?
-            .to_string();
+        let user_str = str::from_utf8(r.get_string()?)
+            .map_err(|_| KError::InvalidArgument)?;
+        let user = String::from(user_str);
         let _service = r.get_string()?; // "ssh-connection"
         let method = r.get_string()?;
 

@@ -19,6 +19,11 @@ use esp_hal::spi::master::{Config, Spi};
 use esp_hal::spi::Mode;
 use esp_hal::Blocking;
 
+// Trait de bus SPI de embedded-hal 1.0: su `transfer(read, write)` toma DOS búferes
+// (el método inherente de esp-hal solo toma uno, in-place). Lo llamamos de forma
+// desambiguada como `SpiBus::transfer(spi, rx, tx)` para no chocar con el inherente.
+use embedded_hal::spi::SpiBus;
+
 /// Frecuencia de reloj SCK por defecto (10 MHz). Ajustar por placa/periférico.
 const SPI_FREQ_HZ: u32 = 10_000_000;
 
@@ -107,5 +112,5 @@ pub fn transfer(tx: &[u8], rx: &mut [u8]) -> KResult<()> {
     // ALTERNATIVA si NO fuese inherente: importar `embedded_hal::spi::SpiBus`
     // (crate `embedded-hal`, ver `needs_crates`) y llamar exactamente igual, ya
     // que esp-hal implementa ese trait para el `Spi` bloqueante.
-    spi.transfer(rx, tx).map_err(|_| KError::IoError)
+    SpiBus::transfer(spi, rx, tx).map_err(|_| KError::IoError)
 }

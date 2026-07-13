@@ -11,6 +11,13 @@
 __pycache__/
 *.pyc
 
+# IDE
+.idea/
+.vscode/
+
+# Logs de build transitorios
+*.log
+
 # Sistema
 .DS_Store
 Thumbs.db

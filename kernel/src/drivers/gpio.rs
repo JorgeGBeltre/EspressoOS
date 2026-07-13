@@ -149,9 +149,9 @@ fn set_level(pin: u8, high: bool) {
 /// Lee el latch de SALIDA del pin (lo que se está conduciendo), para `toggle`.
 fn read_output_latch(pin: u8) -> bool {
     if pin < 32 {
-        unsafe { reg_read(GPIO_OUT_REG) } & (1u32 << pin) != 0
+        (unsafe { reg_read(GPIO_OUT_REG) } & (1u32 << pin)) != 0
     } else {
-        unsafe { reg_read(GPIO_OUT1_REG) } & (1u32 << (pin - 32)) != 0
+        (unsafe { reg_read(GPIO_OUT1_REG) } & (1u32 << (pin - 32))) != 0
     }
 }
 
@@ -203,9 +203,9 @@ pub fn write(pin: u8, high: bool) -> KResult<()> {
 pub fn read(pin: u8) -> KResult<bool> {
     check_pin(pin)?;
     let level = if pin < 32 {
-        unsafe { reg_read(GPIO_IN_REG) } & (1u32 << pin) != 0
+        (unsafe { reg_read(GPIO_IN_REG) } & (1u32 << pin)) != 0
     } else {
-        unsafe { reg_read(GPIO_IN1_REG) } & (1u32 << (pin - 32)) != 0
+        (unsafe { reg_read(GPIO_IN1_REG) } & (1u32 << (pin - 32))) != 0
     };
     Ok(level)
 }

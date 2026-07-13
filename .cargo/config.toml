@@ -10,14 +10,27 @@ runner = "espflash flash --monitor"
 [build]
 target = "xtensa-esp32s3-none-elf"
 rustflags = [
-  # Necesario para desenrollado/backtraces fiables en Xtensa.
+  # Script de linker de ENTRADA de esp-hal (por chip): orquesta memory.x, alias.x,
+  # esp32s3.x, hal-defaults.x y rom-functions.x. esp-hal lo copia a OUT_DIR y añade
+  # el search path (build.rs), pero NO pasa el `-T`: hay que hacerlo aquí.
+  "-C", "link-arg=-Tlinkall.x",
+  # En Xtensa el linker es gcc; evitamos que añada su crt0/startfiles (el arranque
+  # lo proveen xtensa-lx-rt / esp-hal, no la libc del host).
+  "-C", "link-arg=-nostartfiles",
+  # Desenrollado/backtraces fiables en Xtensa.
   "-C", "force-frame-pointers",
 ]
 
-# El canal "esp" suele traer `core`/`alloc` precompilados para el target.
-# Si el build falla por falta de core, descomenta build-std:
-# [unstable]
-# build-std = ["core", "alloc"]
+# Este toolchain `esp` no trae `core`/`alloc` precompilados para el target
+# (`rustup show` lista `installed targets:` vacío), así que se compilan desde
+# fuente. Requiere el componente `rust-src`:  rustup component add rust-src --toolchain esp
+#
+# `compiler-builtins-mem`: aporta las intrínsecas de memoria (memcpy/memset/memcmp)
+# que en bare-metal no vienen de ningún std precompilado; sin esto, el enlazado
+# falla con símbolos `memcpy` indefinidos.
+[unstable]
+build-std = ["core", "alloc"]
+build-std-features = ["compiler-builtins-mem"]
 
 [env]
 ESP_LOG = "info"

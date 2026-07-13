@@ -15,6 +15,9 @@
 //!    camino mínimo que deja el sistema interactivo.
 #![no_std]
 #![no_main]
+// `asm!` en Xtensa es una arquitectura "experimental" para inline-asm: requiere
+// este feature-gate (el toolchain `esp` es nightly, así que está disponible).
+#![feature(asm_experimental_arch)]
 #![allow(dead_code, unused_imports, unused_variables)]
 
 extern crate alloc;

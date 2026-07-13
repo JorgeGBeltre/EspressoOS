@@ -243,6 +243,29 @@ pub fn frame_packet(payload: &[u8], block: usize, pad_fill: u8) -> Vec<u8> {
     out
 }
 
+/// Igual que [`frame_packet`] pero para el AEAD `chacha20-poly1305@openssh.com`:
+/// el campo de longitud (4 bytes) se cifra APARTE y NO cuenta para el alineado,
+/// así que es `packet_length` (= `1 + payload + padding`) el que debe ser múltiplo
+/// de `block`, no `4 + packet_length`. (OpenSSH rechaza con "padding error" si
+/// `packet_length % block != 0`.)
+pub fn frame_packet_aead(payload: &[u8], block: usize, pad_fill: u8) -> Vec<u8> {
+    let block = block.max(MIN_BLOCK);
+    let base = 1 + payload.len(); // padding_length (1 byte) + payload
+    // Padding para que `base + pad` (= packet_length) sea múltiplo de `block`, con
+    // pad >= 4. NO se incluyen los 4 bytes de longitud (van cifrados aparte).
+    let mut pad = block - (base % block);
+    if pad < MIN_PADDING {
+        pad += block;
+    }
+    let packet_length = (base + pad) as u32;
+    let mut out = Vec::with_capacity(4 + packet_length as usize);
+    out.extend_from_slice(&packet_length.to_be_bytes());
+    out.push(pad as u8);
+    out.extend_from_slice(payload);
+    out.extend(core::iter::repeat(pad_fill).take(pad));
+    out
+}
+
 /// Extrae el `payload` de un paquete binario en claro.
 ///
 /// Devuelve `(payload, bytes_consumidos)`. `Err(InvalidArgument)` si el buffer no

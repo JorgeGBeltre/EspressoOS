@@ -321,7 +321,13 @@ impl Connection {
         // los paquetes cifrados el padding va cifrado (irrelevante), y para los
         // pocos paquetes en claro (KEXINIT/…) es una desviación menor de RFC 4253.
         let pad_fill = (self.rng.next_u32() & 0xff) as u8;
-        let framed = frame_packet(payload, proto::MIN_BLOCK, pad_fill);
+        // Para paquetes cifrados, el AEAD chacha20-poly1305@openssh exige alinear
+        // `packet_length` (no `4+packet_length`): la longitud va cifrada aparte.
+        let framed = if self.out_encrypted {
+            proto::frame_packet_aead(payload, proto::MIN_BLOCK, pad_fill)
+        } else {
+            frame_packet(payload, proto::MIN_BLOCK, pad_fill)
+        };
         let seq = self.send_seq;
         let record = if self.out_encrypted {
             let aead = self.enc_out.clone().ok_or(KError::InvalidArgument)?;
@@ -871,6 +877,8 @@ impl Connection {
 
     /// Envía DISCONNECT y marca la conexión como cerrada.
     fn disconnect(&mut self, reason: u32, desc: &str) -> KResult<()> {
+        // [DBG-SSH] razón exacta del cierre, visible en el monitor de la placa.
+        println!("[ssh] DISCONNECT (reason={}): {}", reason, desc);
         let mut w = Writer::new();
         w.put_u8(proto::SSH_MSG_DISCONNECT)
             .put_u32(reason)

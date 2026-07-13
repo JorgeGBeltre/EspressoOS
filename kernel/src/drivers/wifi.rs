@@ -452,8 +452,21 @@ pub fn net_task(_arg: usize) {
                 }
                 let mut transport = TcpTransport { sock };
                 // `pump` hace TODO el trabajo disponible sin bloquear y regresa.
-                if ssh_conn.pump(&mut transport, &host_key).is_err() {
-                    transport.close(); // error de protocolo -> cerrar y reiniciar
+                match ssh_conn.pump(&mut transport, &host_key) {
+                    Ok(()) => {
+                        // La conexión pidió cierre (DISCONNECT / auth agotada / fin):
+                        // cerrar el socket para reciclar.
+                        if ssh_conn.is_closed() {
+                            transport.close();
+                            ssh_active = false;
+                        }
+                    }
+                    Err(e) => {
+                        // [DBG-SSH] localizar en qué etapa muere el handshake.
+                        println!("[ssh] pump ERROR en estado {:?}: {:?}", ssh_conn.state(), e);
+                        transport.close();
+                        ssh_active = false;
+                    }
                 }
             }
         }

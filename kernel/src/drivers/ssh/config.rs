@@ -17,11 +17,11 @@
 use crate::prelude::*;
 
 /// Usuario de desarrollo aceptado por `password`-auth.
-pub const DEV_USER: &str = "root";
+pub const DEV_USER: &str = "youareme";
 
 /// Contraseña de DESARROLLO. PLACEHOLDER: cámbiala/quítala antes de producción.
 /// (Comparada en tiempo constante en `auth::check_password`.)
-pub const DEV_PASSWORD: &[u8] = b"CHANGE_ME_dev_only";
+pub const DEV_PASSWORD: &[u8] = b"851963Y@#";
 
 /// Clave(s) pública(s) ssh-ed25519 autorizadas para `publickey`-auth.
 ///

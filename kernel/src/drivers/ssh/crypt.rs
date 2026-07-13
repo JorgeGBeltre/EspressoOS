@@ -96,13 +96,14 @@ impl Aead {
         c2.apply_keystream(&mut enc_rest);
 
         // 3) Tag Poly1305 sobre enc_len || enc_rest (un solo `update_padded`).
-        let mut mac =
+        let mac =
             Poly1305::new_from_slice(&poly_key).map_err(|_| KError::InvalidArgument)?;
         let mut aad = Vec::with_capacity(4 + enc_rest.len());
         aad.extend_from_slice(&enc_len);
         aad.extend_from_slice(&enc_rest);
-        mac.update_padded(&aad);
-        let tag = mac.finalize();
+        // openssh usa Poly1305 ESTÁNDAR sobre el ciphertext (NO el padding a 16
+        // bytes del AEAD RFC 8439). `compute_unpadded`, no `update_padded`.
+        let tag = mac.compute_unpadded(&aad);
 
         let mut out = Vec::with_capacity(4 + enc_rest.len() + TAG_LEN);
         out.extend_from_slice(&enc_len);
@@ -142,13 +143,13 @@ impl Aead {
             .map_err(|_| KError::InvalidArgument)?;
         let mut poly_key = [0u8; 32];
         c2.apply_keystream(&mut poly_key);
-        let mut mac =
+        let mac =
             Poly1305::new_from_slice(&poly_key).map_err(|_| KError::InvalidArgument)?;
         let mut aad = Vec::with_capacity(4 + enc_ct.len());
         aad.extend_from_slice(enc_len);
         aad.extend_from_slice(enc_ct);
-        mac.update_padded(&aad);
-        let tag = mac.finalize();
+        // openssh usa Poly1305 ESTÁNDAR (sin el padding a 16 del AEAD RFC 8439).
+        let tag = mac.compute_unpadded(&aad);
         if tag.as_slice().ct_eq(tag_rx).unwrap_u8() != 1 {
             return Err(KError::InvalidArgument);
         }

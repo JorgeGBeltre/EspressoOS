@@ -8,3 +8,4 @@ pub mod wifi;
 pub mod power;
 pub mod device;
 pub mod crypto;
+pub mod ble;

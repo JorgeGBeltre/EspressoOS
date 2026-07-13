@@ -174,6 +174,7 @@ fn main() -> ! {
         peripherals.RNG,
         peripherals.RADIO_CLK,
         peripherals.WIFI,
+        peripherals.BT,
     );
     match scheduler::spawn("net", drivers::wifi::net_task, 0, NET_STACK_SIZE, PRIO_DEFAULT) {
         Ok(tid) => println!("[kernel] tarea 'net' creada (tid={})", tid),

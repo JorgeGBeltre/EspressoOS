@@ -135,6 +135,7 @@ struct NetPeripherals {
     rng: RNG,
     radio_clk: RADIO_CLK,
     wifi: WIFI,
+    bt: esp_hal::peripherals::BT,
 }
 
 // SEGURIDAD: los singletons de periférico se mueven UNA sola vez (main -> static
@@ -150,16 +151,17 @@ static PENDING: Mutex<Option<NetPeripherals>> = Mutex::new(None);
 /// Ejemplo (en `main`, tras `esp_hal::init`):
 /// ```ignore
 /// drivers::wifi::provide_peripherals(
-///     peripherals.TIMG0, peripherals.RNG, peripherals.RADIO_CLK, peripherals.WIFI,
+///     peripherals.TIMG0, peripherals.RNG, peripherals.RADIO_CLK, peripherals.WIFI, peripherals.BT
 /// );
 /// ```
-pub fn provide_peripherals(timg0: TIMG0, rng: RNG, radio_clk: RADIO_CLK, wifi: WIFI) {
+pub fn provide_peripherals(timg0: TIMG0, rng: RNG, radio_clk: RADIO_CLK, wifi: WIFI, bt: esp_hal::peripherals::BT) {
     let mut g = PENDING.lock();
     *g = Some(NetPeripherals {
         timg0,
         rng,
         radio_clk,
         wifi,
+        bt,
     });
 }
 
@@ -218,6 +220,8 @@ pub fn net_task(_arg: usize) {
     // Fugamos el `EspWifiController` a `'static` (patrón `mk_static!`): debe
 
     let init: &'static EspWifiController<'static> = Box::leak(Box::new(init));
+
+    crate::drivers::ble::init(periph.bt, init);
 
     let (mut device, mut controller): (WifiDevice<'static, WifiStaDevice>, WifiController<'static>) =
         match wifi::new_with_mode(init, periph.wifi, WifiStaDevice) {

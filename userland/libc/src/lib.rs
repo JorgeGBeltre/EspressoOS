@@ -160,6 +160,14 @@ pub fn connect(fd: i32, addr: &sockaddr_in) -> isize {
     unsafe { syscall(22, fd as usize, addr as *const sockaddr_in as usize, core::mem::size_of::<sockaddr_in>(), 0, 0, 0) }
 }
 
+pub fn send(fd: i32, buf: &[u8]) -> isize {
+    write(fd, buf)
+}
+
+pub fn recv(fd: i32, buf: &mut [u8]) -> isize {
+    read(fd, buf)
+}
+
 pub fn ota_state(op: usize, state: usize) -> isize {
     unsafe { syscall(25, op, state, 0, 0, 0, 0) }
 }

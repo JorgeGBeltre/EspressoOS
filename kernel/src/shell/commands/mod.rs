@@ -184,6 +184,7 @@ pub fn dispatch(name: &str, args: &[&str]) -> i32 {
         "pms" => cmd_pms(args),
         "power" => cmd_power(args),
         "sha256" => cmd_sha256(args),
+        "ble" => cmd_ble(args),
         "" => 0,
         other => {
             eprint_line(&format!("shell: comando no encontrado: {}", other));
@@ -242,6 +243,7 @@ fn cmd_help(_args: &[&str]) -> i32 {
     emit_line("  pms [world1]          protección de memoria (PMS)");
     emit_line("  power sleep|deep-sleep [segundos]  gestión de energía");
     emit_line("  sha256 [texto]        hashing SHA-256 por hardware");
+    emit_line("  ble status|advertise  gestión y publicidad Bluetooth LE");
     emit_line("");
     emit_line("Redirección: '> archivo' (trunca) y '>> archivo' (añade).");
     0
@@ -851,6 +853,28 @@ fn cmd_sha256(args: &[&str]) -> i32 {
     }
     emit_line(&format!("SHA256(\"{}\") = {}", input, hex));
     0
+}
+
+fn cmd_ble(args: &[&str]) -> i32 {
+    let sub = args.first().copied();
+    match sub {
+        Some("status") => {
+            if crate::drivers::ble::is_advertising() {
+                emit_line("BLE: Publicitando activamente como 'EspressoOS'");
+            } else {
+                emit_line("BLE: Inactivo (no publicitando)");
+            }
+            0
+        }
+        Some("advertise") => {
+            crate::drivers::ble::start_advertising();
+            0
+        }
+        _ => {
+            eprint_line("uso: ble status | ble advertise");
+            1
+        }
+    }
 }
 
 fn err_str(e: KError) -> &'static str {

@@ -522,9 +522,10 @@ fn sys_socket(args: &[usize]) -> isize {
     drop(guard);
     
     let socket_inode = Arc::new(crate::vfs::socket::SocketInode {
-        handle,
+        handle: crate::arch::xtensa::sync::Mutex::new(handle),
         is_udp,
         remote_endpoint: crate::arch::xtensa::sync::Mutex::new(None),
+        local_port: crate::arch::xtensa::sync::Mutex::new(None),
     });
     
     let open_file = match crate::vfs::OpenFile::new(socket_inode, crate::vfs::OpenFlags::RDWR) {
@@ -608,16 +609,60 @@ fn sys_connect(args: &[usize]) -> isize {
     }
 }
 
-fn sys_bind(_args: &[usize]) -> isize {
-    0
+fn sys_bind(args: &[usize]) -> isize {
+    let fd = arg(args, 0) as Fd;
+    let addr_ptr = arg(args, 1) as *const sockaddr_in;
+    let addr_len = arg(args, 2);
+    
+    if addr_ptr.is_null() || addr_len < core::mem::size_of::<sockaddr_in>() {
+        return KError::InvalidArgument.as_errno();
+    }
+    let addr = unsafe { &*addr_ptr };
+    let port = u16::from_be(addr.sin_port);
+    
+    match crate::vfs::get_inode(fd) {
+        Ok(inode) => match inode.bind(port) {
+            Ok(()) => 0,
+            Err(e) => e.as_errno(),
+        },
+        Err(e) => e.as_errno(),
+    }
 }
 
-fn sys_listen(_args: &[usize]) -> isize {
-    0
+fn sys_listen(args: &[usize]) -> isize {
+    let fd = arg(args, 0) as Fd;
+    let backlog = arg(args, 1) as i32;
+    
+    match crate::vfs::get_inode(fd) {
+        Ok(inode) => match inode.listen(backlog) {
+            Ok(()) => 0,
+            Err(e) => e.as_errno(),
+        },
+        Err(e) => e.as_errno(),
+    }
 }
 
-fn sys_accept(_args: &[usize]) -> isize {
-    0
+fn sys_accept(args: &[usize]) -> isize {
+    let fd = arg(args, 0) as Fd;
+    
+    let listen_inode = match crate::vfs::get_inode(fd) {
+        Ok(inode) => inode,
+        Err(e) => return e.as_errno(),
+    };
+    
+    match listen_inode.accept() {
+        Ok(accepted_inode) => {
+            let open_file = match crate::vfs::OpenFile::new(accepted_inode, crate::vfs::OpenFlags::RDWR) {
+                Ok(f) => f,
+                Err(e) => return e.as_errno(),
+            };
+            match crate::vfs::insert_open_file(open_file) {
+                Ok(new_fd) => new_fd as isize,
+                Err(e) => e.as_errno(),
+            }
+        }
+        Err(e) => e.as_errno(),
+    }
 }
 
 #[repr(C)]

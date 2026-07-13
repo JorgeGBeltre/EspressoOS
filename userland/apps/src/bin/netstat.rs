@@ -1,0 +1,25 @@
+#![no_std]
+#![no_main]
+
+use libc::{println, open, read, close};
+
+#[no_mangle]
+pub fn main() -> i32 {
+    let mut buf = [0u8; 2048];
+    let fd = open("/proc/net/sockets", 0);
+    if fd < 0 {
+        println!("netstat: no se pudo abrir /proc/net/sockets");
+        return 1;
+    }
+    
+    let n = read(fd as i32, &mut buf);
+    if n > 0 {
+        let content = unsafe { core::str::from_utf8_unchecked(&buf[..n as usize]) };
+        println!("{}", content);
+    } else {
+        println!("netstat: no hay sockets activos o error al leer");
+    }
+    
+    close(fd as i32);
+    0
+}

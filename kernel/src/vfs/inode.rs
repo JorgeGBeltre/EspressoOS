@@ -56,6 +56,18 @@ pub trait Inode: Send + Sync {
         Err(KError::NotSupported)
     }
 
+    fn bind(&self, _port: u16) -> KResult<()> {
+        Err(KError::NotSupported)
+    }
+
+    fn listen(&self, _backlog: i32) -> KResult<()> {
+        Err(KError::NotSupported)
+    }
+
+    fn accept(&self) -> KResult<Arc<dyn Inode>> {
+        Err(KError::NotSupported)
+    }
+
     fn readdir(&self, _index: usize) -> KResult<Option<DirEntry>> {
         Err(KError::NotADirectory)
     }

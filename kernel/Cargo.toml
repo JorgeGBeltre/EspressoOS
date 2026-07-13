@@ -74,12 +74,13 @@ embedded-storage = "0.3.1"
 # embedded-hal 1.0: para el trait `SpiBus` (transferencia full-duplex de 2 búferes)
 # que drivers/spi.rs usa; esp-hal 0.23 implementa este trait para su `Spi` bloqueante.
 embedded-hal     = "1.0.0"
+embedded-io      = "0.6.1"
 
 # --- Red (drivers::wifi, Fase 7): esp-wifi 802.11 + smoltcp TCP/IP ----------
 # Mismos features que solicitó el subsistema. `smoltcp`/`utils` conectan el
 # `WifiDevice` de esp-wifi con el stack smoltcp. esp-wifi usa el allocator global
 # (feature `esp-alloc`, activa por defecto) — el heap ya está listo en `main`.
-esp-wifi = { version = "0.12.0", features = ["esp32s3", "wifi", "utils", "smoltcp"] }
+esp-wifi = { version = "0.12.0", features = ["esp32s3", "wifi", "ble", "utils", "smoltcp"] }
 
 # smoltcp 0.12 usa `core::net` para direcciones. Solo lo que el driver necesita.
 # (esp-wifi también trae smoltcp como dep opcional con sus propias features; Cargo

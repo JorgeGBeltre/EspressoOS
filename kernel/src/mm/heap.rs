@@ -9,7 +9,7 @@
 //! Toda la contabilidad de "capacidad total configurada" se lleva aquí en un
 //! contador atómico (`TOTAL_CONFIGURED`), porque `esp-alloc` no expone de forma
 //! estable la suma de todas las regiones registradas. El uso/libre en tiempo real
-//! se consulta a `ALLOCATOR.used()` / `ALLOCATOR.free()` (§1.9 del contrato).
+//! se consulta a `esp_alloc::HEAP.used()` / `esp_alloc::HEAP.free()` (§1.9 del contrato).
 //!
 //! NOTA de riesgo (esp-alloc 0.6.0): `HeapRegion::new` es `unsafe` (registra una
 //! región de memoria cruda que DEBE estar disponible y no aliaseada). Los nombres
@@ -34,11 +34,10 @@ pub struct HeapStats {
     pub free: usize,
 }
 
-/// Allocator global. `EspHeap::empty()` es `const`, así que puede vivir en un
-/// `static` sin inicialización en tiempo de ejecución; las regiones se añaden en
-/// [`init`] / [`add_psram`].
-#[global_allocator]
-static ALLOCATOR: esp_alloc::EspHeap = esp_alloc::EspHeap::empty();
+// El allocator global lo PROVEE esp-alloc: `#[global_allocator] pub static HEAP:
+// EspHeap` (accesible como `esp_alloc::HEAP`). NO declaramos uno propio, o habría
+// conflicto de `#[global_allocator]`. Aquí solo le añadimos regiones (SRAM/PSRAM)
+// y le consultamos uso vía `esp_alloc::HEAP.used()/free()`.
 
 /// Capacidad total configurada acumulada (SRAM + PSRAM), en bytes.
 /// Fuente para [`size`] y para `HeapStats::total`.
@@ -78,7 +77,7 @@ pub fn init() {
     // cede aquí al allocator; `base`/`len` describen exactamente esa región,
     // válida durante toda la vida del programa y no usada por nadie más.
     unsafe {
-        ALLOCATOR.add_region(esp_alloc::HeapRegion::new(
+        esp_alloc::HEAP.add_region(esp_alloc::HeapRegion::new(
             base,
             len,
             esp_alloc::MemoryCapability::Internal.into(),
@@ -113,7 +112,7 @@ pub fn add_psram(base: *mut u8, len: usize) {
     // ventana de PSRAM ya inicializada y mapeada a caché, exclusiva del heap y
     // válida durante toda la vida del programa.
     unsafe {
-        ALLOCATOR.add_region(esp_alloc::HeapRegion::new(
+        esp_alloc::HEAP.add_region(esp_alloc::HeapRegion::new(
             base,
             len,
             esp_alloc::MemoryCapability::External.into(),
@@ -140,7 +139,7 @@ pub fn stats() -> HeapStats {
         total: TOTAL_CONFIGURED.load(Ordering::Relaxed),
         // `used()`/`free()`: superficie marcada `(?)` en el contrato (§1.9).
         // Si el crate instalado renombra estos métodos, ajustarlos AQUÍ.
-        used: ALLOCATOR.used(),
-        free: ALLOCATOR.free(),
+        used: esp_alloc::HEAP.used(),
+        free: esp_alloc::HEAP.free(),
     }
 }

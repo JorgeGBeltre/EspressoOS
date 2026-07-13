@@ -13,6 +13,7 @@
 
 pub mod commands;
 pub mod parser;
+pub mod remote; // abstracción de E/S para servir la shell por SSH (drivers::ssh)
 
 use crate::drivers::uart;
 use crate::prelude::*;

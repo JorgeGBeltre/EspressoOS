@@ -19,7 +19,8 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 
 use esp_hal::handler; // macro de atributo #[handler] para ISRs compatibles con el HAL
 use esp_hal::timer::systimer::SystemTimer;
-use esp_hal::timer::{AnyTimer, PeriodicTimer, Timer};
+use esp_hal::timer::{AnyTimer, PeriodicTimer};
+use esp_hal::Blocking; // modo del driver: `PeriodicTimer<'d, Dm>` con Dm = Blocking
 
 use super::sync::Mutex;
 
@@ -31,7 +32,7 @@ pub const TICK_HZ: u32 = 100;
 /// nombrarlo en un `static`. Se usa `AnyTimer` (borra si es SYSTIMER-alarm o
 /// TIMG) porque el tipo concreto del alarm de `esp-hal` 0.23 tiene genéricos
 /// verbosos y volátiles.
-type SchedTimer = PeriodicTimer<'static, AnyTimer<'static>>;
+type SchedTimer = PeriodicTimer<'static, Blocking>;
 
 /// Temporizador periódico global.
 ///
@@ -121,7 +122,7 @@ pub fn init() {
 
     // Tomamos la alarma 0 y la erosionamos a `AnyTimer` para el `static`.
     // (?) nombre del campo `.alarm0` y `From<Alarm> for AnyTimer` en 0.23.
-    let alarm: AnyTimer<'static> = systimer.alarm0.into();
+    let alarm: AnyTimer = systimer.alarm0.into();
     let mut periodic = PeriodicTimer::new(alarm);
 
     // Enganchamos la ISR ANTES de arrancar, para no perder ningún disparo.
@@ -136,7 +137,9 @@ pub fn init() {
     // kernel no hacemos panic: descartamos el Err (mejor un systick ausente que
     // un panic en el arranque; el fallo se notaría por falta de preempción).
     // (?) tipo de duración exacto de `start` en 0.23.
-    let _ = periodic.start(esp_hal::time::Duration::micros(periodo_us));
+    // `start` toma `fugit::MicrosDurationU64`, que ES exactamente
+    // `esp_hal::time::Duration` (fugit Duration a 1 µs). `from_ticks(n)` = n µs.
+    let _ = periodic.start(esp_hal::time::Duration::from_ticks(periodo_us));
 
     // ORDEN IMPORTANTE (cierra la ventana de carrera): guardamos el objeto en
     // `PERIODIC` y SOLO DESPUÉS habilitamos la interrupción, y ambas cosas con el

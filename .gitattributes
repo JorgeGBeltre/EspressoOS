@@ -1,0 +1,9 @@
+# Normaliza los finales de línea a LF dentro del repositorio.
+# Elimina los avisos "LF will be replaced by CRLF" al hacer commit en Windows.
+* text=auto eol=lf
+
+# Binarios: nunca normalizar.
+*.bin binary
+*.png binary
+*.jpg binary
+*.ico binary

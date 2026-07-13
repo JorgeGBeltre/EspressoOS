@@ -26,23 +26,33 @@ const PROMPT: &str = "esp32s3-os> ";
 /// Longitud máxima de una línea de entrada (evita crecer sin límite).
 const MAX_LINE: usize = 256;
 
-/// Bucle principal de la shell (REPL). [CANÓNICO]
+/// Bucle principal de la shell LOCAL (REPL sobre la consola). [CANÓNICO]
 ///
 /// No retorna en operación normal (bucle infinito). Firma sin `!` para
 /// permitir, en el futuro, una salida limpia (p. ej. comando `exit`).
+///
+/// Es un wrapper delgado sobre [`remote::run_with_io`] con la E/S de consola:
+/// así la MISMA REPL sirve local y por SSH (ver `remote::run_with_io`).
 pub fn run() {
-    banner();
-    let mut line = String::new();
-    loop {
-        print_prompt();
-        line.clear();
-        read_line(&mut line);
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        execute(trimmed);
-    }
+    remote::run_with_io(&mut remote::ConsoleIo);
+}
+
+/// Imprime el banner de bienvenida (expuesto para la REPL genérica).
+pub(crate) fn banner_bytes() -> &'static [u8] {
+    b"\r\nesp32s3-os shell. Escribe 'help' para ver los comandos.\r\n"
+}
+
+/// Devuelve el prompt como bytes (expuesto para la REPL genérica).
+pub(crate) fn prompt_bytes() -> &'static [u8] {
+    PROMPT.as_bytes()
+}
+
+/// Longitud máxima de línea (expuesta para la REPL genérica).
+pub(crate) const MAX_LINE_LEN: usize = MAX_LINE;
+
+/// Parsea y ejecuta una línea (expuesto para la REPL genérica de `remote`).
+pub(crate) fn execute_line(line: &str) {
+    execute(line);
 }
 
 /// Imprime el banner de bienvenida (una vez, al arrancar la shell).

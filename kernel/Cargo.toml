@@ -77,19 +77,48 @@ smoltcp = { version = "0.12.0", default-features = false, features = [
 ] }
 
 # --- Criptografía para SSH (drivers::ssh, Fase 7+): crates AUDITADAS no_std --
-# PLANIFICADAS, aún NO activas: ssh/*.rs es borrador y tiene las llamadas de
-# cripto comentadas (`// use ...`). Se descomentan cuando kex/crypt/auth las
-# importen de verdad, y ENTONCES se confirma su compat no_std/xtensa con
-# esp-hal 0.23. Se dejan comentadas para no romper el build con dependencias
-# sin usar (mismo criterio que littlefs2). El kernel NO implementa cripto propia.
-# x25519-dalek  = { version = "2",    default-features = false, features = ["static_secrets"] } # ECDH (kex)
-# ed25519-dalek = { version = "2",    default-features = false, features = ["alloc"] }          # host key + publickey auth
-# sha2          = { version = "0.10", default-features = false }                                # hash de kex / KDF
-# chacha20      = { version = "0.9",  default-features = false }                                # cifrado de sesión (constr. openssh)
-# poly1305      = { version = "0.8",  default-features = false }                                # etiqueta AEAD
-# subtle        = { version = "2",    default-features = false }                                # comparación en tiempo constante
-# zeroize       = { version = "1",    default-features = false }                                # borrado de secretos
-# rand_core     = { version = "0.6",  default-features = false }                                # RNG (TRNG del ESP32-S3)
+# ACTIVAS desde el PASO 1 (de-riesgo): las ejercita `ssh::crypto_smoke::smoke()`
+# para forzar el enlazado y confirmar compat no_std/xtensa (esp-hal 0.23, target
+# xtensa-esp32s3-none-elf, target_pointer_width = 32 -> backend serial u32 de
+# curve25519-dalek, automático). El kernel NO implementa cripto propia.
+#
+# REGLA DURA (riesgo de build): NINGUNA feature `getrandom` en NINGUNA crate del
+# árbol. `getrandom` 0.2 no tiene backend bare-metal xtensa; si alguna crate lo
+# arrastra, el build rompe con "target is not supported". Toda la entropía sale
+# del TRNG (`ssh::crypto_rng::HwRng` sobre `esp_hal::rng::Rng`). Por eso NO se
+# activan las features `getrandom`/`rand_core` que enlazarían OsRng.
+#
+# Versiones FIJADAS a point-release exacto (no "2" a secas): x25519-dalek/
+# ed25519-dalek "latest" ya resuelven a rand_core ^0.10 con firma distinta
+# (`random_from_rng<R: CryptoRng + ?Sized>(&mut R)`), incompatible con este árbol.
+#
+# `default-features = false` es OBLIGATORIO en las dalek: sus defaults incluyen
+# `std`. Cada `features` va documentada abajo.
+#
+# ECDH efímero (kex). default-features=false quita `std`+`getrandom`. Solo uso
+# `EphemeralSecret` (kex) -> NO necesito `static_secrets`. `zeroize` borra la
+# clave efímera. NO activo `getrandom` (genero la semilla con HwRng).
+x25519-dalek  = { version = "2.0.1", default-features = false, features = ["zeroize"] }
+# Host key + firma de H + publickey auth. `from_bytes`/`sign`/`verify_strict` no
+# exigen `alloc`; `zeroize` borra la clave secreta. NO activo `rand_core` (no uso
+# `SigningKey::generate`, genero la semilla con HwRng y uso `from_bytes`).
+ed25519-dalek = { version = "2.1.1", default-features = false, features = ["zeroize"] }
+# SHA-256: hash de intercambio H y KDF (RFC 4253 §7.2/§8). Sin `std`.
+sha2          = { version = "0.10", default-features = false }
+# Cifrado de sesión: usa `ChaCha20Legacy` (variante djb, nonce 8B) para la
+# construcción `chacha20-poly1305@openssh.com`. `ChaCha20Legacy` NO está tras
+# ninguna feature en 0.9 (siempre disponible); `zeroize` borra el estado del
+# cifrador. NO es el crate `chacha20poly1305` (ese es RFC 8439, incompatible).
+chacha20      = { version = "0.9",  default-features = false, features = ["zeroize"] }
+# Etiqueta AEAD Poly1305 (tag de 16B) de la construcción openssh. Sin `std`.
+poly1305      = { version = "0.8",  default-features = false }
+# Comparación en tiempo constante de etiquetas/credenciales (`ct_eq`). Sin `std`.
+subtle        = { version = "2",    default-features = false }
+# Borrado seguro de secretos. `derive` habilita `#[derive(Zeroize)]`. Sin `std`.
+zeroize       = { version = "1",    default-features = false, features = ["derive"] }
+# Traits RngCore/CryptoRng que necesitan las dalek. 0.6 (NO 0.9/0.10). La feature
+# `getrandom` está OFF por defecto; con default-features=false NO aparece.
+rand_core     = { version = "0.6",  default-features = false }
 
 # ----------------------------------------------------------------------------
 # NO añadidas a propósito (evitar dependencias sin usar o que romperían el build):

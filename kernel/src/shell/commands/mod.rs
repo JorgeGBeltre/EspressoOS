@@ -36,6 +36,8 @@ use super::parser::Redirect;
 enum Sink {
     /// Consola (USB-Serial-JTAG) vía `drivers::uart`.
     Console,
+    /// Canal SSH: la salida va al puente de `shell::remote` (sesión remota).
+    Ssh,
     /// Archivo abierto en el VFS (descriptor).
     File(vfs::Fd),
 }
@@ -45,12 +47,40 @@ enum Sink {
 /// diseño listo para preempción/SMP.
 static OUTPUT: Mutex<Sink> = Mutex::new(Sink::Console);
 
-/// Escribe bytes crudos en el sink actual (consola o archivo redirigido).
+/// Sink BASE al que se vuelve cuando NO hay redirección `>`/`>>` activa. Lo fija
+/// la REPL: `Console` para la shell local, `Ssh` para una sesión SSH. Así una
+/// redirección a archivo, al terminar, restaura el destino correcto (consola o
+/// canal) en vez de forzar siempre consola.
+///
+/// LIMITACIÓN (MVP): el sink es GLOBAL, así que mientras una sesión SSH lo pone en
+/// `Ssh`, la salida de comandos de la shell LOCAL también iría al canal. Se acepta
+/// porque el MVP sirve UNA shell a la vez. Bajo el planificador cooperativo un
+/// `dispatch` corre hasta el final sin `yield`, así que el intercalado por swap del
+/// sink no rompe una ejecución en curso.
+static BASE: Mutex<Sink> = Mutex::new(Sink::Console);
+
+/// Enruta la salida de los comandos al canal SSH (lo llama `remote::run_with_io`
+/// al iniciar una sesión remota).
+pub fn set_base_ssh() {
+    *BASE.lock() = Sink::Ssh;
+    *OUTPUT.lock() = Sink::Ssh;
+}
+
+/// Restaura la salida de los comandos a la consola (fin de sesión remota).
+pub fn set_base_console() {
+    *BASE.lock() = Sink::Console;
+    *OUTPUT.lock() = Sink::Console;
+}
+
+/// Escribe bytes crudos en el sink actual (consola, canal SSH o archivo).
 fn emit(bytes: &[u8]) {
     let mut sink = OUTPUT.lock();
     match &mut *sink {
         Sink::Console => {
             let _ = uart::write(bytes);
+        }
+        Sink::Ssh => {
+            let _ = crate::shell::remote::command_output_to_ssh(bytes);
         }
         Sink::File(fd) => {
             // La salida a archivo ignora fallos parciales aquí; los comandos
@@ -76,6 +106,10 @@ fn emit_line(s: &str) {
             let _ = uart::write(s.as_bytes());
             let _ = uart::write(b"\r\n");
         }
+        Sink::Ssh => {
+            let _ = crate::shell::remote::command_output_to_ssh(s.as_bytes());
+            let _ = crate::shell::remote::command_output_to_ssh(b"\r\n");
+        }
         Sink::File(fd) => {
             let _ = vfs::write(*fd, s.as_bytes());
             let _ = vfs::write(*fd, b"\n");
@@ -98,7 +132,9 @@ fn eprint_line(s: &str) {
 pub fn begin_redirect(redirect: &Redirect) -> KResult<()> {
     match redirect {
         Redirect::None => {
-            *OUTPUT.lock() = Sink::Console;
+            // Sin redirección: el destino es el sink BASE (consola o canal SSH).
+            let base = *BASE.lock();
+            *OUTPUT.lock() = base;
             Ok(())
         }
         Redirect::Truncate(path) => {
@@ -122,7 +158,8 @@ pub fn end_redirect() {
     if let Sink::File(fd) = *sink {
         let _ = vfs::close(fd);
     }
-    *sink = Sink::Console;
+    // Volver al sink BASE (consola o canal SSH), no forzar consola.
+    *sink = *BASE.lock();
 }
 
 // ===========================================================================

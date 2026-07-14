@@ -155,21 +155,18 @@ pub fn init() -> KResult<()> {
 }
 
 pub fn write(buf: &[u8]) -> usize {
-    CONSOLE.with(|c| {
-        let mut n = 0usize;
-        for &b in buf {
-            if !c.tx.push(b) {
-
-                c.drain_tx();
-                if !c.tx.push(b) {
-                    break;
-                }
+    // Salida por el MISMO puerto que el kernel: esp-println → UART0 (CH343/COM5),
+    // NO por el USB-Serial-JTAG (que bloqueaba en drain_tx si nadie lo lee y
+    // mandaba la salida de userland a un puerto que no se monitoriza).
+    match core::str::from_utf8(buf) {
+        Ok(s) => esp_println::print!("{}", s),
+        Err(_) => {
+            for &b in buf {
+                esp_println::print!("{}", b as char);
             }
-            n += 1;
         }
-        c.drain_tx();
-        n
-    })
+    }
+    buf.len()
 }
 
 pub fn read(buf: &mut [u8]) -> usize {

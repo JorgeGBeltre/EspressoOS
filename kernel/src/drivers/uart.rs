@@ -169,24 +169,35 @@ pub fn write(buf: &[u8]) -> usize {
     buf.len()
 }
 
+/// Lee un byte del RX FIFO de UART0 (CH343/COM5) si hay alguno disponible.
+#[inline]
+fn uart0_read_byte() -> Option<u8> {
+    let uart = unsafe { &*esp_hal::peripherals::UART0::PTR };
+    if uart.status().read().rxfifo_cnt().bits() > 0 {
+        Some(uart.fifo().read().rxfifo_rd_byte().bits())
+    } else {
+        None
+    }
+}
+
 pub fn read(buf: &mut [u8]) -> usize {
-    CONSOLE.with(|c| {
-        let mut n = 0usize;
-        while n < buf.len() {
-            match c.read_hw_byte() {
-                Some(b) => {
-                    if let Some(slot) = buf.get_mut(n) {
-                        *slot = b;
-                    }
-                    n += 1;
+    // Entrada por UART0 (COM5), MISMO puerto que la salida (esp-println), NO por
+    // el USB-Serial-JTAG.
+    let mut n = 0usize;
+    while n < buf.len() {
+        match uart0_read_byte() {
+            Some(b) => {
+                if let Some(slot) = buf.get_mut(n) {
+                    *slot = b;
                 }
-                None => break,
+                n += 1;
             }
+            None => break,
         }
-        n
-    })
+    }
+    n
 }
 
 pub fn getc() -> Option<u8> {
-    CONSOLE.with(|c| c.read_hw_byte())
+    uart0_read_byte()
 }

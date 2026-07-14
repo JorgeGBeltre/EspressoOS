@@ -178,10 +178,6 @@ impl ShellIo for SshChannelIo {
 
 pub fn run_with_io(io: &mut dyn ShellIo) {
 
-    if io.is_ssh() {
-        crate::shell::commands::set_base_ssh();
-    }
-
     io.write(super::banner_bytes());
 
     let mut line = String::new();
@@ -190,15 +186,29 @@ pub fn run_with_io(io: &mut dyn ShellIo) {
             break;
         }
 
-        // Prompt estilo Unix: usuario@host:cwd$ . El directorio raíz se muestra
-        // como `~` (home), igual que bash.
+        // Enruta la salida de los comandos al sink de ESTE shell. Como la consola
+        // local y una sesión SSH pueden coexistir, se fija en cada iteración (no una
+        // sola vez), para que cada comando escriba donde corresponde.
+        if io.is_ssh() {
+            crate::shell::commands::set_base_ssh();
+        } else {
+            crate::shell::commands::set_base_console();
+        }
+
+        // Prompt estilo Unix, con el cwd (`/` se muestra como `~`, igual que bash).
+        // Por SSH incluye el usuario autenticado (`user@EspressoOS:~$`); en la
+        // consola local no hay login, así que se omite (`EspressoOS:~$`).
         let cwd = crate::shell::commands::cwd_get();
         let display_cwd = if cwd == "/" { "~" } else { cwd.as_str() };
-        let prompt = alloc::format!(
-            "{}@EspressoOS:{}$ ",
-            crate::drivers::ssh::config::DEV_USER,
-            display_cwd,
-        );
+        let prompt = if io.is_ssh() {
+            alloc::format!(
+                "{}@EspressoOS:{}$ ",
+                crate::drivers::ssh::config::DEV_USER,
+                display_cwd,
+            )
+        } else {
+            alloc::format!("EspressoOS:{}$ ", display_cwd)
+        };
         io.write(prompt.as_bytes());
         line.clear();
         if !read_line_io(io, &mut line) {

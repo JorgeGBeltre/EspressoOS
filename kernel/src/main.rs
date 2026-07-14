@@ -169,30 +169,15 @@ fn main() -> ! {
 
     scheduler::init();
 
-    // Intentar cargar y ejecutar /bin/init en World-1
-    println!("[kernel] loading /bin/init...");
-    let mut init_spawned = false;
-    match crate::fs::elf::load_elf("/bin/init") {
-        Ok((entry, size, addr)) => {
-            let entry_fn: fn(usize) = unsafe { core::mem::transmute(entry as usize) };
-            match scheduler::spawn("/bin/init", entry_fn, 0, layout::DEFAULT_STACK_SIZE, PRIO_DEFAULT, true) {
-                Ok(tid) => {
-                    let pid = scheduler::process::register_process("/bin/init", tid, true, addr, size);
-                    println!("[kernel] init process (PID {}) created successfully", pid);
-                    init_spawned = true;
-                }
-                Err(e) => println!("[kernel] ERROR spawning init: {:?}", e),
-            }
-        }
-        Err(e) => println!("[kernel] /bin/init not found in EspFs: {:?}", e),
-    }
-
-    if !init_spawned {
-        println!("[kernel] Falling back to kernel console...");
-        match scheduler::spawn("shell", shell_task, 0, layout::DEFAULT_STACK_SIZE, PRIO_DEFAULT, false) {
-            Ok(tid) => println!("[kernel] task 'shell' created (tid={})", tid),
-            Err(e) => println!("[kernel] ERROR: could not create shell: {:?}", e),
-        }
+    // Consola interactiva: el shell del KERNEL sobre UART0 — mismos comandos que
+    // por SSH (wifi, ls, help, cd, cat, i2c, ota...), con parseo de argumentos.
+    // El userland sigue desplegado en /bin (install_userland) y su maquinaria
+    // (loader ELF, ejecución desde PSRAM, spawn/wait) permanece en el código; se
+    // inspecciona con `ls /bin` / `cat`.
+    println!("[kernel] starting interactive console (kernel shell) on UART0...");
+    match scheduler::spawn("shell", shell_task, 0, layout::DEFAULT_STACK_SIZE, PRIO_DEFAULT, false) {
+        Ok(tid) => println!("[kernel] task 'shell' created (tid={})", tid),
+        Err(e) => println!("[kernel] ERROR: could not create shell: {:?}", e),
     }
 
     match scheduler::spawn(
@@ -250,7 +235,12 @@ fn banner() {
 }
 
 fn shell_task(_arg: usize) {
-    shell::run();
+    // Reinicia el shell si `run` retorna (p.ej. al teclear `exit` en la consola),
+    // para no dejar la consola muerta.
+    loop {
+        shell::run();
+        scheduler::yield_now();
+    }
 }
 
 fn heartbeat_task(_arg: usize) {

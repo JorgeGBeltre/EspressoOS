@@ -17,7 +17,7 @@ fn read_file_to_buf(path: &str, buf: &mut [u8]) -> usize {
 pub fn main() -> i32 {
     let fd = socket(2, 1, 0); // AF_INET, SOCK_STREAM
     if fd < 0 {
-        println!("httpd: no se pudo crear el socket");
+        println!("httpd: could not create socket");
         return 1;
     }
     
@@ -29,18 +29,18 @@ pub fn main() -> i32 {
     };
     
     if bind(fd as i32, &addr) < 0 {
-        println!("httpd: error al hacer bind en puerto 80");
+        println!("httpd: failed to bind on port 80");
         close(fd as i32);
         return 1;
     }
     
     if listen(fd as i32, 5) < 0 {
-        println!("httpd: error en listen");
+        println!("httpd: listen error");
         close(fd as i32);
         return 1;
     }
     
-    println!("httpd: servidor web escuchando en el puerto 80...");
+    println!("httpd: web server listening on port 80...");
     
     let mut client_addr = sockaddr_in {
         sin_family: 0,
@@ -88,10 +88,10 @@ pub fn main() -> i32 {
             <body>\
                 <div class='container'>\
                     <h1>EspressoOS Web Server</h1>\
-                    <p>Este recurso es servido dinamicamente por el proceso <code>httpd</code> en World-1.</p>\
-                    <h3>Estado de /proc/uptime:</h3>";
+                    <p>This resource is served dynamically by the <code>httpd</code> process on World-1.</p>\
+                    <h3>Status of /proc/uptime:</h3>";
                     
-            let body_mid = "<h3>Estado de /proc/meminfo:</h3>";
+            let body_mid = "<h3>Status of /proc/meminfo:</h3>";
             
             let body_suffix = "</div>\
                 <div class='footer'>EspressoOS &copy; 2026 - Multicore SMP IoT OS</div>\

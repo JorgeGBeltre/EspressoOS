@@ -16,7 +16,7 @@ pub fn init(lpwr: esp_hal::peripherals::LPWR) {
 }
 
 pub fn enter_light_sleep(seconds: u64) {
-    esp_println::println!("[power] Entrando en Light Sleep por {} segundos...", seconds);
+    esp_println::println!("[power] Entering Light Sleep for {} seconds...", seconds);
     crate::arch::xtensa::interrupts::critical_section(|| {
         let mut guard = RTC.lock();
         if let Some(rtc) = guard.as_mut() {
@@ -24,11 +24,11 @@ pub fn enter_light_sleep(seconds: u64) {
             rtc.sleep_light(&[&timer]);
         }
     });
-    esp_println::println!("[power] Wakeup de Light Sleep!");
+    esp_println::println!("[power] Light Sleep wakeup!");
 }
 
 pub fn enter_deep_sleep(seconds: u64) -> ! {
-    esp_println::println!("[power] Entrando en Deep Sleep por {} segundos (reinicio al despertar)...", seconds);
+    esp_println::println!("[power] Entering Deep Sleep for {} seconds (reboot on wakeup)...", seconds);
     crate::arch::xtensa::interrupts::critical_section(|| {
         let mut guard = RTC.lock();
         if let Some(rtc) = guard.as_mut() {

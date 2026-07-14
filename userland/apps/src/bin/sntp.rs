@@ -5,11 +5,11 @@ use libc::{println, socket, connect, write, read, close, timeval, settimeofday, 
 
 #[no_mangle]
 pub extern "C" fn main() -> i32 {
-    println!("[sntp] Iniciando sincronizacion de hora...");
+    println!("[sntp] Starting time synchronization...");
 
     let fd = socket(2, 2, 0); // AF_INET = 2, SOCK_DGRAM = 2
     if fd < 0 {
-        println!("[sntp] Error al crear socket UDP");
+        println!("[sntp] Failed to create UDP socket");
         return -1;
     }
 
@@ -23,9 +23,9 @@ pub extern "C" fn main() -> i32 {
         sin_zero: [0; 8],
     };
 
-    println!("[sntp] Conectando a 128.138.140.44:123...");
+    println!("[sntp] Connecting to 128.138.140.44:123...");
     if connect(fd as i32, &addr) < 0 {
-        println!("[sntp] Error al conectar el socket UDP");
+        println!("[sntp] Failed to connect UDP socket");
         close(fd as i32);
         return -1;
     }
@@ -33,14 +33,14 @@ pub extern "C" fn main() -> i32 {
     let mut pkt = [0u8; 48];
     pkt[0] = 0x1B; // LI=0, VN=3, Mode=3 (Client)
 
-    println!("[sntp] Enviando peticion SNTP...");
+    println!("[sntp] Sending SNTP request...");
     if write(fd as i32, &pkt) < 0 {
-        println!("[sntp] Error al enviar peticion");
+        println!("[sntp] Failed to send request");
         close(fd as i32);
         return -1;
     }
 
-    println!("[sntp] Esperando respuesta...");
+    println!("[sntp] Waiting for response...");
     let mut resp = [0u8; 48];
     let mut attempts = 0;
     loop {
@@ -52,7 +52,7 @@ pub extern "C" fn main() -> i32 {
         }
         attempts += 1;
         if attempts > 200 {
-            println!("[sntp] Timeout al recibir respuesta");
+            println!("[sntp] Timeout waiting for response");
             close(fd as i32);
             return -1;
         }
@@ -63,7 +63,7 @@ pub extern "C" fn main() -> i32 {
     
     let ntp_offset = 2208988800u32;
     if seconds_1900 < ntp_offset {
-        println!("[sntp] Error: timestamp recibido es invalido");
+        println!("[sntp] Error: received timestamp is invalid");
         close(fd as i32);
         return -1;
     }
@@ -74,14 +74,14 @@ pub extern "C" fn main() -> i32 {
         tv_usec: 0,
     };
 
-    println!("[sntp] Hora recibida: {} s (UNIX Epoch). Seteando reloj...", unix_secs);
+    println!("[sntp] Time received: {} s (UNIX Epoch). Setting clock...", unix_secs);
     if settimeofday(&tv) < 0 {
-        println!("[sntp] Error al actualizar settimeofday");
+        println!("[sntp] Failed to update settimeofday");
         close(fd as i32);
         return -1;
     }
 
-    println!("[sntp] Reloj sincronizado con exito!");
+    println!("[sntp] Clock synchronized successfully!");
     close(fd as i32);
     0
 }

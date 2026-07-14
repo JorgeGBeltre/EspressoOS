@@ -8,7 +8,7 @@ pub extern "C" fn main() -> i32 {
     println!("--- EspressoOS Shell (Userland) ---");
     let mut buf = [0u8; 64];
     loop {
-        print!("$ ");
+        print!("EspressoOS:~$ ");
         let mut len = 0;
         loop {
             let mut char_buf = [0u8; 1];
@@ -36,7 +36,7 @@ pub extern "C" fn main() -> i32 {
         if let Ok(cmd_str) = core::str::from_utf8(&buf[0..len]) {
             let cmd_str = cmd_str.trim();
             if cmd_str == "exit" {
-                println!("Saliendo de la shell...");
+                println!("Exiting the shell...");
                 break;
             }
             
@@ -47,7 +47,7 @@ pub extern "C" fn main() -> i32 {
                 
                 let mut p = [0i32; 2];
                 if pipe(&mut p) < 0 {
-                    println!("Error al crear pipe");
+                    println!("Error creating pipe");
                     continue;
                 }
                 
@@ -61,7 +61,7 @@ pub extern "C" fn main() -> i32 {
                 let path2 = resolve_path(right_cmd, &mut path_buf2);
                 
                 if path1.is_empty() || path2.is_empty() {
-                    println!("Ruta de comando vacía o inválida");
+                    println!("Empty or invalid command path");
                     close(p[0]);
                     close(p[1]);
                     close(10);
@@ -91,7 +91,7 @@ pub extern "C" fn main() -> i32 {
                     let _ = wait(&mut status);
                     let _ = wait(&mut status);
                 } else {
-                    println!("Error al spawnear procesos en la tubería");
+                    println!("Error spawning pipeline processes");
                 }
             } else {
                 // Comando simple
@@ -103,7 +103,7 @@ pub extern "C" fn main() -> i32 {
                         let mut status = 0;
                         let _ = wait(&mut status);
                     } else {
-                        println!("Error al ejecutar: {}", cmd_str);
+                        println!("Error executing: {}", cmd_str);
                     }
                 }
             }

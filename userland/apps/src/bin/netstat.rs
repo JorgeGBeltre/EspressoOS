@@ -8,7 +8,7 @@ pub fn main() -> i32 {
     let mut buf = [0u8; 2048];
     let fd = open("/proc/net/sockets", 0);
     if fd < 0 {
-        println!("netstat: no se pudo abrir /proc/net/sockets");
+        println!("netstat: could not open /proc/net/sockets");
         return 1;
     }
     
@@ -17,7 +17,7 @@ pub fn main() -> i32 {
         let content = unsafe { core::str::from_utf8_unchecked(&buf[..n as usize]) };
         println!("{}", content);
     } else {
-        println!("netstat: no hay sockets activos o error al leer");
+        println!("netstat: no active sockets or read error");
     }
     
     close(fd as i32);

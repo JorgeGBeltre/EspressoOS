@@ -196,7 +196,7 @@ pub fn net_task(_arg: usize) {
     let periph = match periph {
         Some(p) => p,
         None => {
-            println!("[net] ERROR: periféricos no provistos (¿faltó provide_peripherals?)");
+            println!("[net] ERROR: peripherals not provided (was provide_peripherals missing?)");
             set_status(WifiStatus::Failed);
             return;
         }
@@ -236,7 +236,7 @@ pub fn net_task(_arg: usize) {
     let ssid_h = match WIFI_SSID.try_into() {
         Ok(s) => s,
         Err(_) => {
-            println!("[net] ERROR: SSID demasiado largo (>32)");
+            println!("[net] ERROR: SSID too long (>32)");
             set_status(WifiStatus::Failed);
             return;
         }
@@ -244,7 +244,7 @@ pub fn net_task(_arg: usize) {
     let pass_h = match WIFI_PASSWORD.try_into() {
         Ok(p) => p,
         Err(_) => {
-            println!("[net] ERROR: password demasiado largo (>64)");
+            println!("[net] ERROR: password too long (>64)");
             set_status(WifiStatus::Failed);
             return;
         }
@@ -271,7 +271,7 @@ pub fn net_task(_arg: usize) {
         return;
     }
     set_status(WifiStatus::Connecting);
-    println!("[net] conectando a SSID '{}'...", WIFI_SSID);
+    println!("[net] connecting to SSID '{}'...", WIFI_SSID);
     let _ = controller.connect();
 
     let mut next_retry = uptime_ms().saturating_add(2_000);
@@ -288,7 +288,7 @@ pub fn net_task(_arg: usize) {
         }
         scheduler::yield_now();
     }
-    println!("[net] asociado al AP; negociando DHCP...");
+    println!("[net] associated with AP; negotiating DHCP...");
 
     let mac = device.mac_address();
     let mut if_cfg = IfaceConfig::new(HardwareAddress::Ethernet(EthernetAddress::from_bytes(&mac)));
@@ -382,7 +382,7 @@ pub fn net_task(_arg: usize) {
                         if let Some(ip) = iface.ipv4_addr() {
                             println!("[net] IP = {}", ip);
                             println!(
-                                "[net] SSH escuchando en puerto {}, ECHO en {}, OTA en {}",
+                                "[net] SSH listening on port {}, ECHO on {}, OTA on {}",
                                 SSH_PORT, ECHO_PORT, OTA_PORT
                             );
                             set_status(WifiStatus::Connected);
@@ -443,7 +443,7 @@ pub fn net_task(_arg: usize) {
                         }
                         Err(e) => {
                             if e != KError::WouldBlock {
-                                println!("[ssh] pump ERROR en estado {:?}: {:?}", ssh_conn.state(), e);
+                                println!("[ssh] pump ERROR in state {:?}: {:?}", ssh_conn.state(), e);
                                 transport.close();
                                 ssh_active = false;
                             }
@@ -463,13 +463,13 @@ pub fn net_task(_arg: usize) {
                     if !ota_receiving {
                         crate::ota::rx_begin();
                         ota_receiving = true;
-                        println!("[ota] recibiendo imagen en el puerto {}...", OTA_PORT);
+                        println!("[ota] receiving image on port {}...", OTA_PORT);
                     }
                     if sock.can_recv() {
                         if let Ok(n) = sock.recv_slice(&mut buf) {
                             if n > 0 {
                                 if let Err(e) = crate::ota::rx_push(&buf[..n]) {
-                                    println!("[ota] ERROR al bufferear: {:?}", e);
+                                    println!("[ota] ERROR while buffering: {:?}", e);
                                     crate::ota::rx_clear();
                                     sock.close();
                                     ota_receiving = false;
@@ -480,7 +480,7 @@ pub fn net_task(_arg: usize) {
                     if ota_receiving && !sock.may_recv() {
                         let total = crate::ota::rx_len();
                         println!(
-                            "[ota] imagen recibida: {} bytes. Flashea con 'ota apply' (mejor por consola).",
+                            "[ota] image received: {} bytes. Flash with 'ota apply' (best from the console).",
                             total
                         );
                         sock.close();

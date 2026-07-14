@@ -7,7 +7,7 @@ use libc::{open, read, write, close, println};
 pub extern "C" fn main() -> i32 {
     let fd = open("/etc/hosts", 1); // RDONLY = 1
     if fd < 0 {
-        println!("cat: no se pudo abrir /etc/hosts");
+        println!("cat: could not open /etc/hosts");
         return 1;
     }
     
@@ -15,7 +15,7 @@ pub extern "C" fn main() -> i32 {
     loop {
         let n = read(fd as i32, &mut buf);
         if n < 0 {
-            println!("cat: error al leer");
+            println!("cat: read error");
             let _ = close(fd as i32);
             return 1;
         }

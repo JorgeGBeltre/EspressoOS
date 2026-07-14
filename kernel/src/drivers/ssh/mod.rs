@@ -441,12 +441,12 @@ impl Connection {
 
     fn on_kexinit(&mut self, payload: &[u8], msg: u8) -> KResult<()> {
         if msg != proto::SSH_MSG_KEXINIT {
-            return self.disconnect(DISCONNECT_PROTOCOL_ERROR, "se esperaba KEXINIT");
+            return self.disconnect(DISCONNECT_PROTOCOL_ERROR, "expected KEXINIT");
         }
 
         self.i_c = payload.to_vec();
         if self.negotiate(payload).is_err() {
-            return self.disconnect(DISCONNECT_KEY_EXCHANGE_FAILED, "sin algoritmos comunes");
+            return self.disconnect(DISCONNECT_KEY_EXCHANGE_FAILED, "no common algorithms");
         }
         self.state = State::Kex;
         Ok(())
@@ -461,10 +461,10 @@ impl Connection {
                 self.state = State::Encrypted;
                 return Ok(());
             }
-            return self.disconnect(DISCONNECT_PROTOCOL_ERROR, "NEWKEYS inesperado");
+            return self.disconnect(DISCONNECT_PROTOCOL_ERROR, "unexpected NEWKEYS");
         }
         if msg != proto::SSH_MSG_KEX_ECDH_INIT {
-            return self.disconnect(DISCONNECT_PROTOCOL_ERROR, "se esperaba KEX_ECDH_INIT");
+            return self.disconnect(DISCONNECT_PROTOCOL_ERROR, "expected KEX_ECDH_INIT");
         }
 
         let mut r = Reader::new(payload);
@@ -483,7 +483,7 @@ impl Connection {
         );
         let kx = match result {
             Ok(k) => k,
-            Err(_) => return self.disconnect(DISCONNECT_KEY_EXCHANGE_FAILED, "fallo de kex"),
+            Err(_) => return self.disconnect(DISCONNECT_KEY_EXCHANGE_FAILED, "kex failed"),
         };
 
         if self.session_id.is_none() {
@@ -519,13 +519,13 @@ impl Connection {
 
     fn on_service_request(&mut self, payload: &[u8], msg: u8) -> KResult<()> {
         if msg != proto::SSH_MSG_SERVICE_REQUEST {
-            return self.disconnect(DISCONNECT_PROTOCOL_ERROR, "se esperaba SERVICE_REQUEST");
+            return self.disconnect(DISCONNECT_PROTOCOL_ERROR, "expected SERVICE_REQUEST");
         }
         let mut r = Reader::new(payload);
         let _ = r.get_u8()?;
         let service = r.get_string()?;
         if service != b"ssh-userauth" {
-            return self.disconnect(DISCONNECT_BY_APPLICATION, "servicio no soportado");
+            return self.disconnect(DISCONNECT_BY_APPLICATION, "service not supported");
         }
         let mut w = Writer::new();
         w.put_u8(proto::SSH_MSG_SERVICE_ACCEPT)
@@ -551,7 +551,7 @@ impl Connection {
 
         let session_id = match &self.session_id {
             Some(s) => *s,
-            None => return self.disconnect(DISCONNECT_PROTOCOL_ERROR, "sin session_id"),
+            None => return self.disconnect(DISCONNECT_PROTOCOL_ERROR, "no session_id"),
         };
 
         match method {
@@ -620,7 +620,7 @@ impl Connection {
         let p = w.into_bytes();
         self.send_packet(&p)?;
         if self.auth_fails >= MAX_AUTH_ATTEMPTS {
-            return self.disconnect(DISCONNECT_BY_APPLICATION, "demasiados intentos");
+            return self.disconnect(DISCONNECT_BY_APPLICATION, "too many attempts");
         }
         Ok(())
     }
@@ -672,7 +672,7 @@ impl Connection {
             w.put_u8(proto::SSH_MSG_CHANNEL_OPEN_FAILURE)
                 .put_u32(remote_id)
                 .put_u32(3)
-                .put_string(b"solo se soporta un canal session")
+                .put_string(b"only one session channel is supported")
                 .put_string(b"");
             let p = w.into_bytes();
             return self.send_packet(&p);

@@ -1,5 +1,5 @@
-use crate::prelude::*;
 use crate::arch::xtensa::Mutex;
+use crate::prelude::*;
 use alloc::collections::BTreeMap;
 
 pub trait Device: Send + Sync {
@@ -15,9 +15,18 @@ static DEVICES: Mutex<Option<BTreeMap<String, Arc<dyn Device>>>> = Mutex::new(No
 pub fn init() {
     crate::arch::xtensa::interrupts::critical_section(|| {
         let mut map = BTreeMap::new();
-        map.insert(String::from("null"), Arc::new(NullDevice) as Arc<dyn Device>);
-        map.insert(String::from("zero"), Arc::new(ZeroDevice) as Arc<dyn Device>);
-        map.insert(String::from("console"), Arc::new(ConsoleDevice) as Arc<dyn Device>);
+        map.insert(
+            String::from("null"),
+            Arc::new(NullDevice) as Arc<dyn Device>,
+        );
+        map.insert(
+            String::from("zero"),
+            Arc::new(ZeroDevice) as Arc<dyn Device>,
+        );
+        map.insert(
+            String::from("console"),
+            Arc::new(ConsoleDevice) as Arc<dyn Device>,
+        );
         *DEVICES.lock() = Some(map);
     });
 }
@@ -41,7 +50,8 @@ pub fn get_device(name: &str) -> Option<Arc<dyn Device>> {
 pub fn list_devices() -> Vec<String> {
     crate::arch::xtensa::interrupts::critical_section(|| {
         let guard = DEVICES.lock();
-        guard.as_ref()
+        guard
+            .as_ref()
             .map(|map| map.keys().cloned().collect())
             .unwrap_or_else(Vec::new)
     })

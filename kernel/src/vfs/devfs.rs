@@ -1,12 +1,11 @@
 #![allow(dead_code)]
 
-use crate::prelude::*;
-use crate::arch::xtensa::sync::Mutex;
 use super::inode::{DirEntry, FileSystem, FsStat, Inode, InodeKind};
 use super::mount::MAX_NAME_LEN;
+use crate::arch::xtensa::sync::Mutex;
+use crate::prelude::*;
 
 pub trait Device: Send + Sync {
-
     fn read(&self, off: u64, buf: &mut [u8]) -> KResult<usize>;
 
     fn write(&self, off: u64, buf: &[u8]) -> KResult<usize>;
@@ -20,14 +19,12 @@ pub trait Device: Send + Sync {
 type DevTable = Arc<Mutex<Vec<(String, Arc<dyn Device>)>>>;
 
 pub struct DevFs {
-
     table: DevTable,
 
     root: Arc<DevRoot>,
 }
 
 impl DevFs {
-
     pub fn new() -> Arc<DevFs> {
         let table: DevTable = Arc::new(Mutex::new(Vec::new()));
         let root = Arc::new(DevRoot {
@@ -51,7 +48,6 @@ impl FileSystem for DevFs {
     }
 
     fn stat(&self) -> FsStat {
-
         FsStat::default()
     }
 }
@@ -100,7 +96,6 @@ impl Inode for DevRoot {
     }
 
     fn create(&self, _name: &str, _kind: InodeKind) -> KResult<Arc<dyn Inode>> {
-
         Err(KError::PermissionDenied)
     }
 
@@ -131,14 +126,12 @@ impl Inode for DevNode {
     }
 
     fn truncate(&self, _len: u64) -> KResult<()> {
-
         Ok(())
     }
 
     fn ioctl(&self, cmd: u32, arg: usize) -> KResult<usize> {
         self.dev.ioctl(cmd, arg)
     }
-
 }
 
 pub fn register(devfs: &Arc<DevFs>, name: &str, dev: Arc<dyn Device>) -> KResult<()> {
@@ -158,8 +151,7 @@ pub fn init() -> KResult<Arc<DevFs>> {
     register(&devfs, "null", Arc::new(NullDevice))?;
     register(&devfs, "zero", Arc::new(ZeroDevice))?;
     register(&devfs, "console", Arc::new(ConsoleDevice))?;
-    // Buses (Fase 3): los nodos existen aunque el bus no esté inicializado;
-    // las operaciones devuelven IoError hasta que `main` llame a `init`.
+
     register(&devfs, "i2c0", crate::drivers::i2c::devfs_device())?;
     register(&devfs, "spi0", crate::drivers::spi::devfs_device())?;
     Ok(devfs)

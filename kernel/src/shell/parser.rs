@@ -4,7 +4,6 @@ use crate::prelude::*;
 
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Redirect {
-
     None,
 
     Truncate(String),
@@ -21,7 +20,6 @@ pub struct Command {
 
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Token {
-
     Word(String),
 
     RedirectOut,
@@ -60,7 +58,6 @@ pub fn tokenize(line: &str) -> KResult<Vec<Token>> {
                 if c == '"' {
                     quote = Quote::No;
                 } else if c == '\\' {
-
                     match chars.peek() {
                         Some(&n) if n == '"' || n == '\\' => {
                             current.push(n);
@@ -89,7 +86,6 @@ pub fn tokenize(line: &str) -> KResult<Vec<Token>> {
                     has_word = true;
                 }
                 '\\' => {
-
                     match chars.next() {
                         Some(n) => current.push(n),
                         None => current.push('\\'),
@@ -124,7 +120,6 @@ pub fn tokenize(line: &str) -> KResult<Vec<Token>> {
     }
 
     if quote != Quote::No {
-
         return Err(KError::InvalidArgument);
     }
     if has_word {
@@ -161,7 +156,6 @@ pub fn parse_pipeline(line: &str) -> KResult<Vec<Command>> {
     let mut pending: Option<bool> = None;
 
     for tok in tokens {
-
         if let Some(append) = pending {
             match tok {
                 Token::Word(w) => {
@@ -189,7 +183,6 @@ pub fn parse_pipeline(line: &str) -> KResult<Vec<Command>> {
     }
 
     if pending.is_some() {
-
         return Err(KError::InvalidArgument);
     }
 
@@ -203,7 +196,6 @@ pub fn parse(line: &str) -> KResult<Option<Command>> {
     if pipeline.is_empty() {
         Ok(None)
     } else {
-
         Ok(Some(pipeline.remove(0)))
     }
 }
@@ -229,10 +221,7 @@ mod tests {
 
     #[test]
     fn colapsa_espacios_repetidos() {
-        assert_eq!(
-            tokenize("  ls    -la  "),
-            Ok(vec![w("ls"), w("-la")])
-        );
+        assert_eq!(tokenize("  ls    -la  "), Ok(vec![w("ls"), w("-la")]));
     }
 
     #[test]

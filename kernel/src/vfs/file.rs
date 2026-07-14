@@ -1,7 +1,7 @@
 #![allow(dead_code)]
 
-use crate::prelude::*;
 use super::inode::Inode;
+use crate::prelude::*;
 
 pub type Fd = i32;
 
@@ -9,7 +9,6 @@ pub type Fd = i32;
 pub struct OpenFlags(pub u32);
 
 impl OpenFlags {
-
     pub const RDONLY: OpenFlags = OpenFlags(0x0001);
 
     pub const WRONLY: OpenFlags = OpenFlags(0x0002);
@@ -28,7 +27,6 @@ impl OpenFlags {
 }
 
 pub enum SeekFrom {
-
     Start(u64),
 
     Current(i64),
@@ -38,7 +36,6 @@ pub enum SeekFrom {
 
 #[derive(Clone)]
 pub struct OpenFile {
-
     pub inode: Arc<dyn Inode>,
 
     pub offset: u64,
@@ -52,20 +49,19 @@ pub struct OpenFile {
 
 fn offset_add(base: u64, delta: i64) -> KResult<u64> {
     if delta >= 0 {
-        base.checked_add(delta as u64).ok_or(KError::InvalidArgument)
+        base.checked_add(delta as u64)
+            .ok_or(KError::InvalidArgument)
     } else {
-
-        base.checked_sub(delta.unsigned_abs()).ok_or(KError::InvalidArgument)
+        base.checked_sub(delta.unsigned_abs())
+            .ok_or(KError::InvalidArgument)
     }
 }
 
 impl OpenFile {
-
     pub fn new(inode: Arc<dyn Inode>, flags: OpenFlags) -> KResult<Self> {
         let readable = flags.contains(OpenFlags::RDONLY);
         let writable = flags.contains(OpenFlags::WRONLY);
         if !readable && !writable {
-
             return Err(KError::InvalidArgument);
         }
         let append = flags.contains(OpenFlags::APPEND);

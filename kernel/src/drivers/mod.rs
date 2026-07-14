@@ -1,11 +1,11 @@
+pub mod ble;
+pub mod crypto;
+pub mod device;
 pub mod flash;
 pub mod gpio;
 pub mod i2c;
+pub mod power;
 pub mod spi;
 pub mod ssh;
 pub mod uart;
 pub mod wifi;
-pub mod power;
-pub mod device;
-pub mod crypto;
-pub mod ble;

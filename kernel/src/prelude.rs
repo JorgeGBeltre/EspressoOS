@@ -7,7 +7,6 @@ pub use alloc::vec::Vec;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum KError {
-
     NoMem,
 
     NotFound,
@@ -46,7 +45,6 @@ pub enum KError {
 }
 
 impl KError {
-
     pub const fn as_errno(self) -> isize {
         match self {
             KError::NotFound => -2,

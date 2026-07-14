@@ -41,7 +41,6 @@ pub struct Task {
 unsafe impl Send for Task {}
 
 impl Task {
-
     pub(super) fn new(
         tid: Tid,
         name: &str,
@@ -51,7 +50,6 @@ impl Task {
         priority: u8,
         is_user: bool,
     ) -> KResult<Box<Task>> {
-
         let requested = if stack_size == 0 {
             layout::DEFAULT_STACK_SIZE
         } else {
@@ -68,7 +66,8 @@ impl Task {
 
         let stack_top = unsafe { base.add(size) };
 
-        let context = context::init_task_stack(stack_top, super::task_trampoline, tid as usize, is_user);
+        let context =
+            context::init_task_stack(stack_top, super::task_trampoline, tid as usize, is_user);
 
         Ok(Box::new(Task {
             tid,
@@ -90,9 +89,7 @@ impl Task {
 impl Drop for Task {
     fn drop(&mut self) {
         if !self.stack_base.is_null() && self.stack_size > 0 {
-
             if let Ok(dealloc_layout) = Layout::from_size_align(self.stack_size, STACK_ALIGN) {
-
                 unsafe { alloc::alloc::dealloc(self.stack_base, dealloc_layout) };
             }
         }

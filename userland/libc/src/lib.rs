@@ -5,9 +5,9 @@ use core::alloc::{GlobalAlloc, Layout};
 use core::cell::UnsafeCell;
 use core::fmt::{Write, Result};
 
-// ===========================================================================
-// Runtime Entry Point (crt0)
-// ===========================================================================
+
+
+
 
 extern "Rust" {
     fn main() -> i32;
@@ -17,20 +17,20 @@ extern "Rust" {
 #[unsafe(naked)]
 pub unsafe extern "C" fn _start() -> ! {
     core::arch::naked_asm!(
-        // a1 (stack pointer) ya lo deja el kernel en el tope de la pila de la
-        // tarea (init_task_stack -> A1). NO tocarlo: `movi a1,0` lo pondría a 0
-        // y `main` petaría al primer uso de pila.
+
+
+
         "call4 main",
-        "mov a2, a6", // Código de retorno de main en la ventana rotada
+        "mov a2, a6",
         "call4 exit",
         "loop:",
         "j loop"
     );
 }
 
-// ===========================================================================
-// System Call Stubs
-// ===========================================================================
+
+
+
 
 #[inline(never)]
 pub unsafe fn syscall(
@@ -111,7 +111,7 @@ pub fn uptime_ms() -> usize {
     unsafe { syscall(12, 0, 0, 0, 0, 0, 0) as usize }
 }
 
-/// Crea una tubería. `fds[0]` = extremo de lectura, `fds[1]` = escritura.
+
 pub fn pipe(fds: &mut [i32; 2]) -> isize {
     unsafe { syscall(26, fds.as_mut_ptr() as usize, 0, 0, 0, 0, 0) }
 }
@@ -209,9 +209,9 @@ pub extern "C" fn sigreturn_trampoline() {
     }
 }
 
-// ===========================================================================
-// Memory Allocator
-// ===========================================================================
+
+
+
 
 struct SimpleBumpAllocator {
     heap: UnsafeCell<[u8; 32768]>,
@@ -250,9 +250,9 @@ unsafe impl GlobalAlloc for SimpleBumpAllocator {
 #[global_allocator]
 static ALLOCATOR: SimpleBumpAllocator = SimpleBumpAllocator::new();
 
-// ===========================================================================
-// Format/Print
-// ===========================================================================
+
+
+
 
 struct ConsoleWriter;
 
@@ -286,9 +286,9 @@ macro_rules! println {
     }};
 }
 
-// ===========================================================================
-// Panic Handler
-// ===========================================================================
+
+
+
 
 #[panic_handler]
 fn panic(_info: &core::panic::PanicInfo) -> ! {

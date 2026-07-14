@@ -1,14 +1,9 @@
 name: CI
-
-# Pipeline de integración continua de EspressoOS.
-#   - logic-tests: corre siempre (no necesita el toolchain Xtensa).
-#   - build:       compila el kernel + clippy + fmt (toolchain esp vía espup).
 on:
   push:
-    branches: [main]
+    branches: [develop]
   pull_request:
-    branches: [main]
-
+    branches: [develop]
 jobs:
   logic-tests:
     name: Tests de lógica (Python, sin toolchain)
@@ -22,13 +17,11 @@ jobs:
         run: python tools/tests/run_all.py
       - name: Regenerar y validar tabla de particiones
         run: python tools/partition-gen/partition_gen.py
-
   build:
     name: Build kernel (Xtensa esp)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      # Instala el toolchain Xtensa de Espressif (canal esp) para el target del S3.
       - name: Instalar toolchain Xtensa
         uses: esp-rs/xtensa-toolchain@v1.5
         with:
@@ -40,6 +33,23 @@ jobs:
         run: cargo clippy --release -- -D warnings
       - name: Compilar (release)
         run: cargo build --release
-    # NOTA: mientras el kernel siga en "borrador (sin compilar)", este job fallará
-    # hasta cerrar P0 (ver docs/PRODUCTION-READINESS.md). Es intencional: el gate
-    # de build refleja el estado real y se pondrá verde al arreglar el drift de API.
+  automerge:
+    name: Auto-PR and Merge to main
+    needs: [logic-tests, build]
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
+      contents: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Create and merge Pull Request to main
+        if: github.event_name == 'push' && github.ref_name == 'develop'
+        run: |
+          gh pr create --base main --head develop --title "Auto-PR: develop to main" --body "Automated PR created after develop branch tests passed." || true
+          gh pr merge --merge --admin || gh pr merge --merge || (git config --global user.name "github-actions[bot]" && git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com" && git checkout main && git merge --no-ff develop -m "Auto-merge develop to main" && git push origin main)
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

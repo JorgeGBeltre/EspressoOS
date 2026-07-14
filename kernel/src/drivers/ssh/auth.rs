@@ -83,7 +83,6 @@ pub fn signed_blob(session_id: &[u8], user: &str, algo: &[u8], key_blob: &[u8]) 
 pub fn is_authorized_key(_user: &str, key_blob: &[u8]) -> bool {
     let mut authorized = false;
     for k in config::authorized_key_blobs() {
-
         authorized |= ct_eq(&k, key_blob);
     }
     authorized

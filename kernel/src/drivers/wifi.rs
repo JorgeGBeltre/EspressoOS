@@ -42,8 +42,6 @@ const LINK_CHECK_MS: u64 = 5_000;
 const SSH_RX_SIZE: usize = 4096;
 const SSH_TX_SIZE: usize = 4096;
 
-/// Puerto de recepción de imágenes OTA (Fase 5). La imagen se bufferea en PSRAM;
-/// el flasheo real se dispara con `ota apply` desde la shell.
 pub const OTA_PORT: u16 = 3300;
 const OTA_RX_SIZE: usize = 8192;
 const OTA_TX_SIZE: usize = 1024;
@@ -59,12 +57,6 @@ pub enum NetCmd {
 pub static NET_SOCKETS: Mutex<Option<SocketSet<'static>>> = Mutex::new(None);
 pub static NET_CMD_QUEUE: Mutex<Vec<NetCmd>> = Mutex::new(Vec::new());
 
-// ============================================================================
-// Gestión WiFi en runtime (scan / connect) — comandos desde la shell `wifi`.
-// El `WifiController` vive en `net_task`; la shell ENCOLA comandos aquí y el
-// `net_task` los ejecuta en su loop de servicio (es el único dueño del radio).
-// ============================================================================
-
 pub enum WifiCmd {
     Scan,
     Connect { ssid: String, password: String },
@@ -72,7 +64,6 @@ pub enum WifiCmd {
 }
 pub static WIFI_CMD_QUEUE: Mutex<Vec<WifiCmd>> = Mutex::new(Vec::new());
 
-/// Un punto de acceso visto en el último scan.
 #[derive(Clone)]
 pub struct ApInfo {
     pub ssid: String,
@@ -88,12 +79,9 @@ pub const SCAN_DONE: u8 = 2;
 pub const SCAN_ERROR: u8 = 3;
 static SCAN_STATE: AtomicU8 = AtomicU8::new(SCAN_IDLE);
 
-/// IP y SSID actuales (para `wifi status` / `ip`). Escritos por `net_task`.
 pub static CURRENT_IP: Mutex<Option<[u8; 4]>> = Mutex::new(None);
 pub static CURRENT_SSID: Mutex<Option<String>> = Mutex::new(None);
 
-/// La shell pide un scan de APs. `net_task` lo ejecuta (bloqueante) y deja los
-/// resultados en `SCAN_RESULTS` con `SCAN_STATE = SCAN_DONE`.
 pub fn request_scan() {
     SCAN_STATE.store(SCAN_RUNNING, Ordering::Release);
     WIFI_CMD_QUEUE.lock().push(WifiCmd::Scan);
@@ -104,9 +92,11 @@ pub fn scan_state() -> u8 {
 pub fn scan_results() -> Vec<ApInfo> {
     SCAN_RESULTS.lock().clone()
 }
-/// La shell pide conectar a `ssid` con `password` (vacío = red abierta).
+
 pub fn request_connect(ssid: String, password: String) {
-    WIFI_CMD_QUEUE.lock().push(WifiCmd::Connect { ssid, password });
+    WIFI_CMD_QUEUE
+        .lock()
+        .push(WifiCmd::Connect { ssid, password });
 }
 pub fn request_disconnect() {
     WIFI_CMD_QUEUE.lock().push(WifiCmd::Disconnect);
@@ -139,20 +129,14 @@ impl<'s> Transport for TcpTransport<'s> {
     }
 }
 
-// ============================================================================
-// Estado del enlace — visible por `status()` (lectura sin bloqueo).
-// ============================================================================
-
-/// Estado del enlace WiFi (contrato §3.9).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum WifiStatus {
-    /// Radio apagada o sin configurar.
     Down,
-    /// Asociándose al AP / negociando DHCP.
+
     Connecting,
-    /// Asociado y con dirección IP asignada.
+
     Connected,
-    /// El último intento de conexión falló.
+
     Failed,
 }
 
@@ -173,8 +157,6 @@ fn set_status(s: WifiStatus) {
     STATUS.store(v, Ordering::Release);
 }
 
-/// Estado actual del enlace (contrato §3.9). Lectura sin bloqueo, usable desde la
-/// shell u otros subsistemas.
 pub fn status() -> WifiStatus {
     match STATUS.load(Ordering::Acquire) {
         ST_CONNECTING => WifiStatus::Connecting,
@@ -184,11 +166,6 @@ pub fn status() -> WifiStatus {
     }
 }
 
-// ============================================================================
-// Traspaso de periféricos main -> net_task.
-// ============================================================================
-
-/// Contenedor de los periféricos que `esp-wifi` necesita poseer.
 struct NetPeripherals {
     timg0: TIMG0,
     rng: RNG,
@@ -197,23 +174,17 @@ struct NetPeripherals {
     bt: esp_hal::peripherals::BT,
 }
 
-// SEGURIDAD: los singletons de periférico se mueven UNA sola vez (main -> static
-// -> net_task) en un sistema monociclo; el `Mutex` serializa el acceso. Marcamos
-// el contenedor `Send` para poder alojarlo en el `static Mutex`.
 unsafe impl Send for NetPeripherals {}
 
-/// Buzón de periféricos: `main` lo llena, `net_task` lo vacía.
 static PENDING: Mutex<Option<NetPeripherals>> = Mutex::new(None);
 
-/// `main` deposita aquí los periféricos de red ANTES de `scheduler::run()`.
-///
-/// Ejemplo (en `main`, tras `esp_hal::init`):
-/// ```ignore
-/// drivers::wifi::provide_peripherals(
-///     peripherals.TIMG0, peripherals.RNG, peripherals.RADIO_CLK, peripherals.WIFI, peripherals.BT
-/// );
-/// ```
-pub fn provide_peripherals(timg0: TIMG0, rng: RNG, radio_clk: RADIO_CLK, wifi: WIFI, bt: esp_hal::peripherals::BT) {
+pub fn provide_peripherals(
+    timg0: TIMG0,
+    rng: RNG,
+    radio_clk: RADIO_CLK,
+    wifi: WIFI,
+    bt: esp_hal::peripherals::BT,
+) {
     let mut g = PENDING.lock();
     *g = Some(NetPeripherals {
         timg0,
@@ -224,33 +195,15 @@ pub fn provide_peripherals(timg0: TIMG0, rng: RNG, radio_clk: RADIO_CLK, wifi: W
     });
 }
 
-// ============================================================================
-// Fuente de tiempo para smoltcp (µs, resolución 1 µs vía SYSTIMER).
-// ============================================================================
-
-/// Marca de tiempo para smoltcp. Usa el reloj del HAL en microsegundos (Opción A
-/// de la referencia): resolución fina para los temporizadores/RTO de TCP.
 #[inline]
 fn now_smoltcp() -> Instant {
-    // (?) cadena `now().duration_since_epoch().to_micros()`: idéntica a la ya
-    // usada por `arch::xtensa::timer::uptime_ms` (con `to_millis`), así que la ruta
-    // está confirmada en este árbol.
     let us = esp_hal::time::now().duration_since_epoch().to_micros();
     Instant::from_micros(us as i64)
 }
 
-// ============================================================================
-// Tarea de red — punto de entrada del scheduler (`fn(usize)`).
-// ============================================================================
-
-/// Cuerpo de la tarea de red. Hace TODA la bring-up y luego bombea el stack en un
-/// bucle que cede la CPU. NUNCA panica: ante cualquier fallo de bring-up imprime
-/// el motivo, deja `status()==Failed` y sale (el scheduler la reaparea como
-/// zombie sin afectar a shell/heartbeat).
 pub fn net_task(_arg: usize) {
     set_status(WifiStatus::Down);
 
-    // -- 1. Recuperar los periféricos que dejó `main`. --
     let periph = { PENDING.lock().take() };
     let periph = match periph {
         Some(p) => p,
@@ -261,10 +214,6 @@ pub fn net_task(_arg: usize) {
         }
     };
 
-    // -- 2. Inicializar el firmware de radio. --
-    // esp-wifi usa un timer (TIMG0.timer0) para su planificador interno y un RNG
-    // para la entropía WPA. Requiere el heap ya inicializado (lo está: `main` hizo
-    // `mm::heap::init` + PSRAM) y CPU >= 80 MHz (main fija CpuClock::max()).
     let timg0 = TimerGroup::new(periph.timg0);
     let rng = Rng::new(periph.rng);
 
@@ -276,21 +225,22 @@ pub fn net_task(_arg: usize) {
             return;
         }
     };
-    // Fugamos el `EspWifiController` a `'static` (patrón `mk_static!`): debe
 
     let init: &'static EspWifiController<'static> = Box::leak(Box::new(init));
 
     crate::drivers::ble::init(periph.bt, init);
 
-    let (mut device, mut controller): (WifiDevice<'static, WifiStaDevice>, WifiController<'static>) =
-        match wifi::new_with_mode(init, periph.wifi, WifiStaDevice) {
-            Ok(v) => v,
-            Err(e) => {
-                println!("[net] ERROR new_with_mode: {:?}", e);
-                set_status(WifiStatus::Failed);
-                return;
-            }
-        };
+    let (mut device, mut controller): (
+        WifiDevice<'static, WifiStaDevice>,
+        WifiController<'static>,
+    ) = match wifi::new_with_mode(init, periph.wifi, WifiStaDevice) {
+        Ok(v) => v,
+        Err(e) => {
+            println!("[net] ERROR new_with_mode: {:?}", e);
+            set_status(WifiStatus::Failed);
+            return;
+        }
+    };
 
     let ssid_h = match WIFI_SSID.try_into() {
         Ok(s) => s,
@@ -377,7 +327,6 @@ pub fn net_task(_arg: usize) {
     }
     let ssh_handle = sockets_set.add(ssh_sock);
 
-    // Socket de recepción OTA (Fase 5): bufferea la imagen en PSRAM.
     let ota_rx = tcp::SocketBuffer::new(alloc::vec![0u8; OTA_RX_SIZE]);
     let ota_tx = tcp::SocketBuffer::new(alloc::vec![0u8; OTA_TX_SIZE]);
     let mut ota_sock = tcp::Socket::new(ota_rx, ota_tx);
@@ -402,9 +351,6 @@ pub fn net_task(_arg: usize) {
         {
             let t = now_smoltcp();
 
-            // -- Comandos de gestión WiFi (scan/connect/disconnect). Usan el
-            // `controller`; el scan es BLOQUEANTE (~1-2 s), por eso se procesa
-            // aquí, antes de tomar el lock de sockets. --
             let mut reconnect_dhcp = false;
             {
                 let mut wcmds = Vec::new();
@@ -488,7 +434,6 @@ pub fn net_task(_arg: usize) {
                 }
             }
 
-            // Procesar comandos encolados
             let mut cmds = Vec::new();
             {
                 let mut q = NET_CMD_QUEUE.lock();
@@ -498,9 +443,6 @@ pub fn net_task(_arg: usize) {
             let mut sockets_guard = NET_SOCKETS.lock();
             let sockets = sockets_guard.as_mut().unwrap();
 
-            // Tras un (re)connect o disconnect, forzar un DHCP nuevo: limpiar la IP
-            // y la ruta, y resetear el socket DHCP para que emita DISCOVER en la
-            // nueva red.
             if reconnect_dhcp {
                 iface.update_ip_addrs(|a| a.clear());
                 iface.routes_mut().remove_default_ipv4_route();
@@ -511,14 +453,16 @@ pub fn net_task(_arg: usize) {
                 match cmd {
                     NetCmd::Connect { handle, ip, port } => {
                         let sock = sockets.get_mut::<tcp::Socket>(handle);
-                        let remote_addr = smoltcp::wire::IpAddress::Ipv4(smoltcp::wire::Ipv4Address::from_octets(ip));
+                        let remote_addr = smoltcp::wire::IpAddress::Ipv4(
+                            smoltcp::wire::Ipv4Address::from_octets(ip),
+                        );
                         let remote_endpoint = smoltcp::wire::IpEndpoint::new(remote_addr, port);
                         let local_port = 49152 + (uptime_ms() % 16384) as u16;
                         let _ = sock.connect(iface.context(), remote_endpoint, local_port);
                     }
                 }
             }
-            
+
             let _ = iface.poll(t, &mut device, sockets);
 
             let event = sockets.get_mut::<dhcpv4::Socket>(dhcp_handle).poll();
@@ -600,7 +544,11 @@ pub fn net_task(_arg: usize) {
                         }
                         Err(e) => {
                             if e != KError::WouldBlock {
-                                println!("[ssh] pump ERROR in state {:?}: {:?}", ssh_conn.state(), e);
+                                println!(
+                                    "[ssh] pump ERROR in state {:?}: {:?}",
+                                    ssh_conn.state(),
+                                    e
+                                );
                                 transport.close();
                                 ssh_active = false;
                             }
@@ -656,9 +604,8 @@ pub fn net_task(_arg: usize) {
                     }
                 }
             }
-        } // guard drops here
+        }
 
         scheduler::yield_now();
     }
 }
-

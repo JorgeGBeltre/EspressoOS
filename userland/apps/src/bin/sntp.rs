@@ -7,13 +7,13 @@ use libc::{println, socket, connect, write, read, close, timeval, settimeofday, 
 pub extern "C" fn main() -> i32 {
     println!("[sntp] Starting time synchronization...");
 
-    let fd = socket(2, 2, 0); // AF_INET = 2, SOCK_DGRAM = 2
+    let fd = socket(2, 2, 0);
     if fd < 0 {
         println!("[sntp] Failed to create UDP socket");
         return -1;
     }
 
-    let ip: u32 = u32::from_ne_bytes([128, 138, 140, 44]); // 128.138.140.44
+    let ip: u32 = u32::from_ne_bytes([128, 138, 140, 44]);
     let port = 123u16;
 
     let addr = sockaddr_in {
@@ -31,7 +31,7 @@ pub extern "C" fn main() -> i32 {
     }
 
     let mut pkt = [0u8; 48];
-    pkt[0] = 0x1B; // LI=0, VN=3, Mode=3 (Client)
+    pkt[0] = 0x1B;
 
     println!("[sntp] Sending SNTP request...");
     if write(fd as i32, &pkt) < 0 {

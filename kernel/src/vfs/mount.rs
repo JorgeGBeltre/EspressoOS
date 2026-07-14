@@ -1,13 +1,12 @@
 #![allow(dead_code)]
 
-use crate::prelude::*;
-use crate::arch::xtensa::sync::Mutex;
 use super::inode::{FileSystem, Inode};
+use crate::arch::xtensa::sync::Mutex;
+use crate::prelude::*;
 
 pub const MAX_NAME_LEN: usize = 255;
 
 struct MountPoint {
-
     path: String,
 
     fs: Arc<dyn FileSystem>,
@@ -23,7 +22,6 @@ pub fn normalize(path: &str) -> KResult<String> {
     let mut comps: Vec<&str> = Vec::new();
     for part in path.split('/') {
         match part {
-
             "" | "." => {}
 
             ".." => {
@@ -55,12 +53,10 @@ pub fn split_parent(path: &str) -> KResult<(&str, &str)> {
         return Err(KError::InvalidArgument);
     }
     match path.rfind('/') {
-
         Some(0) => Ok(("/", &path[1..])),
         Some(i) => {
             let name = &path[i + 1..];
             if name.is_empty() {
-
                 Err(KError::InvalidArgument)
             } else {
                 Ok((&path[..i], name))
@@ -174,7 +170,6 @@ mod tests {
 
     #[test]
     fn nombre_demasiado_largo() {
-
         let mut largo = String::from("/");
         for _ in 0..(MAX_NAME_LEN + 1) {
             largo.push('a');

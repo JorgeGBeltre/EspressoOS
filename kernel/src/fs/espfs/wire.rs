@@ -1,41 +1,13 @@
 #![allow(dead_code)]
 
-//! EspFs — formato en disco (lógica pura, sin acceso a flash).
-//!
-//! Un sistema de archivos *log-structured*: el estado se reconstruye reproduciendo
-//! una secuencia de registros append-only. Este módulo define únicamente el
-//! (de)serializado de registros y superbloques + CRC-32, de modo que la lógica
-//! sea verificable de forma aislada (se porta 1:1 al harness Python).
-//!
-//! ## Registro
-//! ```text
-//! offset  campo      tamaño
-//! 0       magic      u16  (0xE5F5)
-//! 2       rtype      u8
-//! 3       _pad       u8   (0)
-//! 4       seq        u32  (monótono; mayor = más reciente)
-//! 8       plen       u32  (longitud de payload SIN padding)
-//! 12      crc        u32  (crc32 de header[0..12] ++ payload[0..plen])
-//! 16      payload    plen bytes, luego padding con 0 hasta múltiplo de 4
-//! ```
-//!
-//! ## Superbloque (20 bytes)
-//! ```text
-//! magic u32 ("EsFS") | version u32 | generation u32 | active_half u32 | crc u32
-//! ```
-
 use crate::prelude::*;
 
 pub const REC_MAGIC: u16 = 0xE5F5;
-pub const SB_MAGIC: u32 = 0x4573_4653; // 'E''s''F''S'
+pub const SB_MAGIC: u32 = 0x4573_4653;
 pub const VERSION: u32 = 1;
 
 pub const HEADER_LEN: usize = 16;
 pub const SB_LEN: usize = 20;
-
-// ---------------------------------------------------------------------------
-// CRC-32 (IEEE 802.3, poly reflejado 0xEDB88320, init/xorout 0xFFFFFFFF).
-// ---------------------------------------------------------------------------
 
 pub fn crc32_update(mut crc: u32, data: &[u8]) -> u32 {
     for &b in data {
@@ -60,10 +32,6 @@ pub fn crc32(data: &[u8]) -> u32 {
     crc32_final(crc32_update(crc32_init(), data))
 }
 
-// ---------------------------------------------------------------------------
-// Utilidades LE.
-// ---------------------------------------------------------------------------
-
 #[inline]
 pub fn pad4(n: usize) -> usize {
     (n + 3) & !3
@@ -86,10 +54,6 @@ fn wr_u32(b: &mut [u8], o: usize, v: u32) {
     b[o + 2] = (v >> 16) as u8;
     b[o + 3] = (v >> 24) as u8;
 }
-
-// ---------------------------------------------------------------------------
-// Tipos de registro.
-// ---------------------------------------------------------------------------
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum RecType {
@@ -116,7 +80,6 @@ impl RecType {
     }
 }
 
-/// Cabecera decodificada (sin el payload).
 #[derive(Clone, Copy, Debug)]
 pub struct Header {
     pub rtype: RecType,
@@ -125,13 +88,10 @@ pub struct Header {
     pub crc: u32,
 }
 
-/// Longitud total del registro en flash (cabecera + payload con padding).
 pub fn record_total_len(plen: usize) -> usize {
     HEADER_LEN + pad4(plen)
 }
 
-/// Construye los 16 bytes de cabecera con el CRC ya calculado sobre
-/// `header[0..12] ++ payload`.
 pub fn build_header(rtype: RecType, seq: u32, payload: &[u8]) -> [u8; HEADER_LEN] {
     let mut h = [0u8; HEADER_LEN];
     h[0] = REC_MAGIC as u8;
@@ -146,8 +106,6 @@ pub fn build_header(rtype: RecType, seq: u32, payload: &[u8]) -> [u8; HEADER_LEN
     h
 }
 
-/// Serializa un registro completo (cabecera + payload + padding a 4 bytes).
-/// El buffer resultante tiene longitud múltiplo de 4 (apto para `flash::write`).
 pub fn encode_record(rtype: RecType, seq: u32, payload: &[u8]) -> Vec<u8> {
     let h = build_header(rtype, seq, payload);
     let total = record_total_len(payload.len());
@@ -158,8 +116,6 @@ pub fn encode_record(rtype: RecType, seq: u32, payload: &[u8]) -> Vec<u8> {
     out
 }
 
-/// Interpreta los 16 bytes de cabecera. Devuelve `None` si el magic no coincide
-/// (fin del log / sector borrado = 0xFF...).
 pub fn parse_header(buf: &[u8]) -> Option<Header> {
     if buf.len() < HEADER_LEN {
         return None;
@@ -176,18 +132,12 @@ pub fn parse_header(buf: &[u8]) -> Option<Header> {
     })
 }
 
-/// Verifica el CRC de un registro dados sus 16 bytes de cabecera y su payload.
 pub fn verify_crc(header16: &[u8], payload: &[u8], expected: u32) -> bool {
     let mut crc = crc32_update(crc32_init(), &header16[0..12]);
     crc = crc32_final(crc32_update(crc, payload));
     crc == expected
 }
 
-// ---------------------------------------------------------------------------
-// Payloads por tipo.
-// ---------------------------------------------------------------------------
-
-/// MkFile / MkDir: `ino(u32) parent(u32) name(bytes)`.
 pub fn enc_mk(ino: u32, parent: u32, name: &[u8]) -> Vec<u8> {
     let mut v = Vec::with_capacity(8 + name.len());
     v.extend_from_slice(&ino.to_le_bytes());
@@ -203,7 +153,6 @@ pub fn dec_mk(p: &[u8]) -> Option<(u32, u32, &[u8])> {
     Some((rd_u32(p, 0), rd_u32(p, 4), &p[8..]))
 }
 
-/// Write: `ino(u32) offset(u32) data(bytes)`. `data` empieza en el offset 8 del payload.
 pub fn enc_write(ino: u32, offset: u32, data: &[u8]) -> Vec<u8> {
     let mut v = Vec::with_capacity(8 + data.len());
     v.extend_from_slice(&ino.to_le_bytes());
@@ -212,7 +161,6 @@ pub fn enc_write(ino: u32, offset: u32, data: &[u8]) -> Vec<u8> {
     v
 }
 
-/// Decodifica sólo la cabecera de un Write (`ino`, `offset`); el dato queda en flash.
 pub fn dec_write_head(p8: &[u8]) -> Option<(u32, u32)> {
     if p8.len() < 8 {
         return None;
@@ -220,10 +168,8 @@ pub fn dec_write_head(p8: &[u8]) -> Option<(u32, u32)> {
     Some((rd_u32(p8, 0), rd_u32(p8, 4)))
 }
 
-/// Offset del dato dentro del payload de un Write.
 pub const WRITE_DATA_OFF: usize = 8;
 
-/// Truncate: `ino(u32) len(u32)`.
 pub fn enc_trunc(ino: u32, len: u32) -> Vec<u8> {
     let mut v = Vec::with_capacity(8);
     v.extend_from_slice(&ino.to_le_bytes());
@@ -238,7 +184,6 @@ pub fn dec_trunc(p: &[u8]) -> Option<(u32, u32)> {
     Some((rd_u32(p, 0), rd_u32(p, 4)))
 }
 
-/// Unlink: `parent(u32) name(bytes)`.
 pub fn enc_unlink(parent: u32, name: &[u8]) -> Vec<u8> {
     let mut v = Vec::with_capacity(4 + name.len());
     v.extend_from_slice(&parent.to_le_bytes());
@@ -252,10 +197,6 @@ pub fn dec_unlink(p: &[u8]) -> Option<(u32, &[u8])> {
     }
     Some((rd_u32(p, 0), &p[4..]))
 }
-
-// ---------------------------------------------------------------------------
-// Superbloque.
-// ---------------------------------------------------------------------------
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SuperBlock {
@@ -314,7 +255,7 @@ mod tests {
         let mut rec = encode_record(RecType::MkFile, 1, &payload);
         let h = parse_header(&rec).unwrap();
         let plen = h.plen as usize;
-        rec[16] ^= 0xFF; // corrupt payload
+        rec[16] ^= 0xFF;
         assert!(!verify_crc(&rec[0..16], &rec[16..16 + plen], h.crc));
     }
 

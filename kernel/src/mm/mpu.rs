@@ -1,7 +1,5 @@
 #![allow(dead_code)]
 
-//! Protección de memoria PMS / World-Controller del ESP32-S3 (Fase 8, feature `pms`).
-
 pub fn init() {
     #[cfg(feature = "pms")]
     imp::init();
@@ -63,29 +61,26 @@ mod imp {
 
     pub fn init() {
         let s = sensitive!();
-        // 1) Monitor de violaciones DRAM0 (observabilidad): registra el mundo y la
-        //    dirección de cualquier acceso ilegal bajo la config vigente.
+
         s.core_0_dram0_pms_monitor_1().modify(|_, w| {
             w.core_0_dram0_pms_monitor_violate_clr().set_bit();
             w.core_0_dram0_pms_monitor_violate_en().set_bit()
         });
-        
-        // 2) Enforcement en boot: restringe (sin acceso) las 4 regiones de datos
-        //    SRAM (DRAM y IRAM) de World-1. Seguro porque el kernel corre en World-0.
+
         s.core_x_dram0_pms_constrain_1().modify(|_, w| unsafe {
             w.core_x_dram0_pms_constrain_sram_world_1_pms_0().bits(0);
             w.core_x_dram0_pms_constrain_sram_world_1_pms_1().bits(0);
             w.core_x_dram0_pms_constrain_sram_world_1_pms_2().bits(0);
             w.core_x_dram0_pms_constrain_sram_world_1_pms_3().bits(0)
         });
-        
+
         s.core_x_iram0_pms_constrain_1().modify(|_, w| unsafe {
             w.core_x_iram0_pms_constrain_sram_world_1_pms_0().bits(0);
             w.core_x_iram0_pms_constrain_sram_world_1_pms_1().bits(0);
             w.core_x_iram0_pms_constrain_sram_world_1_pms_2().bits(0);
             w.core_x_iram0_pms_constrain_sram_world_1_pms_3().bits(0)
         });
-        
+
         println!("[pms] DRAM0 monitor + World-1 enforcement (DRAM/IRAM) active (kernel = World-0)");
     }
 
@@ -114,19 +109,22 @@ mod imp {
         });
         let constrain1 = s.core_x_dram0_pms_constrain_1().read().bits();
         println!("[pms] World-1 SRAM locked");
-        alloc::format!("World-1 SRAM -> no access; constrain_1={:#010x}", constrain1)
+        alloc::format!(
+            "World-1 SRAM -> no access; constrain_1={:#010x}",
+            constrain1
+        )
     }
 
     pub fn protect_world1_wx() -> String {
         let s = sensitive!();
-        // DRAM0 (R+W = 3)
+
         s.core_x_dram0_pms_constrain_1().modify(|_, w| unsafe {
             w.core_x_dram0_pms_constrain_sram_world_1_pms_0().bits(3);
             w.core_x_dram0_pms_constrain_sram_world_1_pms_1().bits(3);
             w.core_x_dram0_pms_constrain_sram_world_1_pms_2().bits(3);
             w.core_x_dram0_pms_constrain_sram_world_1_pms_3().bits(3)
         });
-        // IRAM0 (R+X = 5)
+
         s.core_x_iram0_pms_constrain_1().modify(|_, w| unsafe {
             w.core_x_iram0_pms_constrain_sram_world_1_pms_0().bits(5);
             w.core_x_iram0_pms_constrain_sram_world_1_pms_1().bits(5);
@@ -170,22 +168,17 @@ mod imp {
         let wcl = unsafe { &*esp_hal::peripherals::WCL::PTR };
         if is_user {
             let next_pc = unsafe { *(next_sp as *const u32) };
-            wcl.core_0_world_prepare().write(|w| unsafe {
-                w.core_0_world_prepare().bits(1)
-            });
-            wcl.core_0_world_trigger_addr().write(|w| unsafe {
-                w.core_0_world_trigger_addr().bits(next_pc)
-            });
-            wcl.core_0_world_update().write(|w| unsafe {
-                w.core_0_update().bits(1)
-            });
+            wcl.core_0_world_prepare()
+                .write(|w| unsafe { w.core_0_world_prepare().bits(1) });
+            wcl.core_0_world_trigger_addr()
+                .write(|w| unsafe { w.core_0_world_trigger_addr().bits(next_pc) });
+            wcl.core_0_world_update()
+                .write(|w| unsafe { w.core_0_update().bits(1) });
         } else {
-            wcl.core_0_world_prepare().write(|w| unsafe {
-                w.core_0_world_prepare().bits(0)
-            });
-            wcl.core_0_world_update().write(|w| unsafe {
-                w.core_0_update().bits(1)
-            });
+            wcl.core_0_world_prepare()
+                .write(|w| unsafe { w.core_0_world_prepare().bits(0) });
+            wcl.core_0_world_update()
+                .write(|w| unsafe { w.core_0_update().bits(1) });
         }
     }
 }

@@ -13,14 +13,12 @@ fn alloc_ino() -> u64 {
 }
 
 enum RamBody {
-
     File(Vec<u8>),
 
     Dir(BTreeMap<String, Arc<RamNode>>),
 }
 
 struct RamNode {
-
     ino: u64,
 
     kind: InodeKind,
@@ -29,7 +27,6 @@ struct RamNode {
 }
 
 impl RamNode {
-
     fn new_dir() -> Arc<RamNode> {
         Arc::new(RamNode {
             ino: alloc_ino(),
@@ -65,7 +62,6 @@ impl Inode for RamNode {
         let body = self.body.lock();
         match &*body {
             RamBody::File(data) => {
-
                 let start = match usize::try_from(off) {
                     Ok(v) => v,
                     Err(_) => return Ok(0),
@@ -91,7 +87,6 @@ impl Inode for RamNode {
 
                 let end = start.checked_add(buf.len()).ok_or(KError::NoMem)?;
                 if end > data.len() {
-
                     let extra = end - data.len();
                     data.try_reserve(extra).map_err(|_| KError::NoMem)?;
                     data.resize(end, 0);
@@ -123,17 +118,14 @@ impl Inode for RamNode {
     fn readdir(&self, index: usize) -> KResult<Option<DirEntry>> {
         let body = self.body.lock();
         match &*body {
-            RamBody::Dir(children) => {
-
-                match children.iter().nth(index) {
-                    Some((name, node)) => Ok(Some(DirEntry {
-                        name: name.clone(),
-                        kind: node.kind,
-                        ino: node.ino,
-                    })),
-                    None => Ok(None),
-                }
-            }
+            RamBody::Dir(children) => match children.iter().nth(index) {
+                Some((name, node)) => Ok(Some(DirEntry {
+                    name: name.clone(),
+                    kind: node.kind,
+                    ino: node.ino,
+                })),
+                None => Ok(None),
+            },
             RamBody::File(_) => Err(KError::NotADirectory),
         }
     }
@@ -142,7 +134,6 @@ impl Inode for RamNode {
         let body = self.body.lock();
         match &*body {
             RamBody::Dir(children) => match children.get(name) {
-
                 Some(node) => {
                     let out: Arc<dyn Inode> = node.clone();
                     Ok(out)
@@ -178,7 +169,6 @@ impl Inode for RamNode {
         let mut body = self.body.lock();
         match &mut *body {
             RamBody::Dir(children) => {
-
                 let vacio = match children.get(name) {
                     None => return Err(KError::NotFound),
                     Some(node) => {
@@ -190,7 +180,6 @@ impl Inode for RamNode {
                     }
                 };
                 if !vacio {
-
                     return Err(KError::Busy);
                 }
 
@@ -200,16 +189,13 @@ impl Inode for RamNode {
             RamBody::File(_) => Err(KError::NotADirectory),
         }
     }
-
 }
 
 pub struct RamFs {
-
     root: Arc<RamNode>,
 }
 
 impl RamFs {
-
     pub fn new() -> Arc<RamFs> {
         Arc::new(RamFs {
             root: RamNode::new_dir(),
@@ -242,12 +228,10 @@ impl FileSystem for RamFs {
     }
 
     fn sync(&self) -> KResult<()> {
-
         Ok(())
     }
 
     fn stat(&self) -> FsStat {
-
         let usado = RamFs::used_bytes(&self.root);
         FsStat {
             total_bytes: usado,

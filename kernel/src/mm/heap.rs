@@ -6,7 +6,6 @@ use crate::prelude::layout;
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct HeapStats {
-
     pub total: usize,
 
     pub used: usize,
@@ -24,7 +23,6 @@ struct HeapBuf([u8; layout::KERNEL_HEAP_SIZE]);
 static mut KERNEL_HEAP: HeapBuf = HeapBuf([0; layout::KERNEL_HEAP_SIZE]);
 
 pub fn init() {
-
     if INITIALIZED.swap(true, Ordering::AcqRel) {
         return;
     }
@@ -44,7 +42,6 @@ pub fn init() {
 }
 
 pub fn add_psram(base: *mut u8, len: usize) {
-
     if len == 0 {
         return;
     }

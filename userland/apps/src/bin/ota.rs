@@ -23,10 +23,10 @@ pub extern "C" fn main() -> i32 {
             } else if c == b'2' {
                 println!("2");
                 println!("Marking image as INVALID and forcing reboot (rollback)...");
-                let _ = ota_state(1, 3); // OtaImgState::Invalid = 3
+                let _ = ota_state(1, 3);
                 break;
             } else if c == b'\n' || c == b'\r' {
-                // ignorar
+
             } else {
                 println!("Invalid option");
                 break;

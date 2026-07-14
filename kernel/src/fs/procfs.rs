@@ -114,12 +114,12 @@ impl Inode for ProcFsRoot {
                 ino: 4,
             }));
         }
-        
+
         let pids: Vec<u32> = {
             let pt = crate::scheduler::process::PROCESS_TABLE.lock();
             pt.table.keys().copied().collect()
         };
-        
+
         if index < 5 {
             return Ok(None);
         }
@@ -132,7 +132,7 @@ impl Inode for ProcFsRoot {
                 ino: (1000 + pid) as u64,
             }));
         }
-        
+
         Ok(None)
     }
 }
@@ -269,7 +269,9 @@ impl Inode for ProcFsFile {
                 let s = crate::mm::heap::stats();
                 alloc::format!(
                     "MemTotal: {} bytes\nMemUsed: {} bytes\nMemFree: {} bytes\n",
-                    s.total, s.used, s.free
+                    s.total,
+                    s.used,
+                    s.free
                 )
             }
             ProcFsFile::PidStatus(pid) => {
@@ -289,7 +291,7 @@ impl Inode for ProcFsFile {
             ProcFsFile::NetSockets => {
                 let mut out = alloc::string::String::new();
                 out.push_str("Fd\tType\tLocal\tRemote\tState\n");
-                
+
                 let mut guard = crate::drivers::wifi::NET_SOCKETS.lock();
                 if let Some(sockets) = guard.as_mut() {
                     for (handle, socket) in sockets.iter() {
@@ -297,18 +299,42 @@ impl Inode for ProcFsFile {
                             smoltcp::socket::Socket::Tcp(tcp_sock) => {
                                 let local_ep = tcp_sock.local_endpoint();
                                 let remote_ep = tcp_sock.remote_endpoint();
-                                let l_str = local_ep.map(|ep| alloc::format!("{}:{}", ep.addr, ep.port)).unwrap_or_else(|| "0.0.0.0:0".to_string());
-                                let r_str = remote_ep.map(|ep| alloc::format!("{}:{}", ep.addr, ep.port)).unwrap_or_else(|| "0.0.0.0:0".to_string());
-                                ("TCP", l_str, r_str, alloc::format!("{:?}", tcp_sock.state()))
+                                let l_str = local_ep
+                                    .map(|ep| alloc::format!("{}:{}", ep.addr, ep.port))
+                                    .unwrap_or_else(|| "0.0.0.0:0".to_string());
+                                let r_str = remote_ep
+                                    .map(|ep| alloc::format!("{}:{}", ep.addr, ep.port))
+                                    .unwrap_or_else(|| "0.0.0.0:0".to_string());
+                                (
+                                    "TCP",
+                                    l_str,
+                                    r_str,
+                                    alloc::format!("{:?}", tcp_sock.state()),
+                                )
                             }
                             smoltcp::socket::Socket::Udp(udp_sock) => {
                                 let local_ep = udp_sock.endpoint();
-                                let l_str = local_ep.addr.map(|a| alloc::format!("{}:{}", a, local_ep.port)).unwrap_or_else(|| alloc::format!("0.0.0.0:{}", local_ep.port));
+                                let l_str = local_ep
+                                    .addr
+                                    .map(|a| alloc::format!("{}:{}", a, local_ep.port))
+                                    .unwrap_or_else(|| alloc::format!("0.0.0.0:{}", local_ep.port));
                                 ("UDP", l_str, "0.0.0.0:0".to_string(), "OPEN".to_string())
                             }
-                            _ => ("OTHER", "0.0.0.0:0".to_string(), "0.0.0.0:0".to_string(), "UNKNOWN".to_string()),
+                            _ => (
+                                "OTHER",
+                                "0.0.0.0:0".to_string(),
+                                "0.0.0.0:0".to_string(),
+                                "UNKNOWN".to_string(),
+                            ),
                         };
-                        out.push_str(&alloc::format!("{}\t{}\t{}\t{}\t{}\n", handle, proto, local, remote, state));
+                        out.push_str(&alloc::format!(
+                            "{}\t{}\t{}\t{}\t{}\n",
+                            handle,
+                            proto,
+                            local,
+                            remote,
+                            state
+                        ));
                     }
                 }
                 out

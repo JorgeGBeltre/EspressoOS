@@ -9,8 +9,8 @@ use crate::prelude::*;
 
 pub mod core_sync;
 pub mod policy;
-pub mod task;
 pub mod process;
+pub mod task;
 
 use task::{Task, TaskState, Tid};
 
@@ -19,7 +19,6 @@ const QUANTUM_TICKS: u32 = 5;
 const IDLE_TID: Tid = 0;
 
 struct Scheduler {
-
     tasks: BTreeMap<Tid, Box<Task>>,
 
     ready: Vec<Tid>,
@@ -32,7 +31,6 @@ struct Scheduler {
 
     slice_remaining: u32,
 
-    // --- Estado del núcleo 1 (SMP). Sólo existe con la feature `smp`. ---
     #[cfg(feature = "smp")]
     current1: Tid,
 
@@ -41,7 +39,6 @@ struct Scheduler {
 }
 
 impl Scheduler {
-
     fn ctx_ptr(&self, tid: Tid) -> Option<*const Context> {
         self.tasks.get(&tid).map(|t| &t.context as *const Context)
     }
@@ -56,8 +53,6 @@ impl Scheduler {
         let mut dead: Vec<Tid> = Vec::new();
         for (tid, t) in self.tasks.iter() {
             if t.state == TaskState::Zombie && *tid != keep {
-                // Nunca reciclar una tarea que sigue siendo `current` en el otro
-                // núcleo (ventana durante su exit antes del cambio de contexto).
                 #[cfg(feature = "smp")]
                 {
                     if *tid == self.current || *tid == self.current1 {
@@ -81,10 +76,6 @@ use core::sync::atomic::{AtomicBool, Ordering};
 
 static NEED_RESCHED: [AtomicBool; 2] = [AtomicBool::new(false), AtomicBool::new(false)];
 
-/// Señala que el syscall en curso quiere **re-ejecutarse** al reanudar la tarea
-/// (semántica bloqueante, p.ej. `wait`). El epílogo del trap la consulta: si está
-/// puesta, NO avanza el PC ni sobreescribe `A2`, dejando la instrucción `syscall`
-/// intacta para que se vuelva a ejecutar cuando la tarea sea replanificada.
 static RESTART_SYSCALL: [AtomicBool; 2] = [AtomicBool::new(false), AtomicBool::new(false)];
 
 pub fn set_restart_syscall() {
@@ -92,7 +83,6 @@ pub fn set_restart_syscall() {
     RESTART_SYSCALL[core].store(true, Ordering::Relaxed);
 }
 
-/// Devuelve y limpia la bandera de reinicio del syscall para el núcleo actual.
 pub fn take_restart_syscall() -> bool {
     let core = core_id();
     RESTART_SYSCALL[core].swap(false, Ordering::Relaxed)
@@ -145,21 +135,33 @@ pub fn init() {
             idle1: IDLE_TID,
         };
 
-        if let Ok(idle) = Task::new(IDLE_TID, "idle", idle_entry, 0, layout::DEFAULT_STACK_SIZE, 0, false)
-        {
+        if let Ok(idle) = Task::new(
+            IDLE_TID,
+            "idle",
+            idle_entry,
+            0,
+            layout::DEFAULT_STACK_SIZE,
+            0,
+            false,
+        ) {
             let mut t = idle;
             t.affinity = Some(0);
             sched.tasks.insert(IDLE_TID, t);
         }
 
-        // Bajo SMP, el núcleo 1 tiene su propia tarea idle.
         #[cfg(feature = "smp")]
         {
             let idle1_tid = sched.next_tid;
             sched.next_tid += 1;
-            if let Ok(idle1) =
-                Task::new(idle1_tid, "idle1", idle_entry, 0, layout::DEFAULT_STACK_SIZE, 0, false)
-            {
+            if let Ok(idle1) = Task::new(
+                idle1_tid,
+                "idle1",
+                idle_entry,
+                0,
+                layout::DEFAULT_STACK_SIZE,
+                0,
+                false,
+            ) {
                 let mut t = idle1;
                 t.affinity = Some(1);
                 sched.tasks.insert(idle1_tid, t);
@@ -180,7 +182,6 @@ pub fn spawn(
     priority: u8,
     is_user: bool,
 ) -> KResult<Tid> {
-
     let reserved = with_sched(|s| match s.next_tid.checked_add(1) {
         Some(next) => {
             let tid = s.next_tid;
@@ -212,7 +213,10 @@ pub fn spawn(
 }
 
 pub fn yield_now() {
-    crate::syscall::invoke(crate::syscall::Syscall::Yield as usize, [0; crate::syscall::MAX_ARGS]);
+    crate::syscall::invoke(
+        crate::syscall::Syscall::Yield as usize,
+        [0; crate::syscall::MAX_ARGS],
+    );
 }
 
 pub fn exit(code: i32) -> ! {
@@ -220,8 +224,10 @@ pub fn exit(code: i32) -> ! {
 
     set_need_resched();
 
-    // Invocar el syscall de exit para forzar el trap de replanificación y no volver
-    crate::syscall::invoke(crate::syscall::Syscall::Exit as usize, [code as usize; crate::syscall::MAX_ARGS]);
+    crate::syscall::invoke(
+        crate::syscall::Syscall::Exit as usize,
+        [code as usize; crate::syscall::MAX_ARGS],
+    );
 
     loop {
         core::hint::spin_loop();
@@ -231,7 +237,11 @@ pub fn exit(code: i32) -> ! {
 pub fn mark_zombie(code: i32) {
     with_sched(|s| {
         #[cfg(feature = "smp")]
-        let cur = if core_id() == 1 { s.current1 } else { s.current };
+        let cur = if core_id() == 1 {
+            s.current1
+        } else {
+            s.current
+        };
         #[cfg(not(feature = "smp"))]
         let cur = s.current;
 
@@ -271,7 +281,7 @@ pub fn current() -> Tid {
 
 pub fn run() -> ! {
     let _prev = interrupts::disable();
-    let mut target: Option<(u32, bool, u32)> = None; // (frame_ptr, is_user, sp)
+    let mut target: Option<(u32, bool, u32)> = None;
     {
         let mut guard = SCHED.lock();
         if let Some(s) = guard.as_mut() {
@@ -285,8 +295,7 @@ pub fn run() -> ! {
             let base = task.stack_base as u32;
             let top = (task.stack_base as usize + task.stack_size) as u32;
             crate::mm::mpu::configure_stack_guard(0, base, top);
-            // El frame vive dentro del Task (Box estable en SCHED): su dirección
-            // sigue válida tras soltar el lock.
+
             let fp = &task.context.frame as *const _ as u32;
             target = Some((fp, task.is_user, task.context.frame.A1));
         }
@@ -375,13 +384,10 @@ pub fn preempt_switch(save_frame: &mut esp_hal::xtensa_lx_rt::exception::Context
                 }
             }
 
-            // Guardar el contexto de la tarea saliente: copiar los registros vivos
-            // FUERA del frame del vector, a su almacenamiento por-tarea.
             if let Some(t) = s.tasks.get_mut(&cur) {
                 t.context.frame = *save_frame;
             }
 
-            // Elegir la siguiente tarea
             #[cfg(feature = "smp")]
             let next = if core == 1 {
                 policy::next_ready(s, 1).unwrap_or(s.idle1)
@@ -416,15 +422,8 @@ pub fn preempt_switch(save_frame: &mut esp_hal::xtensa_lx_rt::exception::Context
             crate::mm::mpu::configure_stack_guard(core, base, top);
 
             if next != cur {
-                // Conmutación REAL: copiar el contexto de la siguiente tarea DENTRO
-                // de *save_frame. Al volver del handler, el vector de xtensa-lx-rt
-                // restaura *save_frame -> registros de la siguiente tarea (su A1
-                // cambia de pila, su PC/PS dirigen el rfe). Sin trucos de `a5`.
                 *save_frame = next_task.context.frame;
-                crate::mm::mpu::prepare_world_switch(
-                    next_task.is_user,
-                    next_task.context.frame.A1,
-                );
+                crate::mm::mpu::prepare_world_switch(next_task.is_user, next_task.context.frame.A1);
             }
         }
     }
@@ -432,11 +431,6 @@ pub fn preempt_switch(save_frame: &mut esp_hal::xtensa_lx_rt::exception::Context
     interrupts::restore(prev);
 }
 
-// ===========================================================================
-// SMP (Fase 9, feature `smp`): planificación en el núcleo 1.
-// ===========================================================================
-
-/// Crea una tarea que se ejecutará en el **núcleo 1**.
 #[cfg(feature = "smp")]
 pub fn spawn_core1(
     name: &str,
@@ -470,7 +464,6 @@ pub fn spawn_core1(
     }
 }
 
-/// Punto de entrada del núcleo 1: arranca el planificador. No retorna.
 #[cfg(feature = "smp")]
 pub fn run_secondary() -> ! {
     let _prev = interrupts::disable();
@@ -488,7 +481,7 @@ pub fn run_secondary() -> ! {
             let base = task.stack_base as u32;
             let top = (task.stack_base as usize + task.stack_size) as u32;
             crate::mm::mpu::configure_stack_guard(1, base, top);
-            target = Some(task.context.sp);
+            target = Some(&task.context.frame as *const _ as u32);
         }
     }
 
@@ -514,7 +507,11 @@ pub fn set_task_user(tid: Tid, is_user: bool) {
 pub fn block_current() {
     with_sched(|s| {
         #[cfg(feature = "smp")]
-        let cur = if core_id() == 1 { s.current1 } else { s.current };
+        let cur = if core_id() == 1 {
+            s.current1
+        } else {
+            s.current
+        };
         #[cfg(not(feature = "smp"))]
         let cur = s.current;
 
@@ -527,16 +524,14 @@ pub fn block_current() {
     yield_now();
 }
 
-/// Como [`block_current`], pero **no** cede la CPU aquí (no ejecuta `yield_now`,
-/// es decir, no emite la instrucción `syscall`). Pensada para llamarse DENTRO de
-/// un handler de syscall: el `preempt_switch` del epílogo del trap hará la
-/// conmutación con el `save_frame` correcto tras retornar del handler. Llamar
-/// `yield_now()` desde dentro del handler sería un `syscall` **anidado** dentro de
-/// `__exception`, que corrompe el cambio de contexto (o dispara doble excepción).
 pub fn block_current_noswitch() {
     with_sched(|s| {
         #[cfg(feature = "smp")]
-        let cur = if core_id() == 1 { s.current1 } else { s.current };
+        let cur = if core_id() == 1 {
+            s.current1
+        } else {
+            s.current
+        };
         #[cfg(not(feature = "smp"))]
         let cur = s.current;
 

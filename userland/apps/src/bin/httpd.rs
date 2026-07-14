@@ -15,16 +15,16 @@ fn read_file_to_buf(path: &str, buf: &mut [u8]) -> usize {
 
 #[no_mangle]
 pub fn main() -> i32 {
-    let fd = socket(2, 1, 0); // AF_INET, SOCK_STREAM
+    let fd = socket(2, 1, 0);
     if fd < 0 {
         println!("httpd: could not create socket");
         return 1;
     }
     
     let addr = sockaddr_in {
-        sin_family: 2, // AF_INET
+        sin_family: 2,
         sin_port: 80u16.to_be(),
-        sin_addr: 0, // INADDR_ANY (0.0.0.0)
+        sin_addr: 0,
         sin_zero: [0; 8],
     };
     
@@ -55,7 +55,7 @@ pub fn main() -> i32 {
             let mut req = [0u8; 1024];
             let _n = read(client_fd as i32, &mut req);
             
-            // Leer estado del sistema de /proc
+
             let mut uptime_buf = [0u8; 64];
             let u_len = read_file_to_buf("/proc/uptime", &mut uptime_buf);
             let uptime_str = if u_len > 0 {
@@ -72,7 +72,7 @@ pub fn main() -> i32 {
                 "MemTotal: N/A\n"
             };
 
-            // Construir respuesta HTML
+
             let body_prefix = "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nConnection: close\r\n\r\n\
             <html>\
             <head>\

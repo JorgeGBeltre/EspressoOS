@@ -21,7 +21,6 @@ pub(crate) fn banner_bytes() -> &'static [u8] {
     b"\r\nEspressoOS shell. Type 'help' to see the commands.\r\n"
 }
 
-
 pub(crate) fn prompt_bytes() -> &'static [u8] {
     PROMPT.as_bytes()
 }
@@ -46,32 +45,24 @@ fn read_line(buf: &mut String) {
                     return;
                 }
                 0x08 | 0x7f => {
-
                     if buf.pop().is_some() {
-
                         console_write(b"\x08 \x08");
                     }
                 }
                 0x03 => {
-
                     buf.clear();
                     console_write(b"^C\r\n");
                     return;
                 }
                 b if (0x20..0x7f).contains(&b) => {
-
                     if buf.len() < MAX_LINE {
                         buf.push(b as char);
                         console_write(&[b]);
                     }
-
                 }
-                _ => {
-
-                }
+                _ => {}
             },
             None => {
-
                 scheduler::yield_now();
             }
         }
@@ -85,10 +76,7 @@ fn execute(line: &str) {
                 return;
             }
             if pipeline.len() > 1 {
-
-                eprintln_console(
-                    "shell: pipelines not yet supported; running the first stage",
-                );
+                eprintln_console("shell: pipelines not yet supported; running the first stage");
             }
             if let Some(cmd) = pipeline.into_iter().next() {
                 run_command(&cmd);
@@ -101,7 +89,6 @@ fn execute(line: &str) {
 }
 
 fn run_command(cmd: &parser::Command) {
-
     if let Err(e) = commands::begin_redirect(&cmd.redirect) {
         eprintln_console(&format!(
             "shell: could not open redirection target ({:?})",

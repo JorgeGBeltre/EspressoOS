@@ -17,7 +17,6 @@ const SSH_SHELL_STACK: usize = 8 * 1024;
 static SHELL_TASK_SPAWNED: AtomicBool = AtomicBool::new(false);
 
 pub struct Channel {
-
     pub local_id: u32,
 
     pub remote_id: u32,
@@ -35,7 +34,6 @@ pub struct Channel {
 }
 
 impl Channel {
-
     pub fn new(local_id: u32, remote_id: u32, peer_window: u32, peer_max_packet: u32) -> Self {
         Self {
             local_id,
@@ -83,7 +81,6 @@ impl Channel {
             ) {
                 Ok(_) => {}
                 Err(_) => {
-
                     SHELL_TASK_SPAWNED.store(false, Ordering::Release);
                 }
             }
@@ -91,7 +88,6 @@ impl Channel {
     }
 
     pub fn on_data(&mut self, data: &[u8]) -> KResult<Option<u32>> {
-
         let _ = remote::bridge_push_input(data);
 
         self.recv_window = self.recv_window.saturating_sub(data.len() as u32);

@@ -1,8 +1,8 @@
 #![allow(dead_code)]
 
+use super::table::Syscall;
 use crate::prelude::*;
 use crate::vfs::{Fd, InodeKind, OpenFlags, SeekFrom};
-use super::table::Syscall;
 
 pub fn dispatch(
     num: usize,
@@ -55,7 +55,6 @@ fn sys_dup2(args: &[usize]) -> isize {
     }
 }
 
-/// pipe(fds: *mut [i32;2]) — crea una tubería y devuelve [read_fd, write_fd].
 fn sys_pipe(args: &[usize]) -> isize {
     let out = match unsafe { user_slice_mut(arg(args, 0), 8) } {
         Ok(s) => s,
@@ -109,7 +108,6 @@ unsafe fn user_str<'a>(ptr: usize, len: usize) -> KResult<&'a str> {
 #[inline]
 fn ret_usize(r: KResult<usize>) -> isize {
     match r {
-
         Ok(n) => core::cmp::min(n, isize::MAX as usize) as isize,
         Err(e) => e.as_errno(),
     }
@@ -183,10 +181,10 @@ fn sys_ioctl(args: &[usize]) -> isize {
 
 fn sys_exit(args: &[usize]) -> isize {
     let code = arg(args, 0) as i32;
-    
+
     let current_tid = crate::scheduler::current();
     let mut parent_to_wake = None;
-    
+
     {
         let mut pt = crate::scheduler::process::PROCESS_TABLE.lock();
         let mut current_pid = None;
@@ -198,7 +196,7 @@ fn sys_exit(args: &[usize]) -> isize {
                 break;
             }
         }
-        
+
         if let Some(pid) = current_pid {
             if let Some(proc) = pt.table.get(&pid) {
                 if let Some(parent_pid) = proc.parent_pid {
@@ -209,11 +207,11 @@ fn sys_exit(args: &[usize]) -> isize {
             }
         }
     }
-    
+
     if let Some(parent_tid) = parent_to_wake {
         crate::scheduler::unblock_task(parent_tid);
     }
-    
+
     crate::scheduler::mark_zombie(code);
     crate::scheduler::set_need_resched();
     0
@@ -225,20 +223,25 @@ fn sys_spawn(args: &[usize]) -> isize {
         Err(e) => return e.as_errno(),
     };
     let entry_raw = arg(args, 2);
-    
+
     if entry_raw == 0 {
-        // Carga y ejecución de un ELF de usuario
         match crate::fs::elf::load_elf(name) {
             Ok((entry_point, total_size, load_addr)) => {
                 let entry: fn(usize) = unsafe { core::mem::transmute(entry_point as usize) };
-                match crate::scheduler::spawn(name, entry, 0, layout::DEFAULT_STACK_SIZE, 10, true) {
+                match crate::scheduler::spawn(name, entry, 0, layout::DEFAULT_STACK_SIZE, 10, true)
+                {
                     Ok(tid) => {
-                        let pid = crate::scheduler::process::register_process(name, tid, true, load_addr, total_size);
+                        let pid = crate::scheduler::process::register_process(
+                            name, tid, true, load_addr, total_size,
+                        );
                         pid as isize
                     }
                     Err(e) => {
-                        let layout = core::alloc::Layout::from_size_align(total_size, 4096).unwrap();
-                        unsafe { alloc::alloc::dealloc(load_addr, layout); }
+                        let layout =
+                            core::alloc::Layout::from_size_align(total_size, 4096).unwrap();
+                        unsafe {
+                            alloc::alloc::dealloc(load_addr, layout);
+                        }
                         e.as_errno()
                     }
                 }
@@ -246,7 +249,6 @@ fn sys_spawn(args: &[usize]) -> isize {
             Err(e) => e.as_errno(),
         }
     } else {
-        // Creación de una tarea kernel regular
         let entry: fn(usize) = unsafe { core::mem::transmute::<usize, fn(usize)>(entry_raw) };
         let entry_arg = arg(args, 3);
         let mut stack_size = arg(args, 4);
@@ -257,7 +259,13 @@ fn sys_spawn(args: &[usize]) -> isize {
 
         match crate::scheduler::spawn(name, entry, entry_arg, stack_size, priority, false) {
             Ok(tid) => {
-                let pid = crate::scheduler::process::register_process(name, tid, false, core::ptr::null_mut(), 0);
+                let pid = crate::scheduler::process::register_process(
+                    name,
+                    tid,
+                    false,
+                    core::ptr::null_mut(),
+                    0,
+                );
                 pid as isize
             }
             Err(e) => e.as_errno(),
@@ -269,7 +277,6 @@ fn sys_wait(args: &[usize]) -> isize {
     let status_ptr = arg(args, 0) as *mut i32;
     let current_tid = crate::scheduler::current();
 
-    // Localizar el PID del proceso llamante.
     let mut current_pid = None;
     {
         let pt = crate::scheduler::process::PROCESS_TABLE.lock();
@@ -285,13 +292,7 @@ fn sys_wait(args: &[usize]) -> isize {
         None => return KError::NotFound.as_errno(),
     };
 
-    // Una sola pasada, SIN bucle ni `yield_now()` (que sería un `syscall` anidado
-    // dentro de `__exception`):
-    //   - hijo zombie presente -> cosechar y devolver su pid.
-    //   - sin hijos            -> ECHILD (NotFound).
-    //   - hijos vivos sin morir -> bloquear y rebobinar el PC para RE-EJECUTAR la
-    //                              instrucción `syscall` cuando la tarea despierte.
-    let mut reaped: Option<(u32, i32, *mut u8, usize)> = None; // (pid, code, addr, size)
+    let mut reaped: Option<(u32, i32, *mut u8, usize)> = None;
     {
         let mut pt = crate::scheduler::process::PROCESS_TABLE.lock();
 
@@ -306,9 +307,7 @@ fn sys_wait(args: &[usize]) -> isize {
                 let mut z = None;
                 for &child_pid in &current_proc.children {
                     if let Some(child_proc) = pt.table.get(&child_pid) {
-                        if child_proc.state
-                            == crate::scheduler::process::ProcessState::Zombie
-                        {
+                        if child_proc.state == crate::scheduler::process::ProcessState::Zombie {
                             z = Some(child_pid);
                             break;
                         }
@@ -342,8 +341,7 @@ fn sys_wait(args: &[usize]) -> isize {
                 *status_ptr = code;
             }
         }
-        // Los ELF cargados en PSRAM ejecutable (Ruta B) traen load_addr nulo: no se
-        // liberan aquí. Sólo liberamos los cargados en heap (PIC).
+
         if !load_addr.is_null() && size > 0 && load_addr != 0x3c000000 as *mut u8 {
             let layout = core::alloc::Layout::from_size_align(size, 4096).unwrap();
             unsafe {
@@ -354,12 +352,6 @@ fn sys_wait(args: &[usize]) -> isize {
         return child_pid as isize;
     }
 
-    // Hay hijos vivos pero ninguno ha terminado: bloquear la tarea y pedir que la
-    // `syscall` se re-ejecute al reanudar (bandera `restart_syscall`). El epílogo
-    // del trap, al verla, no avanza el PC ni sobreescribe A2 -> la instrucción
-    // `syscall` queda intacta. Cuando el `exit` del hijo haga `unblock_task` y la
-    // tarea vuelva a planificarse, re-ejecuta la llamada y re-entra aquí,
-    // encontrando ya el zombie. Sin `yield_now()` (sería un `syscall` anidado).
     crate::scheduler::block_current_noswitch();
     crate::scheduler::set_restart_syscall();
     0
@@ -377,7 +369,6 @@ fn sys_seek(args: &[usize]) -> isize {
         _ => return KError::InvalidArgument.as_errno(),
     };
     match crate::vfs::seek(fd, pos) {
-
         Ok(n) => core::cmp::min(n, isize::MAX as u64) as isize,
         Err(e) => e.as_errno(),
     }
@@ -472,17 +463,17 @@ struct Sigaction {
 fn sys_sigaction(args: &[usize]) -> isize {
     let sig = arg(args, 0) as i32;
     let act_ptr = arg(args, 1) as *const Sigaction;
-    
+
     if sig <= 0 || sig >= 32 || sig == 9 {
         return KError::InvalidArgument.as_errno();
     }
-    
+
     if act_ptr.is_null() {
         return KError::Fault.as_errno();
     }
-    
+
     let act = unsafe { &*act_ptr };
-    
+
     let current_tid = crate::scheduler::current();
     let mut pt = crate::scheduler::process::PROCESS_TABLE.lock();
     for proc in pt.table.values_mut() {
@@ -492,29 +483,28 @@ fn sys_sigaction(args: &[usize]) -> isize {
             return 0;
         }
     }
-    
+
     KError::NotFound.as_errno()
 }
 
 fn sys_kill(args: &[usize]) -> isize {
     let pid = arg(args, 0) as u32;
     let sig = arg(args, 1) as i32;
-    
+
     if sig <= 0 || sig >= 32 {
         return KError::InvalidArgument.as_errno();
     }
-    
+
     let mut pt = crate::scheduler::process::PROCESS_TABLE.lock();
     if let Some(proc) = pt.table.get_mut(&pid) {
         proc.pending_signals |= 1 << sig;
-        
-        // Despertar la tarea si estaba bloqueada
+
         crate::scheduler::unblock_task(proc.main_task);
         crate::scheduler::set_need_resched();
-        
+
         return 0;
     }
-    
+
     KError::NotFound.as_errno()
 }
 
@@ -548,19 +538,19 @@ fn sys_socket(args: &[usize]) -> isize {
     let domain = arg(args, 0) as i32;
     let ty = arg(args, 1) as i32;
     let _proto = arg(args, 2) as i32;
-    
+
     if domain != 2 || (ty != 1 && ty != 2) {
         return KError::NotSupported.as_errno();
     }
-    
+
     let is_udp = ty == 2;
-    
+
     let mut guard = crate::drivers::wifi::NET_SOCKETS.lock();
     let sockets = match guard.as_mut() {
         Some(s) => s,
         None => return KError::IoError.as_errno(),
     };
-    
+
     let handle = if is_udp {
         let rx_meta = alloc::vec![smoltcp::socket::udp::PacketMetadata::EMPTY; 8];
         let rx_data = alloc::vec![0; 2048];
@@ -577,14 +567,14 @@ fn sys_socket(args: &[usize]) -> isize {
         sockets.add(socket)
     };
     drop(guard);
-    
+
     let socket_inode = Arc::new(crate::vfs::socket::SocketInode {
         handle: crate::arch::xtensa::sync::Mutex::new(handle),
         is_udp,
         remote_endpoint: crate::arch::xtensa::sync::Mutex::new(None),
         local_port: crate::arch::xtensa::sync::Mutex::new(None),
     });
-    
+
     let open_file = match crate::vfs::OpenFile::new(socket_inode, crate::vfs::OpenFlags::RDWR) {
         Ok(f) => f,
         Err(e) => {
@@ -595,7 +585,7 @@ fn sys_socket(args: &[usize]) -> isize {
             return e.as_errno();
         }
     };
-    
+
     match crate::vfs::insert_open_file(open_file) {
         Ok(fd) => fd as isize,
         Err(e) => {
@@ -612,40 +602,41 @@ fn sys_connect(args: &[usize]) -> isize {
     let fd = arg(args, 0) as Fd;
     let addr_ptr = arg(args, 1) as *const sockaddr_in;
     let addr_len = arg(args, 2);
-    
+
     if addr_ptr.is_null() || addr_len < core::mem::size_of::<sockaddr_in>() {
         return KError::InvalidArgument.as_errno();
     }
-    
+
     let addr = unsafe { &*addr_ptr };
-    
+
     let inode = match crate::vfs::get_inode(fd) {
         Ok(inod) => inod,
         Err(e) => return e.as_errno(),
     };
-    
+
     let handle = match inode.as_socket() {
         Some(h) => h,
         None => return KError::InvalidArgument.as_errno(),
     };
-    
+
     let port = u16::from_be(addr.sin_port);
     let ip_bytes = addr.sin_addr.to_ne_bytes();
-    let remote_addr = smoltcp::wire::IpAddress::Ipv4(smoltcp::wire::Ipv4Address::from_octets(ip_bytes));
+    let remote_addr =
+        smoltcp::wire::IpAddress::Ipv4(smoltcp::wire::Ipv4Address::from_octets(ip_bytes));
     let remote_endpoint = smoltcp::wire::IpEndpoint::new(remote_addr, port);
-    
+
     if inode.is_udp_socket() {
         let _ = inode.set_socket_remote_endpoint(remote_endpoint);
         return 0;
     }
-    
+
     let cmd = crate::drivers::wifi::NetCmd::Connect {
         handle,
         ip: ip_bytes,
         port,
     };
     crate::drivers::wifi::NET_CMD_QUEUE.lock().push(cmd);
-    
+
     loop {
         let mut guard = crate::drivers::wifi::NET_SOCKETS.lock();
         if let Some(sockets) = guard.as_mut() {
@@ -670,13 +661,13 @@ fn sys_bind(args: &[usize]) -> isize {
     let fd = arg(args, 0) as Fd;
     let addr_ptr = arg(args, 1) as *const sockaddr_in;
     let addr_len = arg(args, 2);
-    
+
     if addr_ptr.is_null() || addr_len < core::mem::size_of::<sockaddr_in>() {
         return KError::InvalidArgument.as_errno();
     }
     let addr = unsafe { &*addr_ptr };
     let port = u16::from_be(addr.sin_port);
-    
+
     match crate::vfs::get_inode(fd) {
         Ok(inode) => match inode.bind(port) {
             Ok(()) => 0,
@@ -689,7 +680,7 @@ fn sys_bind(args: &[usize]) -> isize {
 fn sys_listen(args: &[usize]) -> isize {
     let fd = arg(args, 0) as Fd;
     let backlog = arg(args, 1) as i32;
-    
+
     match crate::vfs::get_inode(fd) {
         Ok(inode) => match inode.listen(backlog) {
             Ok(()) => 0,
@@ -701,18 +692,19 @@ fn sys_listen(args: &[usize]) -> isize {
 
 fn sys_accept(args: &[usize]) -> isize {
     let fd = arg(args, 0) as Fd;
-    
+
     let listen_inode = match crate::vfs::get_inode(fd) {
         Ok(inode) => inode,
         Err(e) => return e.as_errno(),
     };
-    
+
     match listen_inode.accept() {
         Ok(accepted_inode) => {
-            let open_file = match crate::vfs::OpenFile::new(accepted_inode, crate::vfs::OpenFlags::RDWR) {
-                Ok(f) => f,
-                Err(e) => return e.as_errno(),
-            };
+            let open_file =
+                match crate::vfs::OpenFile::new(accepted_inode, crate::vfs::OpenFlags::RDWR) {
+                    Ok(f) => f,
+                    Err(e) => return e.as_errno(),
+                };
             match crate::vfs::insert_open_file(open_file) {
                 Ok(new_fd) => new_fd as isize,
                 Err(e) => e.as_errno(),
@@ -733,14 +725,14 @@ fn sys_gettimeofday(args: &[usize]) -> isize {
     if tv_ptr.is_null() {
         return KError::InvalidArgument.as_errno();
     }
-    
+
     let uptime_us = esp_hal::time::now().duration_since_epoch().to_micros();
     let offset_us = *crate::arch::xtensa::timer::SYSTEM_TIME_OFFSET_US.lock();
     let total_us = uptime_us.saturating_add(offset_us);
-    
+
     let sec = (total_us / 1_000_000) as i32;
     let usec = (total_us % 1_000_000) as i32;
-    
+
     unsafe {
         (*tv_ptr).tv_sec = sec;
         (*tv_ptr).tv_usec = usec;
@@ -753,15 +745,15 @@ fn sys_settimeofday(args: &[usize]) -> isize {
     if tv_ptr.is_null() {
         return KError::InvalidArgument.as_errno();
     }
-    
+
     let tv = unsafe { &*tv_ptr };
     let new_total_us = (tv.tv_sec as u64)
         .saturating_mul(1_000_000)
         .saturating_add(tv.tv_usec as u64);
-        
+
     let uptime_us = esp_hal::time::now().duration_since_epoch().to_micros();
     let new_offset_us = new_total_us.saturating_sub(uptime_us);
-    
+
     *crate::arch::xtensa::timer::SYSTEM_TIME_OFFSET_US.lock() = new_offset_us;
     0
 }
@@ -778,8 +770,9 @@ fn sys_ota_state(args: &[usize]) -> isize {
         let state = crate::ota::OtaImgState::from_raw(state_raw);
         match crate::ota::set_state(state) {
             Ok(()) => {
-                if state_raw == crate::ota::OtaImgState::Invalid.as_raw() 
-                    || state_raw == crate::ota::OtaImgState::Aborted.as_raw() {
+                if state_raw == crate::ota::OtaImgState::Invalid.as_raw()
+                    || state_raw == crate::ota::OtaImgState::Aborted.as_raw()
+                {
                     crate::println!("[kernel] Partition marked as invalid/aborted. Rebooting...");
                     esp_hal::reset::software_reset();
                 }

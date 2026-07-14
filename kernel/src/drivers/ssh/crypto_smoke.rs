@@ -21,7 +21,6 @@ use subtle::ConstantTimeEq;
 
 #[inline(never)]
 pub fn smoke() -> bool {
-
     let rng = esp_hal::rng::Rng::new(unsafe { esp_hal::peripherals::RNG::steal() });
     let mut hw = HwRng::new(rng);
 

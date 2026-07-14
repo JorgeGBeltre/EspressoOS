@@ -3,7 +3,6 @@
 #[repr(usize)]
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Syscall {
-
     Read = 0,
 
     Write = 1,
@@ -62,7 +61,6 @@ pub enum Syscall {
 }
 
 impl Syscall {
-
     pub fn from_usize(n: usize) -> Option<Syscall> {
         let sc = match n {
             0 => Syscall::Read,

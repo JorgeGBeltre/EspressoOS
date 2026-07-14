@@ -12,7 +12,6 @@ pub const OTA_SEQ_EMPTY: u32 = 0xFFFF_FFFF;
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 #[repr(u32)]
 pub enum OtaImgState {
-
     New = 0x0,
 
     PendingVerify = 0x1,
@@ -27,7 +26,6 @@ pub enum OtaImgState {
 }
 
 impl OtaImgState {
-
     pub const fn from_raw(v: u32) -> OtaImgState {
         match v {
             0x0 => OtaImgState::New,
@@ -46,14 +44,12 @@ impl OtaImgState {
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Slot {
-
     Factory,
 
     Ota0,
 }
 
 impl Slot {
-
     pub const fn region(self) -> (u32, u32) {
         match self {
             Slot::Factory => (layout::FACTORY_OFFSET, layout::FACTORY_SIZE),
@@ -69,7 +65,6 @@ impl Slot {
     }
 
     pub const fn from_index(idx: u32) -> Slot {
-
         match idx {
             0 => Slot::Factory,
             _ => Slot::Ota0,
@@ -86,7 +81,6 @@ impl Slot {
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct OtaSelectEntry {
-
     pub ota_seq: u32,
 
     pub seq_label: [u8; 20],
@@ -97,7 +91,6 @@ pub struct OtaSelectEntry {
 }
 
 impl OtaSelectEntry {
-
     pub const fn empty() -> Self {
         Self {
             ota_seq: OTA_SEQ_EMPTY,
@@ -123,8 +116,8 @@ impl OtaSelectEntry {
     }
 
     pub fn is_valid(&self) -> bool {
-        self.ota_seq != OTA_SEQ_EMPTY 
-            && self.ota_seq != 0 
+        self.ota_seq != OTA_SEQ_EMPTY
+            && self.ota_seq != 0
             && self.crc == self.compute_crc()
             && self.ota_state != OtaImgState::Invalid.as_raw()
             && self.ota_state != OtaImgState::Aborted.as_raw()
@@ -177,7 +170,6 @@ pub fn select_active_index(entries: &[OtaSelectEntry; 2]) -> Option<usize> {
 }
 
 pub const fn slot_from_seq(seq: u32) -> Slot {
-
     Slot::from_index(seq.wrapping_sub(1) % SLOT_COUNT)
 }
 
@@ -192,7 +184,6 @@ pub fn next_seq_for_index(current_max: u32, target_index: u32) -> KResult<u32> {
         seq = base;
     }
     for _ in 0..SLOT_COUNT {
-
         if seq.wrapping_sub(1) % SLOT_COUNT == target_index {
             return Ok(seq);
         }
@@ -208,7 +199,6 @@ pub fn crc32_le(seed: u32, data: &[u8]) -> u32 {
         crc ^= byte as u32;
         let mut bit = 0;
         while bit < 8 {
-
             let mask = (crc & 1).wrapping_neg();
             crc = (crc >> 1) ^ (0xEDB8_8320 & mask);
             bit += 1;
@@ -255,7 +245,6 @@ fn write_otadata_copy(copy: usize, entry: &OtaSelectEntry) -> KResult<()> {
     flash::write(off, &entry.to_bytes())
 }
 
-/// Lee las dos copias de otadata (para inspección desde la shell).
 pub fn otadata_entries() -> KResult<[OtaSelectEntry; 2]> {
     read_otadata()
 }
@@ -275,7 +264,6 @@ pub fn active_slot() -> Slot {
 }
 
 pub fn set_boot_slot(slot: Slot) -> KResult<()> {
-
     let entries = read_otadata().unwrap_or([OtaSelectEntry::empty(); 2]);
     let active = select_active_index(&entries);
 

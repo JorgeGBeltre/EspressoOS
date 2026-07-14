@@ -13,7 +13,6 @@ use super::parser::Redirect;
 
 #[derive(Clone, Copy)]
 enum Sink {
-
     Console,
 
     Ssh,
@@ -85,7 +84,6 @@ fn emit(bytes: &[u8]) {
             let _ = crate::shell::remote::command_output_to_ssh(bytes);
         }
         Sink::File(fd) => {
-
             let _ = vfs::write(*fd, bytes);
         }
     }
@@ -114,7 +112,6 @@ fn emit_line(s: &str) {
 }
 
 fn eprint_line(s: &str) {
-
     match *BASE.lock() {
         Sink::Ssh => {
             let _ = crate::shell::remote::command_output_to_ssh(s.as_bytes());
@@ -130,7 +127,6 @@ fn eprint_line(s: &str) {
 pub fn begin_redirect(redirect: &Redirect) -> KResult<()> {
     match redirect {
         Redirect::None => {
-
             let base = *BASE.lock();
             *OUTPUT.lock() = base;
             Ok(())
@@ -232,9 +228,7 @@ fn cmd_wifi(args: &[&str]) -> i32 {
                 wifi::current_ssid().unwrap_or_else(|| String::from("(none)"))
             ));
             match wifi::current_ip() {
-                Some(ip) => {
-                    emit_line(&format!("ip:     {}.{}.{}.{}", ip[0], ip[1], ip[2], ip[3]))
-                }
+                Some(ip) => emit_line(&format!("ip:     {}.{}.{}.{}", ip[0], ip[1], ip[2], ip[3])),
                 None => emit_line("ip:     (none)"),
             }
             0
@@ -256,7 +250,10 @@ fn cmd_wifi(args: &[&str]) -> i32 {
             }
             let mut aps = wifi::scan_results();
             aps.sort_by(|a, b| b.rssi.cmp(&a.rssi));
-            emit_line(&format!("{:<32} {:>5}  {:>3}  {}", "SSID", "RSSI", "CH", "SEC"));
+            emit_line(&format!(
+                "{:<32} {:>5}  {:>3}  {}",
+                "SSID", "RSSI", "CH", "SEC"
+            ));
             for ap in aps.iter() {
                 let name = if ap.ssid.is_empty() {
                     "(hidden)"
@@ -302,7 +299,7 @@ fn cmd_wifi(args: &[&str]) -> i32 {
 
 fn cmd_ip(_args: &[&str]) -> i32 {
     use crate::drivers::wifi;
-    // `ip`, `ip a`, `ip addr`: muestra la dirección de wlan0.
+
     match wifi::current_ip() {
         Some(ip) => emit_line(&format!(
             "wlan0: {}.{}.{}.{}  ssid \"{}\"  state {:?}",
@@ -319,7 +316,6 @@ fn cmd_ip(_args: &[&str]) -> i32 {
 }
 
 fn cmd_sudo(args: &[&str]) -> i32 {
-    // EspressoOS no separa privilegios: `sudo CMD ...` simplemente ejecuta CMD.
     if args.is_empty() {
         eprint_line("sudo: usage: sudo COMMAND [ARGS...]");
         return 1;
@@ -328,7 +324,6 @@ fn cmd_sudo(args: &[&str]) -> i32 {
 }
 
 fn cmd_nmcli(args: &[&str]) -> i32 {
-    // Shim de compatibilidad con nmcli para las operaciones WiFi habituales.
     match args {
         ["device", "status"] | ["dev", "status"] | ["general", "status"] | ["g", "status"] => {
             cmd_wifi(&["status"])
@@ -404,7 +399,6 @@ fn cmd_help(_args: &[&str]) -> i32 {
 }
 
 fn cmd_clear() -> i32 {
-
     emit_str("\x1b[2J\x1b[H");
     0
 }
@@ -452,7 +446,6 @@ fn cmd_reboot() -> i32 {
 }
 
 fn cmd_ls(args: &[&str]) -> i32 {
-
     let raw = args.first().copied().unwrap_or(".");
     let path = resolve(raw);
     match vfs::readdir(&path) {
@@ -522,7 +515,6 @@ fn cat_one(path: &str) -> KResult<()> {
         match vfs::read(fd, &mut buf) {
             Ok(0) => break,
             Ok(n) => {
-
                 let chunk = buf.get(..n).unwrap_or(&[]);
                 emit(chunk);
             }
@@ -622,10 +614,6 @@ fn cmd_write(args: &[&str]) -> i32 {
         }
     }
 }
-
-// ============================================================================
-// Comandos de bus (Fase 3): i2c / spi.
-// ============================================================================
 
 fn parse_u8_hex(s: &str) -> Option<u8> {
     let t = s
@@ -766,10 +754,6 @@ fn cmd_spi(args: &[&str]) -> i32 {
     }
 }
 
-// ============================================================================
-// Comando OTA A/B (Fase 5): status / set.
-// ============================================================================
-
 fn slot_name(s: crate::ota::Slot) -> &'static str {
     match s {
         crate::ota::Slot::Factory => "factory",
@@ -815,7 +799,11 @@ fn cmd_ota(args: &[&str]) -> i32 {
                             i,
                             seq,
                             ota_state_str(e.ota_state),
-                            if e.is_valid() { "valid" } else { "invalid/empty" }
+                            if e.is_valid() {
+                                "valid"
+                            } else {
+                                "invalid/empty"
+                            }
                         ));
                     }
                     0
@@ -858,7 +846,10 @@ fn cmd_ota(args: &[&str]) -> i32 {
             emit_line("(writes several MB; with WiFi active it may cut the radio)");
             match ota::apply_buffered() {
                 Ok(slot) => {
-                    emit_line(&format!("OK: image written to {} and marked for boot", slot_name(slot)));
+                    emit_line(&format!(
+                        "OK: image written to {} and marked for boot",
+                        slot_name(slot)
+                    ));
                     emit_line("(effective only with a bootloader that honors otadata)");
                     0
                 }
@@ -875,10 +866,6 @@ fn cmd_ota(args: &[&str]) -> i32 {
     }
 }
 
-// ============================================================================
-// Ejercicio de la ABI de syscalls (Fase 6).
-// ============================================================================
-
 fn cmd_syscalltest() -> i32 {
     use crate::syscall::{invoke, Syscall};
 
@@ -888,7 +875,6 @@ fn cmd_syscalltest() -> i32 {
     let free = invoke(Syscall::Sbrk.number(), [0; 6]);
     emit_line(&format!("SYS_Sbrk(free) -> {} bytes", free));
 
-    // Open/Write/Close sobre /dev/console vía la ABI.
     let path = "/dev/console";
     let flags = OpenFlags::WRONLY.0 as usize;
     let fd = invoke(
@@ -921,13 +907,12 @@ fn cmd_syscalltest() -> i32 {
     0
 }
 
-// ============================================================================
-// Estado SMP (Fase 9).
-// ============================================================================
-
 fn cmd_smp() -> i32 {
     use crate::scheduler::core_sync;
-    emit_line(&format!("core serving the shell: core {}", core_sync::current_core_id()));
+    emit_line(&format!(
+        "core serving the shell: core {}",
+        core_sync::current_core_id()
+    ));
     if cfg!(feature = "smp") {
         if core_sync::is_running() {
             emit_line(&format!(
@@ -942,10 +927,6 @@ fn cmd_smp() -> i32 {
     }
     0
 }
-
-// ============================================================================
-// Protección de memoria PMS (Fase 8).
-// ============================================================================
 
 fn cmd_pms(args: &[&str]) -> i32 {
     if !cfg!(feature = "pms") {

@@ -1,8 +1,8 @@
 #![allow(dead_code)]
 
-use crate::prelude::*;
+use super::inode::{DirEntry, Inode, InodeKind};
 use crate::arch::xtensa::sync::Mutex;
-use super::inode::{Inode, InodeKind, DirEntry};
+use crate::prelude::*;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
 pub struct Pipe {
@@ -58,26 +58,23 @@ impl Inode for PipeReadInode {
                 for (i, b) in guard.drain(0..n).enumerate() {
                     buf[i] = b;
                 }
-                
-                // Despertar escritores bloqueados
+
                 let mut writers = self.pipe.writers_blocked.lock();
                 for &tid in writers.iter() {
                     crate::scheduler::unblock_task(tid);
                 }
                 writers.clear();
-                
+
                 return Ok(n);
             }
-            
-            // Si el buffer está vacío y no hay escritores, retorna EOF (0)
+
             if self.pipe.writer_count.load(Ordering::SeqCst) == 0 {
                 return Ok(0);
             }
-            
-            // Bloquear lector actual
+
             let tid = crate::scheduler::current();
             self.pipe.readers_blocked.lock().push(tid);
-            
+
             drop(guard);
             crate::scheduler::block_current();
         }
@@ -107,7 +104,6 @@ impl Inode for PipeReadInode {
 impl Drop for PipeReadInode {
     fn drop(&mut self) {
         if self.pipe.reader_count.fetch_sub(1, Ordering::SeqCst) == 1 {
-            // Último lector cerrado: despertar a los escritores bloqueados (que fallarán con EPIPE/IoError)
             let mut writers = self.pipe.writers_blocked.lock();
             for &tid in writers.iter() {
                 crate::scheduler::unblock_task(tid);
@@ -146,7 +142,6 @@ impl Inode for PipeWriteInode {
         }
 
         loop {
-            // Si no hay lectores, escribir genera EPIPE (IoError)
             if self.pipe.reader_count.load(Ordering::SeqCst) == 0 {
                 return Err(KError::IoError);
             }
@@ -156,21 +151,19 @@ impl Inode for PipeWriteInode {
                 let space = self.pipe.capacity - guard.len();
                 let n = core::cmp::min(buf.len(), space);
                 guard.extend_from_slice(&buf[0..n]);
-                
-                // Despertar lectores bloqueados
+
                 let mut readers = self.pipe.readers_blocked.lock();
                 for &tid in readers.iter() {
                     crate::scheduler::unblock_task(tid);
                 }
                 readers.clear();
-                
+
                 return Ok(n);
             }
-            
-            // Buffer lleno: bloquear escritor actual
+
             let tid = crate::scheduler::current();
             self.pipe.writers_blocked.lock().push(tid);
-            
+
             drop(guard);
             crate::scheduler::block_current();
         }
@@ -196,7 +189,6 @@ impl Inode for PipeWriteInode {
 impl Drop for PipeWriteInode {
     fn drop(&mut self) {
         if self.pipe.writer_count.fetch_sub(1, Ordering::SeqCst) == 1 {
-            // Último escritor cerrado: despertar a los lectores bloqueados (que recibirán EOF/0)
             let mut readers = self.pipe.readers_blocked.lock();
             for &tid in readers.iter() {
                 crate::scheduler::unblock_task(tid);
@@ -206,7 +198,6 @@ impl Drop for PipeWriteInode {
     }
 }
 
-/// Crea una tubería unidireccional y devuelve los Inodes de lectura y escritura.
 pub fn create_pipe(capacity: usize) -> (Arc<dyn Inode>, Arc<dyn Inode>) {
     let pipe = Pipe::new(capacity);
     let read_inode = Arc::new(PipeReadInode::new(pipe.clone()));

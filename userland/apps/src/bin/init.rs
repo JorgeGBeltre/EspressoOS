@@ -7,7 +7,7 @@ use libc::{println, open, read, close, spawn, wait, yield_now};
 pub extern "C" fn main() -> i32 {
     println!("[init] Initialization process PID 1 started");
     
-    // Intentar leer /etc/rc
+
     let fd = open("/etc/rc", 0);
     if fd >= 0 {
         println!("[init] Reading /etc/rc...");
@@ -21,7 +21,7 @@ pub extern "C" fn main() -> i32 {
         println!("[init] /etc/rc not found, skipping startup script");
     }
 
-    // Bucle infinito: spawnear shell en /dev/console y esperar
+
     loop {
         println!("[init] Launching interactive console (/bin/sh)...");
         let pid = spawn("/bin/sh", 0, 0, 0, 0);

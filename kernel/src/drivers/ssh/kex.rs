@@ -59,7 +59,6 @@ pub fn k_as_mpint(k_raw: &[u8]) -> Vec<u8> {
 }
 
 pub fn derive_key(k_mpint: &[u8], h: &[u8; 32], x: u8, session_id: &[u8; 32], out: &mut [u8]) {
-
     let mut hasher = Sha256::new();
     hasher.update(k_mpint);
     hasher.update(h);
@@ -85,7 +84,6 @@ pub fn derive_key(k_mpint: &[u8], h: &[u8; 32], x: u8, session_id: &[u8; 32], ou
 }
 
 pub struct KexResult {
-
     pub h: [u8; 32],
 
     pub k_mpint: Vec<u8>,
@@ -106,7 +104,6 @@ pub fn run_server(
     i_s: &[u8],
     q_c: &[u8],
 ) -> KResult<KexResult> {
-
     if q_c.len() != X25519_POINT_LEN {
         return Err(KError::InvalidArgument);
     }

@@ -42,8 +42,6 @@ const LINK_CHECK_MS: u64 = 5_000;
 const SSH_RX_SIZE: usize = 4096;
 const SSH_TX_SIZE: usize = 4096;
 
-
-
 pub const OTA_PORT: u16 = 3300;
 const OTA_RX_SIZE: usize = 8192;
 const OTA_TX_SIZE: usize = 1024;
@@ -59,19 +57,12 @@ pub enum NetCmd {
 pub static NET_SOCKETS: Mutex<Option<SocketSet<'static>>> = Mutex::new(None);
 pub static NET_CMD_QUEUE: Mutex<Vec<NetCmd>> = Mutex::new(Vec::new());
 
-
-
-
-
-
-
 pub enum WifiCmd {
     Scan,
     Connect { ssid: String, password: String },
     Disconnect,
 }
 pub static WIFI_CMD_QUEUE: Mutex<Vec<WifiCmd>> = Mutex::new(Vec::new());
-
 
 #[derive(Clone)]
 pub struct ApInfo {
@@ -88,11 +79,8 @@ pub const SCAN_DONE: u8 = 2;
 pub const SCAN_ERROR: u8 = 3;
 static SCAN_STATE: AtomicU8 = AtomicU8::new(SCAN_IDLE);
 
-
 pub static CURRENT_IP: Mutex<Option<[u8; 4]>> = Mutex::new(None);
 pub static CURRENT_SSID: Mutex<Option<String>> = Mutex::new(None);
-
-
 
 pub fn request_scan() {
     SCAN_STATE.store(SCAN_RUNNING, Ordering::Release);
@@ -106,7 +94,9 @@ pub fn scan_results() -> Vec<ApInfo> {
 }
 
 pub fn request_connect(ssid: String, password: String) {
-    WIFI_CMD_QUEUE.lock().push(WifiCmd::Connect { ssid, password });
+    WIFI_CMD_QUEUE
+        .lock()
+        .push(WifiCmd::Connect { ssid, password });
 }
 pub fn request_disconnect() {
     WIFI_CMD_QUEUE.lock().push(WifiCmd::Disconnect);
@@ -139,14 +129,8 @@ impl<'s> Transport for TcpTransport<'s> {
     }
 }
 
-
-
-
-
-
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum WifiStatus {
-
     Down,
 
     Connecting,
@@ -173,8 +157,6 @@ fn set_status(s: WifiStatus) {
     STATUS.store(v, Ordering::Release);
 }
 
-
-
 pub fn status() -> WifiStatus {
     match STATUS.load(Ordering::Acquire) {
         ST_CONNECTING => WifiStatus::Connecting,
@@ -184,11 +166,6 @@ pub fn status() -> WifiStatus {
     }
 }
 
-
-
-
-
-
 struct NetPeripherals {
     timg0: TIMG0,
     rng: RNG,
@@ -197,23 +174,17 @@ struct NetPeripherals {
     bt: esp_hal::peripherals::BT,
 }
 
-
-
-
 unsafe impl Send for NetPeripherals {}
-
 
 static PENDING: Mutex<Option<NetPeripherals>> = Mutex::new(None);
 
-
-
-
-
-
-
-
-
-pub fn provide_peripherals(timg0: TIMG0, rng: RNG, radio_clk: RADIO_CLK, wifi: WIFI, bt: esp_hal::peripherals::BT) {
+pub fn provide_peripherals(
+    timg0: TIMG0,
+    rng: RNG,
+    radio_clk: RADIO_CLK,
+    wifi: WIFI,
+    bt: esp_hal::peripherals::BT,
+) {
     let mut g = PENDING.lock();
     *g = Some(NetPeripherals {
         timg0,
@@ -224,32 +195,14 @@ pub fn provide_peripherals(timg0: TIMG0, rng: RNG, radio_clk: RADIO_CLK, wifi: W
     });
 }
 
-
-
-
-
-
-
 #[inline]
 fn now_smoltcp() -> Instant {
-
-
-
     let us = esp_hal::time::now().duration_since_epoch().to_micros();
     Instant::from_micros(us as i64)
 }
 
-
-
-
-
-
-
-
-
 pub fn net_task(_arg: usize) {
     set_status(WifiStatus::Down);
-
 
     let periph = { PENDING.lock().take() };
     let periph = match periph {
@@ -260,10 +213,6 @@ pub fn net_task(_arg: usize) {
             return;
         }
     };
-
-
-
-
 
     let timg0 = TimerGroup::new(periph.timg0);
     let rng = Rng::new(periph.rng);
@@ -277,20 +226,21 @@ pub fn net_task(_arg: usize) {
         }
     };
 
-
     let init: &'static EspWifiController<'static> = Box::leak(Box::new(init));
 
     crate::drivers::ble::init(periph.bt, init);
 
-    let (mut device, mut controller): (WifiDevice<'static, WifiStaDevice>, WifiController<'static>) =
-        match wifi::new_with_mode(init, periph.wifi, WifiStaDevice) {
-            Ok(v) => v,
-            Err(e) => {
-                println!("[net] ERROR new_with_mode: {:?}", e);
-                set_status(WifiStatus::Failed);
-                return;
-            }
-        };
+    let (mut device, mut controller): (
+        WifiDevice<'static, WifiStaDevice>,
+        WifiController<'static>,
+    ) = match wifi::new_with_mode(init, periph.wifi, WifiStaDevice) {
+        Ok(v) => v,
+        Err(e) => {
+            println!("[net] ERROR new_with_mode: {:?}", e);
+            set_status(WifiStatus::Failed);
+            return;
+        }
+    };
 
     let ssid_h = match WIFI_SSID.try_into() {
         Ok(s) => s,
@@ -377,7 +327,6 @@ pub fn net_task(_arg: usize) {
     }
     let ssh_handle = sockets_set.add(ssh_sock);
 
-
     let ota_rx = tcp::SocketBuffer::new(alloc::vec![0u8; OTA_RX_SIZE]);
     let ota_tx = tcp::SocketBuffer::new(alloc::vec![0u8; OTA_TX_SIZE]);
     let mut ota_sock = tcp::Socket::new(ota_rx, ota_tx);
@@ -401,9 +350,6 @@ pub fn net_task(_arg: usize) {
     loop {
         {
             let t = now_smoltcp();
-
-
-
 
             let mut reconnect_dhcp = false;
             {
@@ -488,7 +434,6 @@ pub fn net_task(_arg: usize) {
                 }
             }
 
-
             let mut cmds = Vec::new();
             {
                 let mut q = NET_CMD_QUEUE.lock();
@@ -497,9 +442,6 @@ pub fn net_task(_arg: usize) {
 
             let mut sockets_guard = NET_SOCKETS.lock();
             let sockets = sockets_guard.as_mut().unwrap();
-
-
-
 
             if reconnect_dhcp {
                 iface.update_ip_addrs(|a| a.clear());
@@ -511,14 +453,16 @@ pub fn net_task(_arg: usize) {
                 match cmd {
                     NetCmd::Connect { handle, ip, port } => {
                         let sock = sockets.get_mut::<tcp::Socket>(handle);
-                        let remote_addr = smoltcp::wire::IpAddress::Ipv4(smoltcp::wire::Ipv4Address::from_octets(ip));
+                        let remote_addr = smoltcp::wire::IpAddress::Ipv4(
+                            smoltcp::wire::Ipv4Address::from_octets(ip),
+                        );
                         let remote_endpoint = smoltcp::wire::IpEndpoint::new(remote_addr, port);
                         let local_port = 49152 + (uptime_ms() % 16384) as u16;
                         let _ = sock.connect(iface.context(), remote_endpoint, local_port);
                     }
                 }
             }
-            
+
             let _ = iface.poll(t, &mut device, sockets);
 
             let event = sockets.get_mut::<dhcpv4::Socket>(dhcp_handle).poll();
@@ -600,7 +544,11 @@ pub fn net_task(_arg: usize) {
                         }
                         Err(e) => {
                             if e != KError::WouldBlock {
-                                println!("[ssh] pump ERROR in state {:?}: {:?}", ssh_conn.state(), e);
+                                println!(
+                                    "[ssh] pump ERROR in state {:?}: {:?}",
+                                    ssh_conn.state(),
+                                    e
+                                );
                                 transport.close();
                                 ssh_active = false;
                             }
@@ -661,4 +609,3 @@ pub fn net_task(_arg: usize) {
         scheduler::yield_now();
     }
 }
-

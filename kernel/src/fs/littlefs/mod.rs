@@ -6,7 +6,6 @@ use crate::vfs::inode::{DirEntry, FileSystem, FsStat, Inode, InodeKind};
 
 #[derive(Clone, Copy, Debug)]
 pub struct LfsConfig {
-
     pub region_offset: u32,
 
     pub region_len: u32,
@@ -27,7 +26,6 @@ pub struct LfsConfig {
 }
 
 impl LfsConfig {
-
     pub const fn for_region(offset: u32, len: u32) -> LfsConfig {
         let block_size = flash::SECTOR_SIZE as u32;
         LfsConfig {
@@ -102,7 +100,6 @@ impl Inode for LfsRoot {
         Err(KError::IsADirectory)
     }
     fn readdir(&self, _index: usize) -> KResult<Option<DirEntry>> {
-
         Ok(None)
     }
     fn lookup(&self, _name: &str) -> KResult<Arc<dyn Inode>> {
@@ -122,7 +119,6 @@ pub struct LittleFs {
 }
 
 impl LittleFs {
-
     pub fn mount(offset: u32, len: u32, format_if_empty: bool) -> KResult<Arc<LittleFs>> {
         Self::validar_region(offset, len)?;
         let config = LfsConfig::for_region(offset, len);
@@ -174,12 +170,10 @@ impl FileSystem for LittleFs {
     }
 
     fn sync(&self) -> KResult<()> {
-
         Ok(())
     }
 
     fn stat(&self) -> FsStat {
-
         FsStat {
             total_bytes: self.config.region_len as u64,
             used_bytes: 0,

@@ -21,7 +21,6 @@ pub struct Aead {
 }
 
 impl Aead {
-
     pub fn new(key_material: &[u8; 64]) -> Self {
         let mut k2 = [0u8; 32];
         let mut k1 = [0u8; 32];
@@ -56,8 +55,7 @@ impl Aead {
         let mut enc_rest = rest_pt.to_vec();
         c2.apply_keystream(&mut enc_rest);
 
-        let mac =
-            Poly1305::new_from_slice(&poly_key).map_err(|_| KError::InvalidArgument)?;
+        let mac = Poly1305::new_from_slice(&poly_key).map_err(|_| KError::InvalidArgument)?;
         let mut aad = Vec::with_capacity(4 + enc_rest.len());
         aad.extend_from_slice(&enc_len);
         aad.extend_from_slice(&enc_rest);
@@ -92,8 +90,7 @@ impl Aead {
             .map_err(|_| KError::InvalidArgument)?;
         let mut poly_key = [0u8; 32];
         c2.apply_keystream(&mut poly_key);
-        let mac =
-            Poly1305::new_from_slice(&poly_key).map_err(|_| KError::InvalidArgument)?;
+        let mac = Poly1305::new_from_slice(&poly_key).map_err(|_| KError::InvalidArgument)?;
         let mut aad = Vec::with_capacity(4 + enc_ct.len());
         aad.extend_from_slice(enc_len);
         aad.extend_from_slice(enc_ct);

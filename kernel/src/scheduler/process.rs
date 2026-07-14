@@ -1,9 +1,9 @@
 #![allow(dead_code)]
 
-use crate::prelude::*;
-use crate::arch::xtensa::sync::Mutex;
-use alloc::collections::BTreeMap;
 use super::task::Tid;
+use crate::arch::xtensa::sync::Mutex;
+use crate::prelude::*;
+use alloc::collections::BTreeMap;
 
 pub type Pid = u32;
 
@@ -23,7 +23,6 @@ pub struct Process {
     pub children: Vec<Pid>,
     pub elf_load_addr: *mut u8,
     pub elf_size: usize,
-    
 
     pub pending_signals: u32,
     pub signal_handlers: [usize; 32],
@@ -65,7 +64,6 @@ pub fn register_process(
     let mut pt = PROCESS_TABLE.lock();
     let pid = pt.next_pid;
     pt.next_pid += 1;
-    
 
     let mut parent_pid = None;
     let current_tid = super::current();
@@ -75,7 +73,7 @@ pub fn register_process(
             break;
         }
     }
-    
+
     let proc = Process {
         pid,
         parent_pid,
@@ -91,9 +89,9 @@ pub fn register_process(
         signal_restorers: [0; 32],
         saved_signal_context: None,
     };
-    
+
     pt.table.insert(pid, proc);
-    
+
     if let Some(p) = parent_pid {
         if let Some(parent_proc) = pt.table.get_mut(&p) {
             parent_proc.children.push(pid);
@@ -101,18 +99,18 @@ pub fn register_process(
 
         crate::vfs::clone_fd_table(p, pid);
     }
-    
+
     if is_user {
         super::set_task_user(tid, true);
     }
-    
+
     pid
 }
 
 pub fn check_signals(save_frame: &mut esp_hal::xtensa_lx_rt::exception::Context) -> bool {
     let current_tid = super::current();
     let mut pt = PROCESS_TABLE.lock();
-    
+
     let mut current_pid = None;
     for (&pid, proc) in &pt.table {
         if proc.main_task == current_tid {
@@ -120,17 +118,16 @@ pub fn check_signals(save_frame: &mut esp_hal::xtensa_lx_rt::exception::Context)
             break;
         }
     }
-    
+
     let pid = match current_pid {
         Some(p) => p,
         None => return false,
     };
-    
+
     let proc = pt.table.get_mut(&pid).unwrap();
     if proc.pending_signals == 0 {
         return false;
     }
-    
 
     let mut sig = 0;
     for s in 1..32 {
@@ -139,38 +136,33 @@ pub fn check_signals(save_frame: &mut esp_hal::xtensa_lx_rt::exception::Context)
             break;
         }
     }
-    
+
     if sig == 0 {
         return false;
     }
-    
 
     proc.pending_signals &= !(1 << sig);
-    
+
     let handler = proc.signal_handlers[sig];
     let restorer = proc.signal_restorers[sig];
-    
-    if handler == 0 {
 
+    if handler == 0 {
         if sig == 9 || sig == 2 || sig == 15 {
             drop(pt);
             super::exit(-(sig as i32));
         }
         return false;
     }
-    
 
     if proc.saved_signal_context.is_some() {
         return false;
     }
-    
 
     proc.saved_signal_context = Some(*save_frame);
-    
 
     save_frame.PC = handler as u32;
     save_frame.A2 = sig as u32;
     save_frame.A0 = restorer as u32;
-    
+
     true
 }

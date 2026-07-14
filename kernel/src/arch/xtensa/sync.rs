@@ -12,7 +12,6 @@ pub struct SpinLock {
 }
 
 impl SpinLock {
-
     pub const fn new() -> Self {
         Self {
             locked: AtomicBool::new(false),
@@ -25,7 +24,6 @@ impl SpinLock {
             .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
             .is_err()
         {
-
             core::hint::spin_loop();
         }
     }
@@ -52,14 +50,12 @@ impl Default for SpinLock {
 }
 
 pub struct CriticalSection {
-
     prev_state: u32,
 
     _not_send: PhantomData<*const ()>,
 }
 
 impl CriticalSection {
-
     #[inline]
     pub fn enter() -> Self {
         let prev_state = interrupts::disable();
@@ -73,13 +69,11 @@ impl CriticalSection {
 impl Drop for CriticalSection {
     #[inline]
     fn drop(&mut self) {
-
         interrupts::restore(self.prev_state);
     }
 }
 
 pub struct Mutex<T: ?Sized> {
-
     lock: SpinLock,
 
     data: UnsafeCell<T>,
@@ -89,7 +83,6 @@ unsafe impl<T: ?Sized + Send> Send for Mutex<T> {}
 unsafe impl<T: ?Sized + Send> Sync for Mutex<T> {}
 
 impl<T> Mutex<T> {
-
     pub const fn new(value: T) -> Self {
         Self {
             lock: SpinLock::new(),
@@ -103,7 +96,6 @@ impl<T> Mutex<T> {
 }
 
 impl<T: ?Sized> Mutex<T> {
-
     pub fn lock(&self) -> MutexGuard<'_, T> {
         let irq_state = interrupts::disable();
         self.lock.lock();
@@ -114,8 +106,6 @@ impl<T: ?Sized> Mutex<T> {
         }
     }
 
-
-
     pub fn try_lock(&self) -> Option<MutexGuard<'_, T>> {
         let irq_state = interrupts::disable();
         if self.lock.try_lock() {
@@ -125,14 +115,12 @@ impl<T: ?Sized> Mutex<T> {
                 _not_send: PhantomData,
             })
         } else {
-
             interrupts::restore(irq_state);
             None
         }
     }
 
     pub fn get_mut(&mut self) -> &mut T {
-
         unsafe { &mut *self.data.get() }
     }
 }
@@ -147,22 +135,18 @@ pub struct MutexGuard<'a, T: ?Sized> {
 impl<T: ?Sized> Deref for MutexGuard<'_, T> {
     type Target = T;
     fn deref(&self) -> &T {
-
-
         unsafe { &*self.mutex.data.get() }
     }
 }
 
 impl<T: ?Sized> DerefMut for MutexGuard<'_, T> {
     fn deref_mut(&mut self) -> &mut T {
-
         unsafe { &mut *self.mutex.data.get() }
     }
 }
 
 impl<T: ?Sized> Drop for MutexGuard<'_, T> {
     fn drop(&mut self) {
-
         self.mutex.lock.unlock();
         interrupts::restore(self.irq_state);
     }

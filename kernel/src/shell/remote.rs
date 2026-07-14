@@ -8,7 +8,6 @@ use crate::prelude::*;
 use crate::scheduler;
 
 pub trait ShellIo {
-
     fn read_byte(&mut self) -> Option<u8>;
 
     fn write(&mut self, bytes: &[u8]) -> usize;
@@ -34,14 +33,11 @@ impl ShellIo for ConsoleIo {
 }
 
 struct Bridge {
-
     to_shell: VecDeque<u8>,
 
     from_shell: VecDeque<u8>,
 
     open: bool,
-
-
 
     exit_requested: bool,
 }
@@ -67,11 +63,6 @@ pub fn bridge_close() {
     }
 }
 
-
-
-
-
-
 pub fn bridge_request_exit() {
     let mut g = BRIDGE.lock();
     if let Some(b) = g.as_mut() {
@@ -81,7 +72,11 @@ pub fn bridge_request_exit() {
 }
 
 pub fn bridge_exit_requested() -> bool {
-    BRIDGE.lock().as_ref().map(|b| b.exit_requested).unwrap_or(false)
+    BRIDGE
+        .lock()
+        .as_ref()
+        .map(|b| b.exit_requested)
+        .unwrap_or(false)
 }
 
 pub fn bridge_clear_exit() {
@@ -151,7 +146,6 @@ pub fn command_output_to_ssh(bytes: &[u8]) -> usize {
 }
 
 pub struct SshChannelIo {
-
     pub channel_id: u32,
 }
 
@@ -177,7 +171,6 @@ impl ShellIo for SshChannelIo {
 }
 
 pub fn run_with_io(io: &mut dyn ShellIo) {
-
     io.write(super::banner_bytes());
 
     let mut line = String::new();
@@ -186,17 +179,11 @@ pub fn run_with_io(io: &mut dyn ShellIo) {
             break;
         }
 
-
-
-
         if io.is_ssh() {
             crate::shell::commands::set_base_ssh();
         } else {
             crate::shell::commands::set_base_console();
         }
-
-
-
 
         let cwd = crate::shell::commands::cwd_get();
         let display_cwd = if cwd == "/" { "~" } else { cwd.as_str() };
@@ -222,8 +209,6 @@ pub fn run_with_io(io: &mut dyn ShellIo) {
         if trimmed == "exit" || trimmed == "quit" || trimmed == "logout" {
             io.write(b"logout\r\n");
             if io.is_ssh() {
-
-
                 bridge_request_exit();
             }
             break;

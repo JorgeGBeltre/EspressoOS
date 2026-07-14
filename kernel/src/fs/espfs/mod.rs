@@ -1,28 +1,5 @@
 #![allow(dead_code)]
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 mod wire;
 
 use crate::arch::xtensa::sync::Mutex;
@@ -33,21 +10,13 @@ use alloc::collections::BTreeMap;
 
 use wire::*;
 
-
 const SEC: u32 = layout::FLASH_SECTOR_SIZE as u32;
-
 
 const ROOT_INO: u32 = 1;
 
-
 const MAX_NAME: usize = 255;
 
-
 const COMPACT_CHUNK: usize = 2048;
-
-
-
-
 
 #[derive(Clone, Copy)]
 struct Geom {
@@ -68,10 +37,6 @@ fn geometry() -> Geom {
         half_size,
     }
 }
-
-
-
-
 
 #[derive(Clone, Copy)]
 struct Extent {
@@ -110,10 +75,6 @@ fn zeroed(len: usize) -> Vec<u8> {
     v
 }
 
-
-
-
-
 struct FsState {
     geom: Geom,
     nodes: BTreeMap<u32, Node>,
@@ -146,8 +107,6 @@ impl FsState {
             super_slot,
         }
     }
-
-
 
     fn apply_mk(&mut self, kind: InodeKind, ino: u32, parent: u32, name: &str) {
         let body = match kind {
@@ -225,8 +184,6 @@ impl FsState {
         }
     }
 
-
-
     fn read_file(&self, ino: u32, off: u64, buf: &mut [u8]) -> KResult<usize> {
         let node = self.nodes.get(&ino).ok_or(KError::NotFound)?;
         let f = match &node.body {
@@ -259,8 +216,6 @@ impl FsState {
         }
         Ok(n)
     }
-
-
 
     fn create(&mut self, parent: u32, name: &str, kind: InodeKind) -> KResult<u32> {
         match self.nodes.get(&parent) {
@@ -382,8 +337,6 @@ impl FsState {
         }
     }
 
-
-
     fn half_end(&self, half: usize) -> u32 {
         self.geom.half_off[half] + self.geom.half_size
     }
@@ -404,19 +357,16 @@ impl FsState {
         Ok(off)
     }
 
-
     fn compact(&mut self) -> KResult<()> {
         let dst = 1 - self.active_half;
         let dbase = self.geom.half_off[dst];
         let dend = dbase + self.geom.half_size;
-
 
         let mut o = dbase;
         while o < dend {
             flash::erase_sector(o)?;
             o += SEC;
         }
-
 
         let plan = self.build_plan();
 
@@ -425,7 +375,6 @@ impl FsState {
         let mut new_ext: BTreeMap<u32, Vec<Extent>> = BTreeMap::new();
 
         for (ino, parent, name, kind) in &plan {
-
             let rtype = if *kind == InodeKind::Dir {
                 RecType::MkDir
             } else {
@@ -439,7 +388,6 @@ impl FsState {
             flash::write(cur, &rec)?;
             cur += rec.len() as u32;
             seq += 1;
-
 
             if *kind == InodeKind::File {
                 let size = self.nodes.get(ino).map(|n| n.size_of() as u32).unwrap_or(0);
@@ -470,7 +418,6 @@ impl FsState {
             }
         }
 
-
         for (ino, exts) in new_ext {
             if let Some(Node {
                 body: Body::File(f),
@@ -480,7 +427,6 @@ impl FsState {
                 f.extents = exts;
             }
         }
-
 
         let new_slot = 1 - self.super_slot;
         let new_gen = self.generation + 1;
@@ -493,7 +439,6 @@ impl FsState {
         self.super_slot = new_slot;
         Ok(())
     }
-
 
     fn build_plan(&self) -> Vec<(u32, u32, String, InodeKind)> {
         let mut plan = Vec::new();
@@ -529,7 +474,6 @@ impl FsState {
         flash::write(off, &enc)?;
         Ok(())
     }
-
 
     fn replay(&mut self, half: usize) -> KResult<()> {
         let base = self.geom.half_off[half];
@@ -631,7 +575,6 @@ impl FsState {
         Ok(())
     }
 
-
     fn load(geom: Geom) -> KResult<Option<FsState>> {
         let mut a = [0u8; SB_LEN];
         let mut b = [0u8; SB_LEN];
@@ -661,7 +604,6 @@ impl FsState {
         Ok(Some(st))
     }
 
-
     fn format(geom: Geom) -> KResult<FsState> {
         flash::erase_sector(geom.super_off[0])?;
         flash::erase_sector(geom.super_off[1])?;
@@ -679,7 +621,6 @@ impl FsState {
         Ok(FsState::empty(geom, 0, 1, 0))
     }
 }
-
 
 fn splice_extent(f: &mut FileData, off: u32, len: u32, flash_off: u32) {
     if len == 0 {
@@ -720,10 +661,6 @@ fn splice_extent(f: &mut FileData, off: u32, len: u32, flash_off: u32) {
         f.size = new_end;
     }
 }
-
-
-
-
 
 struct EspFsInner {
     state: Mutex<FsState>,
@@ -818,7 +755,6 @@ impl Inode for EspNode {
         self.inner.unlink(self.ino, name)
     }
     fn sync(&self) -> KResult<()> {
-
         Ok(())
     }
 }
@@ -828,7 +764,6 @@ pub struct EspFs {
 }
 
 impl EspFs {
-
     pub fn mount() -> KResult<Arc<EspFs>> {
         let geom = geometry();
         let st = match FsState::load(geom)? {
@@ -841,7 +776,6 @@ impl EspFs {
             }),
         }))
     }
-
 
     pub fn format_and_mount() -> KResult<Arc<EspFs>> {
         let geom = geometry();

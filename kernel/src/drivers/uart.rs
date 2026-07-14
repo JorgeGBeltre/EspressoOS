@@ -23,13 +23,11 @@ const TX_BUF_LEN: usize = 512;
 
 #[inline(always)]
 unsafe fn reg_read(addr: usize) -> u32 {
-
     core::ptr::read_volatile(addr as *const u32)
 }
 
 #[inline(always)]
 unsafe fn reg_write(addr: usize, val: u32) {
-
     core::ptr::write_volatile(addr as *mut u32, val)
 }
 
@@ -42,7 +40,12 @@ struct Ring {
 
 impl Ring {
     const fn new() -> Self {
-        Self { buf: [0; TX_BUF_LEN], head: 0, tail: 0, len: 0 }
+        Self {
+            buf: [0; TX_BUF_LEN],
+            head: 0,
+            tail: 0,
+            len: 0,
+        }
     }
 
     fn push(&mut self, b: u8) -> bool {
@@ -93,7 +96,6 @@ impl ConsoleInner {
         while let Some(b) = self.tx.peek() {
             let free = unsafe { reg_read(EP1_CONF_REG) } & CONF_IN_EP_DATA_FREE != 0;
             if !free {
-
                 guard = guard.wrapping_add(1);
                 if guard > MAX_SPIN {
                     break;
@@ -109,7 +111,6 @@ impl ConsoleInner {
         }
 
         if wrote_any {
-
             unsafe { reg_write(EP1_CONF_REG, CONF_WR_DONE) };
         }
     }
@@ -133,7 +134,10 @@ unsafe impl Sync for Console {}
 
 impl Console {
     const fn new() -> Self {
-        Self { lock: SpinLock::new(), inner: UnsafeCell::new(ConsoleInner::new()) }
+        Self {
+            lock: SpinLock::new(),
+            inner: UnsafeCell::new(ConsoleInner::new()),
+        }
     }
 
     fn with<R>(&self, f: impl FnOnce(&mut ConsoleInner) -> R) -> R {
@@ -155,9 +159,6 @@ pub fn init() -> KResult<()> {
 }
 
 pub fn write(buf: &[u8]) -> usize {
-
-
-
     match core::str::from_utf8(buf) {
         Ok(s) => esp_println::print!("{}", s),
         Err(_) => {
@@ -168,7 +169,6 @@ pub fn write(buf: &[u8]) -> usize {
     }
     buf.len()
 }
-
 
 #[inline]
 fn uart0_read_byte() -> Option<u8> {
@@ -181,8 +181,6 @@ fn uart0_read_byte() -> Option<u8> {
 }
 
 pub fn read(buf: &mut [u8]) -> usize {
-
-
     let mut n = 0usize;
     while n < buf.len() {
         match uart0_read_byte() {

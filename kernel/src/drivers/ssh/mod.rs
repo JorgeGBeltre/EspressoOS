@@ -35,7 +35,6 @@ const DISCONNECT_PROTOCOL_ERROR: u32 = 2;
 const DISCONNECT_BY_APPLICATION: u32 = 11;
 
 pub trait Transport {
-
     fn read(&mut self, buf: &mut [u8]) -> KResult<usize>;
 
     fn write(&mut self, buf: &[u8]) -> KResult<usize>;
@@ -59,7 +58,6 @@ pub struct HostKey {
 }
 
 impl HostKey {
-
     pub fn generate(rng: &mut HwRng) -> Self {
         let mut seed = [0u8; 32];
         rng.fill_bytes(&mut seed);
@@ -91,8 +89,7 @@ impl HostKey {
 }
 
 fn base64_nopad(data: &[u8]) -> String {
-    const ALPHABET: &[u8; 64] =
-        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::new();
     let mut chunks = data.chunks(3);
     for c in &mut chunks {
@@ -139,10 +136,6 @@ pub struct Connection {
     auth_fails: u32,
 
     channel: Option<Channel>,
-
-
-
-
 
     closing: bool,
     closing_deadline: u64,
@@ -227,10 +220,6 @@ impl Connection {
         if self.state == State::Session {
             self.pump_shell_output()?;
 
-
-
-
-
             if !self.closing && remote::bridge_exit_requested() && !remote::bridge_has_output() {
                 self.close_channel_from_shell()?;
                 remote::bridge_clear_exit();
@@ -286,7 +275,6 @@ impl Connection {
     }
 
     fn send_packet(&mut self, payload: &[u8]) -> KResult<()> {
-
         let pad_fill = (self.rng.next_u32() & 0xff) as u8;
 
         let framed = if self.out_encrypted {
@@ -370,7 +358,6 @@ impl Connection {
             if line.starts_with(b"SSH-") {
                 return Ok(Some(line));
             }
-
         }
     }
 
@@ -402,7 +389,6 @@ impl Connection {
         let mut r = Reader::new(client_kexinit);
         let _msg = r.get_u8()?;
         let _cookie = {
-
             for _ in 0..16 {
                 let _ = r.get_u8()?;
             }
@@ -437,7 +423,6 @@ impl Connection {
             }
             proto::SSH_MSG_IGNORE | proto::SSH_MSG_DEBUG => return Ok(()),
             proto::SSH_MSG_GLOBAL_REQUEST => {
-
                 let mut r = Reader::new(payload);
                 let _ = r.get_u8();
                 let _name = r.get_string();
@@ -478,7 +463,6 @@ impl Connection {
     }
 
     fn on_kex(&mut self, payload: &[u8], msg: u8, host: &HostKey) -> KResult<()> {
-
         if msg == proto::SSH_MSG_NEWKEYS {
             if self.awaiting_client_newkeys {
                 self.in_encrypted = true;
@@ -563,13 +547,11 @@ impl Connection {
 
     fn on_userauth(&mut self, payload: &[u8], msg: u8) -> KResult<()> {
         if msg != proto::SSH_MSG_USERAUTH_REQUEST {
-
             return Ok(());
         }
         let mut r = Reader::new(payload);
         let _ = r.get_u8()?;
-        let user_str = str::from_utf8(r.get_string()?)
-            .map_err(|_| KError::InvalidArgument)?;
+        let user_str = str::from_utf8(r.get_string()?).map_err(|_| KError::InvalidArgument)?;
         let user = String::from(user_str);
         let _service = r.get_string()?;
         let method = r.get_string()?;
@@ -597,7 +579,6 @@ impl Connection {
                 let algo = r.get_string()?;
                 let key_blob = r.get_string()?;
                 if !has_sig {
-
                     if auth::probe_publickey(&user, algo, key_blob) {
                         let mut w = Writer::new();
                         w.put_u8(SSH_MSG_USERAUTH_PK_OK)
@@ -667,9 +648,6 @@ impl Connection {
             }
             proto::SSH_MSG_CHANNEL_EOF => Ok(()),
             proto::SSH_MSG_CHANNEL_CLOSE => {
-
-
-
                 if !self.closing {
                     if let Some(ch) = self.channel.as_ref() {
                         let remote_id = ch.remote_id;
@@ -696,7 +674,6 @@ impl Connection {
         let peer_max_packet = r.get_u32()?;
 
         if ch_type != b"session" || self.channel.is_some() {
-
             let mut w = Writer::new();
             w.put_u8(proto::SSH_MSG_CHANNEL_OPEN_FAILURE)
                 .put_u32(remote_id)
@@ -780,7 +757,12 @@ impl Connection {
 
     fn pump_shell_output(&mut self) -> KResult<()> {
         let (remote_id, mut window, maxp, started) = match self.channel.as_ref() {
-            Some(ch) => (ch.remote_id, ch.send_window, ch.peer_max_packet, ch.shell_started),
+            Some(ch) => (
+                ch.remote_id,
+                ch.send_window,
+                ch.peer_max_packet,
+                ch.shell_started,
+            ),
             None => return Ok(()),
         };
         if !started {
@@ -813,9 +795,6 @@ impl Connection {
         Ok(())
     }
 
-
-
-
     fn close_channel_from_shell(&mut self) -> KResult<()> {
         if let Some(ch) = self.channel.as_ref() {
             let remote_id = ch.remote_id;
@@ -832,7 +811,6 @@ impl Connection {
     }
 
     fn disconnect(&mut self, reason: u32, desc: &str) -> KResult<()> {
-
         println!("[ssh] DISCONNECT (reason={}): {}", reason, desc);
         let mut w = Writer::new();
         w.put_u8(proto::SSH_MSG_DISCONNECT)

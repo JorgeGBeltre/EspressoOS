@@ -14,11 +14,9 @@ pub fn active_slot() -> Slot {
     partition::active_slot()
 }
 
-
 pub fn otadata_entries() -> KResult<[OtaSelectEntry; 2]> {
     partition::otadata_entries()
 }
-
 
 pub fn validate_header(image: &[u8]) -> KResult<()> {
     match image.first() {
@@ -36,7 +34,6 @@ pub fn set_boot_slot(slot: Slot) -> KResult<()> {
 }
 
 pub struct OtaUpdate {
-
     slot: Slot,
 
     base: u32,
@@ -51,7 +48,6 @@ pub struct OtaUpdate {
 }
 
 impl OtaUpdate {
-
     pub fn begin() -> KResult<OtaUpdate> {
         let slot = partition::active_slot().other();
         let (base, capacity) = slot.region();
@@ -134,26 +130,13 @@ pub fn apply_image(image: &[u8]) -> KResult<Slot> {
     Ok(slot)
 }
 
-
-
-
-
-
-
-
-
-
-
-
 const MAX_IMAGE: usize = layout::OTA0_SIZE as usize;
 
 static RX_IMAGE: Mutex<Option<Vec<u8>>> = Mutex::new(None);
 
-
 pub fn rx_begin() {
     *RX_IMAGE.lock() = Some(Vec::new());
 }
-
 
 pub fn rx_push(data: &[u8]) -> KResult<usize> {
     let mut g = RX_IMAGE.lock();
@@ -166,20 +149,13 @@ pub fn rx_push(data: &[u8]) -> KResult<usize> {
     Ok(buf.len())
 }
 
-
 pub fn rx_len() -> usize {
     RX_IMAGE.lock().as_ref().map(|b| b.len()).unwrap_or(0)
 }
 
-
 pub fn rx_clear() {
     *RX_IMAGE.lock() = None;
 }
-
-
-
-
-
 
 pub fn apply_buffered() -> KResult<Slot> {
     let image = RX_IMAGE.lock().take().ok_or(KError::NotFound)?;

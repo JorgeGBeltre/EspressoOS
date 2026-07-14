@@ -1,10 +1,10 @@
 #![allow(dead_code)]
 
-use crate::prelude::*;
 use crate::arch::xtensa::Mutex;
-use esp_hal::rtc_cntl::Rtc;
-use esp_hal::rtc_cntl::sleep::TimerWakeupSource;
+use crate::prelude::*;
 use core::time::Duration;
+use esp_hal::rtc_cntl::sleep::TimerWakeupSource;
+use esp_hal::rtc_cntl::Rtc;
 
 static RTC: Mutex<Option<Rtc<'static>>> = Mutex::new(None);
 
@@ -28,7 +28,10 @@ pub fn enter_light_sleep(seconds: u64) {
 }
 
 pub fn enter_deep_sleep(seconds: u64) -> ! {
-    esp_println::println!("[power] Entering Deep Sleep for {} seconds (reboot on wakeup)...", seconds);
+    esp_println::println!(
+        "[power] Entering Deep Sleep for {} seconds (reboot on wakeup)...",
+        seconds
+    );
     crate::arch::xtensa::interrupts::critical_section(|| {
         let mut guard = RTC.lock();
         if let Some(rtc) = guard.as_mut() {

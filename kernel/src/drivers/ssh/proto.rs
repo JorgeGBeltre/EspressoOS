@@ -89,7 +89,6 @@ impl Writer {
     }
 
     pub fn put_mpint_uint(&mut self, be_bytes: &[u8]) -> &mut Self {
-
         let mut start = 0;
         while start < be_bytes.len() && be_bytes[start] == 0 {
             start += 1;
@@ -152,7 +151,6 @@ impl<'a> Reader<'a> {
         }
         self.take(len)
     }
-
 
     pub fn get_name_list(&mut self) -> KResult<Vec<String>> {
         let s = self.get_string()?;

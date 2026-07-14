@@ -1,14 +1,5 @@
 #![allow(dead_code)]
 
-
-
-
-
-
-
-
-
-
 use crate::arch::xtensa::sync::Mutex;
 use crate::prelude::*;
 use crate::vfs::devfs::Device;
@@ -19,7 +10,6 @@ use esp_hal::peripheral::Peripheral;
 use esp_hal::peripherals::I2C0;
 use esp_hal::Blocking;
 
-
 pub const SCAN_FIRST: u8 = 0x08;
 
 pub const SCAN_LAST: u8 = 0x77;
@@ -27,10 +17,6 @@ pub const SCAN_LAST: u8 = 0x77;
 type I2cDriver = I2c<'static, Blocking>;
 
 static I2C_BUS: Mutex<Option<I2cDriver>> = Mutex::new(None);
-
-
-
-
 
 pub fn init<SDA, SCL>(i2c0: I2C0, sda: SDA, scl: SCL) -> KResult<()>
 where
@@ -48,7 +34,6 @@ where
     *guard = Some(i2c);
     Ok(())
 }
-
 
 pub fn is_ready() -> bool {
     I2C_BUS.lock().is_some()
@@ -75,8 +60,6 @@ pub fn write_read(addr: u8, wr: &[u8], rd: &mut [u8]) -> KResult<()> {
     i2c.write_read(addr, wr, rd).map_err(|_| KError::IoError)
 }
 
-
-
 pub fn probe(addr: u8) -> bool {
     let mut guard = I2C_BUS.lock();
     match guard.as_mut() {
@@ -84,7 +67,6 @@ pub fn probe(addr: u8) -> bool {
         None => false,
     }
 }
-
 
 pub struct I2c0Device;
 
@@ -98,14 +80,12 @@ impl Device for I2c0Device {
         Ok(buf.len())
     }
     fn ioctl(&self, cmd: u32, arg: usize) -> KResult<usize> {
-
         match cmd {
             0 => Ok(probe(arg as u8) as usize),
             _ => Err(KError::NotSupported),
         }
     }
 }
-
 
 pub fn devfs_device() -> Arc<dyn Device> {
     Arc::new(I2c0Device)

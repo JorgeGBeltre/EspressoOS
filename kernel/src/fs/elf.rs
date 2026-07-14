@@ -1,8 +1,8 @@
 #![allow(dead_code)]
 
+use crate::prelude::*;
 use alloc::vec;
 use core::mem::size_of;
-use crate::prelude::*;
 
 #[repr(C)]
 struct ElfHeader {
@@ -55,29 +55,26 @@ struct RelaEntry {
 }
 
 pub fn load_elf(path: &str) -> KResult<(u32, usize, *mut u8)> {
-
     let fd = crate::vfs::open(path, crate::vfs::OpenFlags::RDONLY)?;
-    
 
     let mut eh = unsafe { core::mem::zeroed::<ElfHeader>() };
-    let eh_slice = unsafe { core::slice::from_raw_parts_mut(&mut eh as *mut _ as *mut u8, size_of::<ElfHeader>()) };
+    let eh_slice = unsafe {
+        core::slice::from_raw_parts_mut(&mut eh as *mut _ as *mut u8, size_of::<ElfHeader>())
+    };
     if crate::vfs::read(fd, eh_slice)? != size_of::<ElfHeader>() {
         let _ = crate::vfs::close(fd);
         return Err(KError::Corrupt);
     }
-    
 
     if eh.e_ident[0..4] != [0x7f, b'E', b'L', b'F'] {
         let _ = crate::vfs::close(fd);
         return Err(KError::Corrupt);
     }
-    
 
     if eh.e_machine != 94 {
         let _ = crate::vfs::close(fd);
         return Err(KError::Corrupt);
     }
-    
 
     let ph_size = eh.e_phnum as usize * eh.e_phentsize as usize;
     let mut ph_bytes = vec![0u8; ph_size];
@@ -89,12 +86,16 @@ pub fn load_elf(path: &str) -> KResult<(u32, usize, *mut u8)> {
         let _ = crate::vfs::close(fd);
         return Err(KError::Corrupt);
     }
-    
 
     let mut min_vaddr = u32::MAX;
     let mut max_vaddr = 0;
-    
-    let phs = unsafe { core::slice::from_raw_parts(ph_bytes.as_ptr() as *const ProgramHeader, eh.e_phnum as usize) };
+
+    let phs = unsafe {
+        core::slice::from_raw_parts(
+            ph_bytes.as_ptr() as *const ProgramHeader,
+            eh.e_phnum as usize,
+        )
+    };
     for ph in phs {
         if ph.p_type == 1 {
             if ph.p_vaddr < min_vaddr {
@@ -106,14 +107,13 @@ pub fn load_elf(path: &str) -> KResult<(u32, usize, *mut u8)> {
             }
         }
     }
-    
+
     if min_vaddr == u32::MAX || max_vaddr == 0 {
         let _ = crate::vfs::close(fd);
         return Err(KError::Corrupt);
     }
-    
+
     let total_size = (max_vaddr - min_vaddr) as usize;
-    
 
     if eh.e_type == 3 {
         let layout = core::alloc::Layout::from_size_align(total_size, 4096)
@@ -123,38 +123,49 @@ pub fn load_elf(path: &str) -> KResult<(u32, usize, *mut u8)> {
             let _ = crate::vfs::close(fd);
             return Err(KError::NoMem);
         }
-        unsafe { core::ptr::write_bytes(load_addr, 0, total_size); }
+        unsafe {
+            core::ptr::write_bytes(load_addr, 0, total_size);
+        }
         let load_bias = load_addr as usize as i32 - min_vaddr as i32;
 
         for ph in phs {
             if ph.p_type == 1 {
                 if ph.p_filesz > ph.p_memsz {
-                    unsafe { alloc::alloc::dealloc(load_addr, layout); }
+                    unsafe {
+                        alloc::alloc::dealloc(load_addr, layout);
+                    }
                     let _ = crate::vfs::close(fd);
                     return Err(KError::Corrupt);
                 }
                 let dest_addr = (ph.p_vaddr as i32 + load_bias) as *mut u8;
-                if let Err(e) = crate::vfs::seek(fd, crate::vfs::SeekFrom::Start(ph.p_offset as u64)) {
-                    unsafe { alloc::alloc::dealloc(load_addr, layout); }
+                if let Err(e) =
+                    crate::vfs::seek(fd, crate::vfs::SeekFrom::Start(ph.p_offset as u64))
+                {
+                    unsafe {
+                        alloc::alloc::dealloc(load_addr, layout);
+                    }
                     let _ = crate::vfs::close(fd);
                     return Err(e);
                 }
-                let dest_slice = unsafe { core::slice::from_raw_parts_mut(dest_addr, ph.p_filesz as usize) };
+                let dest_slice =
+                    unsafe { core::slice::from_raw_parts_mut(dest_addr, ph.p_filesz as usize) };
                 if crate::vfs::read(fd, dest_slice)? != ph.p_filesz as usize {
-                    unsafe { alloc::alloc::dealloc(load_addr, layout); }
+                    unsafe {
+                        alloc::alloc::dealloc(load_addr, layout);
+                    }
                     let _ = crate::vfs::close(fd);
                     return Err(KError::Corrupt);
                 }
             }
         }
 
-
         for ph in phs {
             if ph.p_type == 2 {
                 let dyn_addr = (ph.p_vaddr as i32 + load_bias) as *const DynEntry;
                 let dyn_count = ph.p_memsz as usize / size_of::<DynEntry>();
                 let dyns = unsafe { core::slice::from_raw_parts(dyn_addr, dyn_count) };
-                let (mut rel_addr, mut rel_sz, mut rela_addr, mut rela_sz) = (0u32, 0u32, 0u32, 0u32);
+                let (mut rel_addr, mut rel_sz, mut rela_addr, mut rela_sz) =
+                    (0u32, 0u32, 0u32, 0u32);
                 for entry in dyns {
                     match entry.d_tag {
                         17 => rel_addr = entry.d_val,
@@ -175,7 +186,9 @@ pub fn load_elf(path: &str) -> KResult<(u32, usize, *mut u8)> {
                     for rel in rels {
                         if rel.r_info & 0xFF == 17 {
                             let ptr = (rel.r_offset as i32 + load_bias) as *mut u32;
-                            unsafe { *ptr = (*ptr).wrapping_add(load_bias as u32); }
+                            unsafe {
+                                *ptr = (*ptr).wrapping_add(load_bias as u32);
+                            }
                         }
                     }
                 }
@@ -189,7 +202,9 @@ pub fn load_elf(path: &str) -> KResult<(u32, usize, *mut u8)> {
                     for rela in relas {
                         if rela.r_info & 0xFF == 17 {
                             let ptr = (rela.r_offset as i32 + load_bias) as *mut u32;
-                            unsafe { *ptr = (rela.r_addend as i32 + load_bias) as u32; }
+                            unsafe {
+                                *ptr = (rela.r_addend as i32 + load_bias) as u32;
+                            }
                         }
                     }
                 }
@@ -200,11 +215,6 @@ pub fn load_elf(path: &str) -> KResult<(u32, usize, *mut u8)> {
         let entry = (eh.e_entry as i32 + load_bias) as u32;
         return Ok((entry, total_size, load_addr));
     }
-
-
-
-
-
 
     let dbase = crate::mm::psram_exec::user_data_base();
     if dbase == 0 {
@@ -230,7 +240,9 @@ pub fn load_elf(path: &str) -> KResult<(u32, usize, *mut u8)> {
             return Err(KError::PermissionDenied);
         };
         let dptr = dest as *mut u8;
-        unsafe { core::ptr::write_bytes(dptr, 0, ph.p_memsz as usize); }
+        unsafe {
+            core::ptr::write_bytes(dptr, 0, ph.p_memsz as usize);
+        }
         if let Err(e) = crate::vfs::seek(fd, crate::vfs::SeekFrom::Start(ph.p_offset as u64)) {
             let _ = crate::vfs::close(fd);
             return Err(e);
@@ -244,11 +256,8 @@ pub fn load_elf(path: &str) -> KResult<(u32, usize, *mut u8)> {
         }
     }
 
-
-
     crate::mm::psram_exec::sync_caches();
     let _ = crate::vfs::close(fd);
-
 
     Ok((eh.e_entry, total_size, core::ptr::null_mut()))
 }

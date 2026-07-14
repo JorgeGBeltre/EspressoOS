@@ -1,14 +1,3 @@
-
-
-
-
-
-
-
-
-
-
-
 use std::collections::HashSet;
 use std::env;
 use std::fs::{self, File};
@@ -35,13 +24,9 @@ fn main() {
     println!("cargo:rerun-if-changed=build.rs");
 
     let manifest = env::var("CARGO_MANIFEST_DIR").unwrap();
-    let uland = PathBuf::from(&manifest)
-        .parent()
-        .unwrap()
-        .join("userland");
+    let uland = PathBuf::from(&manifest).parent().unwrap().join("userland");
     let slots_dir = uland.join(".slots");
     fs::create_dir_all(&slots_dir).unwrap();
-
 
     let mut seen = HashSet::new();
     for &(_, slot) in APPS {
@@ -66,8 +51,6 @@ SECTIONS {{\n\
         fs::write(slots_dir.join(format!("user_s{slot}.x")), script).unwrap();
     }
 
-
-
     for &(name, slot) in APPS {
         let rustflags = format!(
             "-C link-arg=-nostartfiles -C force-frame-pointers -C link-arg=-L.slots -C link-arg=-Tuser_s{slot}.x"
@@ -84,7 +67,6 @@ SECTIONS {{\n\
             panic!("la compilación de userland '{name}' falló");
         }
     }
-
 
     let target = uland.join("target/xtensa-esp32s3-none-elf/release");
     let out_dir = env::var("OUT_DIR").unwrap();

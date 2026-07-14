@@ -6,7 +6,6 @@ pub type VfsError = KError;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum InodeKind {
-
     File,
 
     Dir,
@@ -18,7 +17,6 @@ pub enum InodeKind {
 
 #[derive(Clone, Debug)]
 pub struct DirEntry {
-
     pub name: String,
 
     pub kind: InodeKind,
@@ -27,7 +25,6 @@ pub struct DirEntry {
 }
 
 pub trait Inode: Send + Sync {
-
     fn kind(&self) -> InodeKind;
 
     fn size(&self) -> u64;
@@ -91,7 +88,6 @@ pub trait Inode: Send + Sync {
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct FsStat {
-
     pub total_bytes: u64,
 
     pub used_bytes: u64,
@@ -100,7 +96,6 @@ pub struct FsStat {
 }
 
 pub trait FileSystem: Send + Sync {
-
     fn name(&self) -> &str;
 
     fn root(&self) -> Arc<dyn Inode>;

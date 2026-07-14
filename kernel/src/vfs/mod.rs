@@ -1,7 +1,7 @@
 #![allow(dead_code)]
 
-use crate::prelude::*;
 use crate::arch::xtensa::sync::Mutex;
+use crate::prelude::*;
 
 pub mod devfs;
 pub mod file;
@@ -17,7 +17,6 @@ const MAX_OPEN_FILES: usize = 64;
 
 #[derive(Clone)]
 struct FdTable {
-
     entries: Vec<Option<OpenFile>>,
 }
 
@@ -85,8 +84,8 @@ impl FdTable {
     }
 }
 
-use alloc::collections::BTreeMap;
 use crate::scheduler::process::Pid;
+use alloc::collections::BTreeMap;
 
 static PROCESS_FD_TABLES: Mutex<BTreeMap<Pid, FdTable>> = Mutex::new(BTreeMap::new());
 
@@ -121,9 +120,7 @@ pub fn open(path: &str, flags: OpenFlags) -> KResult<Fd> {
         Err(e) => return Err(e),
     };
 
-    if inode.kind() == InodeKind::Dir
-        && flags.contains(OpenFlags::WRONLY)
-    {
+    if inode.kind() == InodeKind::Dir && flags.contains(OpenFlags::WRONLY) {
         return Err(KError::IsADirectory);
     }
 
@@ -211,11 +208,11 @@ pub fn create_pipe() -> KResult<(Fd, Fd)> {
     let (read_inode, write_inode) = pipe::create_pipe(4096);
     let read_file = OpenFile::new(read_inode, OpenFlags::RDONLY)?;
     let write_file = OpenFile::new(write_inode, OpenFlags::WRONLY)?;
-    
+
     let pid = crate::scheduler::process::get_current_pid().unwrap_or(0);
     let mut tables = PROCESS_FD_TABLES.lock();
     let table = tables.entry(pid).or_insert_with(FdTable::new_process_table);
-    
+
     let r_fd = table.insert(read_file)?;
     match table.insert(write_file) {
         Ok(w_fd) => Ok((r_fd, w_fd)),
@@ -256,20 +253,20 @@ pub fn dup2(oldfd: Fd, newfd: Fd) -> KResult<Fd> {
     let pid = crate::scheduler::process::get_current_pid().unwrap_or(0);
     let mut tables = PROCESS_FD_TABLES.lock();
     let table = tables.entry(pid).or_insert_with(FdTable::new_process_table);
-    
+
     let open_file = match table.entries.get(oldfd as usize) {
         Some(Some(f)) => f.clone(),
         _ => return Err(KError::BadFd),
     };
-    
+
     if oldfd == newfd {
         return Ok(newfd);
     }
-    
+
     while table.entries.len() <= newfd as usize {
         table.entries.push(None);
     }
-    
+
     table.entries[newfd as usize] = Some(open_file);
     Ok(newfd)
 }

@@ -1,29 +1,5 @@
 #![allow(dead_code)]
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 use crate::prelude::*;
 
 pub const REC_MAGIC: u16 = 0xE5F5;
@@ -32,10 +8,6 @@ pub const VERSION: u32 = 1;
 
 pub const HEADER_LEN: usize = 16;
 pub const SB_LEN: usize = 20;
-
-
-
-
 
 pub fn crc32_update(mut crc: u32, data: &[u8]) -> u32 {
     for &b in data {
@@ -60,10 +32,6 @@ pub fn crc32(data: &[u8]) -> u32 {
     crc32_final(crc32_update(crc32_init(), data))
 }
 
-
-
-
-
 #[inline]
 pub fn pad4(n: usize) -> usize {
     (n + 3) & !3
@@ -86,10 +54,6 @@ fn wr_u32(b: &mut [u8], o: usize, v: u32) {
     b[o + 2] = (v >> 16) as u8;
     b[o + 3] = (v >> 24) as u8;
 }
-
-
-
-
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum RecType {
@@ -116,7 +80,6 @@ impl RecType {
     }
 }
 
-
 #[derive(Clone, Copy, Debug)]
 pub struct Header {
     pub rtype: RecType,
@@ -125,12 +88,9 @@ pub struct Header {
     pub crc: u32,
 }
 
-
 pub fn record_total_len(plen: usize) -> usize {
     HEADER_LEN + pad4(plen)
 }
-
-
 
 pub fn build_header(rtype: RecType, seq: u32, payload: &[u8]) -> [u8; HEADER_LEN] {
     let mut h = [0u8; HEADER_LEN];
@@ -146,8 +106,6 @@ pub fn build_header(rtype: RecType, seq: u32, payload: &[u8]) -> [u8; HEADER_LEN
     h
 }
 
-
-
 pub fn encode_record(rtype: RecType, seq: u32, payload: &[u8]) -> Vec<u8> {
     let h = build_header(rtype, seq, payload);
     let total = record_total_len(payload.len());
@@ -157,8 +115,6 @@ pub fn encode_record(rtype: RecType, seq: u32, payload: &[u8]) -> Vec<u8> {
     out.resize(total, 0);
     out
 }
-
-
 
 pub fn parse_header(buf: &[u8]) -> Option<Header> {
     if buf.len() < HEADER_LEN {
@@ -176,17 +132,11 @@ pub fn parse_header(buf: &[u8]) -> Option<Header> {
     })
 }
 
-
 pub fn verify_crc(header16: &[u8], payload: &[u8], expected: u32) -> bool {
     let mut crc = crc32_update(crc32_init(), &header16[0..12]);
     crc = crc32_final(crc32_update(crc, payload));
     crc == expected
 }
-
-
-
-
-
 
 pub fn enc_mk(ino: u32, parent: u32, name: &[u8]) -> Vec<u8> {
     let mut v = Vec::with_capacity(8 + name.len());
@@ -203,7 +153,6 @@ pub fn dec_mk(p: &[u8]) -> Option<(u32, u32, &[u8])> {
     Some((rd_u32(p, 0), rd_u32(p, 4), &p[8..]))
 }
 
-
 pub fn enc_write(ino: u32, offset: u32, data: &[u8]) -> Vec<u8> {
     let mut v = Vec::with_capacity(8 + data.len());
     v.extend_from_slice(&ino.to_le_bytes());
@@ -212,7 +161,6 @@ pub fn enc_write(ino: u32, offset: u32, data: &[u8]) -> Vec<u8> {
     v
 }
 
-
 pub fn dec_write_head(p8: &[u8]) -> Option<(u32, u32)> {
     if p8.len() < 8 {
         return None;
@@ -220,9 +168,7 @@ pub fn dec_write_head(p8: &[u8]) -> Option<(u32, u32)> {
     Some((rd_u32(p8, 0), rd_u32(p8, 4)))
 }
 
-
 pub const WRITE_DATA_OFF: usize = 8;
-
 
 pub fn enc_trunc(ino: u32, len: u32) -> Vec<u8> {
     let mut v = Vec::with_capacity(8);
@@ -238,7 +184,6 @@ pub fn dec_trunc(p: &[u8]) -> Option<(u32, u32)> {
     Some((rd_u32(p, 0), rd_u32(p, 4)))
 }
 
-
 pub fn enc_unlink(parent: u32, name: &[u8]) -> Vec<u8> {
     let mut v = Vec::with_capacity(4 + name.len());
     v.extend_from_slice(&parent.to_le_bytes());
@@ -252,10 +197,6 @@ pub fn dec_unlink(p: &[u8]) -> Option<(u32, &[u8])> {
     }
     Some((rd_u32(p, 0), &p[4..]))
 }
-
-
-
-
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SuperBlock {

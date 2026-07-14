@@ -1,13 +1,5 @@
 #![allow(dead_code)]
 
-
-
-
-
-
-
-
-
 use crate::arch::xtensa::sync::Mutex;
 use crate::prelude::*;
 use crate::vfs::devfs::Device;
@@ -23,15 +15,11 @@ use embedded_hal::spi::SpiBus;
 
 const SPI_FREQ_HZ: u32 = 10_000_000;
 
-
 const SCRATCH: usize = 64;
 
 type SpiDriver = Spi<'static, Blocking>;
 
 static SPI_BUS: Mutex<Option<SpiDriver>> = Mutex::new(None);
-
-
-
 
 pub fn init<SCK, MOSI, MISO>(spi2: SPI2, sck: SCK, mosi: MOSI, miso: MISO) -> KResult<()>
 where
@@ -57,12 +45,9 @@ where
     Ok(())
 }
 
-
 pub fn is_ready() -> bool {
     SPI_BUS.lock().is_some()
 }
-
-
 
 pub fn transfer(tx: &[u8], rx: &mut [u8]) -> KResult<()> {
     let mut guard = SPI_BUS.lock();
@@ -72,20 +57,17 @@ pub fn transfer(tx: &[u8], rx: &mut [u8]) -> KResult<()> {
     SpiBus::transfer(spi, rx, tx).map_err(|_| KError::IoError)
 }
 
-
 pub fn write_bytes(tx: &[u8]) -> KResult<()> {
     let mut guard = SPI_BUS.lock();
     let spi = guard.as_mut().ok_or(KError::IoError)?;
     SpiBus::write(spi, tx).map_err(|_| KError::IoError)
 }
 
-
 pub fn read_bytes(rx: &mut [u8]) -> KResult<()> {
     let mut guard = SPI_BUS.lock();
     let spi = guard.as_mut().ok_or(KError::IoError)?;
     SpiBus::read(spi, rx).map_err(|_| KError::IoError)
 }
-
 
 pub struct Spi0Device;
 
@@ -99,7 +81,6 @@ impl Device for Spi0Device {
         Ok(buf.len())
     }
 }
-
 
 pub fn devfs_device() -> Arc<dyn Device> {
     Arc::new(Spi0Device)

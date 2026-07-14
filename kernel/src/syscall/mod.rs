@@ -9,17 +9,7 @@ mod trap;
 pub use handler::dispatch;
 pub use table::Syscall;
 
-
 pub const MAX_ARGS: usize = 6;
-
-
-
-
-
-
-
-
-
 
 #[cfg(not(feature = "syscall-trap"))]
 #[inline]

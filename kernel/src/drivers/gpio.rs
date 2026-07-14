@@ -35,13 +35,11 @@ static OUTPUT_MASK_HI: AtomicU32 = AtomicU32::new(0);
 
 #[inline(always)]
 unsafe fn reg_read(addr: usize) -> u32 {
-
     core::ptr::read_volatile(addr as *const u32)
 }
 
 #[inline(always)]
 unsafe fn reg_write(addr: usize, val: u32) {
-
     core::ptr::write_volatile(addr as *mut u32, val)
 }
 
@@ -81,10 +79,18 @@ fn mark_output(pin: u8, is_out: bool) {
 
 fn set_enable(pin: u8, enable: bool) {
     if pin < 32 {
-        let reg = if enable { GPIO_ENABLE_W1TS } else { GPIO_ENABLE_W1TC };
+        let reg = if enable {
+            GPIO_ENABLE_W1TS
+        } else {
+            GPIO_ENABLE_W1TC
+        };
         unsafe { reg_write(reg, 1u32 << pin) };
     } else {
-        let reg = if enable { GPIO_ENABLE1_W1TS } else { GPIO_ENABLE1_W1TC };
+        let reg = if enable {
+            GPIO_ENABLE1_W1TS
+        } else {
+            GPIO_ENABLE1_W1TC
+        };
         unsafe { reg_write(reg, 1u32 << (pin - 32)) };
     }
 }
@@ -111,16 +117,17 @@ pub fn configure(pin: u8, mode: PinMode) -> KResult<()> {
     check_pin(pin)?;
     match mode {
         PinMode::Output => {
-
             unsafe {
-                reg_write(GPIO_FUNC_OUT_SEL_BASE + (pin as usize) * 4, SIG_GPIO_OUT_IDX)
+                reg_write(
+                    GPIO_FUNC_OUT_SEL_BASE + (pin as usize) * 4,
+                    SIG_GPIO_OUT_IDX,
+                )
             };
 
             set_enable(pin, true);
             mark_output(pin, true);
         }
         PinMode::Input => {
-
             set_enable(pin, false);
             mark_output(pin, false);
         }

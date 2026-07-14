@@ -5,9 +5,7 @@ use core::arch::asm;
 const CRITICAL_INTLEVEL: u32 = 15;
 
 pub fn init() {
-
     let _vecbase_actual = read_vecbase();
-
 }
 
 extern "C" {
@@ -16,11 +14,11 @@ extern "C" {
 
 #[no_mangle]
 #[link_section = ".rwtext"]
-unsafe extern "C" fn __level_1_interrupt(level: u32, save_frame: &mut esp_hal::xtensa_lx_rt::exception::Context) {
+unsafe extern "C" fn __level_1_interrupt(
+    level: u32,
+    save_frame: &mut esp_hal::xtensa_lx_rt::exception::Context,
+) {
     handle_interrupts(level, save_frame);
-
-
-
 
     if crate::scheduler::need_resched() {
         crate::scheduler::preempt_switch(save_frame);

@@ -25,18 +25,15 @@ pub fn set_tick_handler(handler: fn()) {
 fn invoke_tick_handler() {
     let ptr = TICK_HANDLER.load(Ordering::SeqCst);
     if ptr != 0 {
-
         let f: fn() = unsafe { core::mem::transmute::<usize, fn()>(ptr) };
         f();
     } else {
-
         crate::scheduler::tick();
     }
 }
 
 #[handler]
 fn systimer_tick_isr() {
-
     if let Some(t) = PERIODIC.lock().as_mut() {
         t.clear_interrupt();
     }
@@ -45,7 +42,6 @@ fn systimer_tick_isr() {
 }
 
 pub fn init() {
-
     if PERIODIC.lock().is_some() {
         return;
     }
@@ -69,12 +65,10 @@ pub fn init() {
             t.enable_interrupt(true);
         }
     }
-
 }
 
 pub static SYSTEM_TIME_OFFSET_US: Mutex<u64> = Mutex::new(0);
 
 pub fn uptime_ms() -> u64 {
-
     esp_hal::time::now().duration_since_epoch().to_millis()
 }

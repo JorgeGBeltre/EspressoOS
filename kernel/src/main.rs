@@ -1,6 +1,5 @@
 #![no_std]
 #![no_main]
-
 #![feature(asm_experimental_arch)]
 #![allow(dead_code, unused_imports, unused_variables)]
 
@@ -18,8 +17,6 @@ mod syscall;
 mod vfs;
 
 mod wifi_credentials;
-
-
 
 mod userland_bin {
     include!(concat!(env!("OUT_DIR"), "/userland_bin.rs"));
@@ -42,12 +39,10 @@ const NET_STACK_SIZE: usize = 16 * 1024;
 
 #[main]
 fn main() -> ! {
-
     let peripherals = esp_hal::init(
         esp_hal::Config::default()
             .with_cpu_clock(CpuClock::max())
             .with_psram(esp_hal::psram::PsramConfig {
-
                 size: esp_hal::psram::PsramSize::Size(8 * 1024 * 1024),
                 ..Default::default()
             }),
@@ -55,16 +50,9 @@ fn main() -> ! {
 
     let (psram_base, psram_len) = esp_hal::psram::psram_raw_parts(&peripherals.PSRAM);
 
-
     let user_psram_size = 1024 * 1024;
     let heap_psram_base = unsafe { psram_base.add(user_psram_size) };
     let heap_psram_len = psram_len - user_psram_size;
-
-
-
-
-
-
 
     mm::heap::add_psram(heap_psram_base, heap_psram_len);
     mm::heap::init();
@@ -74,9 +62,6 @@ fn main() -> ! {
         "[kernel] PSRAM added to heap: {} bytes @ {:p} (1MB reserved for Userland @ {:p})",
         heap_psram_len, heap_psram_base, psram_base
     );
-
-
-
 
     let user_pages = (user_psram_size / mm::psram_exec::MMU_PAGE_SIZE as usize) as u32;
     match mm::psram_exec::map_instruction(0, user_pages) {
@@ -88,7 +73,10 @@ fn main() -> ! {
             );
             let v = mm::psram_exec::selftest(psram_base as usize as u32);
             if v == 42 {
-                println!("[psram-exec] OK: code EXECUTED from PSRAM returned {} (expected 42)", v);
+                println!(
+                    "[psram-exec] OK: code EXECUTED from PSRAM returned {} (expected 42)",
+                    v
+                );
             } else {
                 println!("[psram-exec] FAILED: returned {} (expected 42)", v);
             }
@@ -122,18 +110,22 @@ fn main() -> ! {
         Err(e) => println!("[kernel] warning: devfs::init failed: {:?}", e),
     }
 
-
-
     match fs::EspFs::mount() {
         Ok(espfs) => match vfs::mount("/", espfs) {
             Ok(()) => println!("[kernel] / mounted on flash (espfs)"),
             Err(e) => {
-                println!("[kernel] warning: mount / (espfs) failed: {:?}; using ramfs", e);
+                println!(
+                    "[kernel] warning: mount / (espfs) failed: {:?}; using ramfs",
+                    e
+                );
                 let _ = vfs::mount("/", fs::ramfs::RamFs::new());
             }
         },
         Err(e) => {
-            println!("[kernel] warning: EspFs::mount failed: {:?}; using ramfs on /", e);
+            println!(
+                "[kernel] warning: EspFs::mount failed: {:?}; using ramfs on /",
+                e
+            );
             if let Err(e2) = vfs::mount("/", fs::ramfs::RamFs::new()) {
                 println!("[kernel] warning: mount / (ramfs) failed: {:?}", e2);
             }
@@ -149,11 +141,9 @@ fn main() -> ! {
         println!("[kernel] warning: mount /sys failed: {:?}", e);
     }
 
-
     install_userland();
 
     init_etc_files();
-
 
     if let Err(e) = drivers::i2c::init(peripherals.I2C0, peripherals.GPIO8, peripherals.GPIO9) {
         println!("[kernel] warning: i2c::init failed: {:?}", e);
@@ -169,13 +159,15 @@ fn main() -> ! {
 
     scheduler::init();
 
-
-
-
-
-
     println!("[kernel] starting interactive console (kernel shell) on UART0...");
-    match scheduler::spawn("shell", shell_task, 0, layout::DEFAULT_STACK_SIZE, PRIO_DEFAULT, false) {
+    match scheduler::spawn(
+        "shell",
+        shell_task,
+        0,
+        layout::DEFAULT_STACK_SIZE,
+        PRIO_DEFAULT,
+        false,
+    ) {
         Ok(tid) => println!("[kernel] task 'shell' created (tid={})", tid),
         Err(e) => println!("[kernel] ERROR: could not create shell: {:?}", e),
     }
@@ -199,14 +191,20 @@ fn main() -> ! {
         peripherals.WIFI,
         peripherals.BT,
     );
-    match scheduler::spawn("net", drivers::wifi::net_task, 0, NET_STACK_SIZE, PRIO_DEFAULT, false) {
+    match scheduler::spawn(
+        "net",
+        drivers::wifi::net_task,
+        0,
+        NET_STACK_SIZE,
+        PRIO_DEFAULT,
+        false,
+    ) {
         Ok(tid) => println!("[kernel] task 'net' created (tid={})", tid),
         Err(e) => println!("[kernel] warning: could not create net: {:?}", e),
     }
 
     let _ = arch::xtensa::interrupts::disable();
     arch::xtensa::timer::init();
-
 
     #[cfg(feature = "smp")]
     {
@@ -235,8 +233,6 @@ fn banner() {
 }
 
 fn shell_task(_arg: usize) {
-
-
     loop {
         shell::run();
         scheduler::yield_now();
@@ -244,16 +240,12 @@ fn shell_task(_arg: usize) {
 }
 
 fn heartbeat_task(_arg: usize) {
-
     let _ = drivers::gpio::configure(LED_GPIO, drivers::gpio::PinMode::Output);
 
     let mut encendido = false;
     loop {
         encendido = !encendido;
         let _ = drivers::gpio::write(LED_GPIO, encendido);
-
-
-
 
         sleep_ms(HEARTBEAT_MS);
     }
@@ -271,14 +263,12 @@ fn install_userland() {
         println!("[kernel] userland not embedded");
         return;
     }
-    
 
     let _ = vfs::mkdir("/bin");
 
     let mut n = 0u32;
     for (name, bytes) in userland_bin::USERLAND_BINARIES {
         let path = alloc::format!("/bin/{}", name);
-        
 
         let mut match_exists = false;
         let read_flags = vfs::OpenFlags(vfs::OpenFlags::RDONLY.0);
@@ -290,14 +280,13 @@ fn install_userland() {
             }
             let _ = vfs::close(fd);
         }
-        
+
         if match_exists {
             continue;
         }
-        
 
         let _ = vfs::unlink(&path);
-        
+
         let flags = vfs::OpenFlags(
             vfs::OpenFlags::WRONLY.0 | vfs::OpenFlags::CREATE.0 | vfs::OpenFlags::TRUNC.0,
         );
@@ -306,13 +295,20 @@ fn install_userland() {
                 let _ = vfs::write(fd, bytes);
                 let _ = vfs::close(fd);
                 n += 1;
-                println!("[kernel] Deployed /bin/{} ({} bytes) to EspFs", name, bytes.len());
+                println!(
+                    "[kernel] Deployed /bin/{} ({} bytes) to EspFs",
+                    name,
+                    bytes.len()
+                );
             }
             Err(e) => println!("[kernel] warning: install {} failed: {:?}", path, e),
         }
     }
     if n > 0 {
-        println!("[kernel] userland: {} binaries installed/updated in EspFs", n);
+        println!(
+            "[kernel] userland: {} binaries installed/updated in EspFs",
+            n
+        );
     } else {
         println!("[kernel] userland: all binaries are up to date in EspFs");
     }
@@ -320,19 +316,24 @@ fn install_userland() {
 
 fn init_etc_files() {
     let _ = vfs::mkdir("/etc");
-    
 
     if let Err(_) = vfs::mount::resolve("/etc/rc") {
-        if let Ok(fd) = vfs::open("/etc/rc", vfs::OpenFlags(vfs::OpenFlags::CREATE.0 | vfs::OpenFlags::WRONLY.0)) {
-            let rc_content = b"# EspressoOS Startup Script\n/bin/echo [rc] System started!\n/bin/ls\n";
+        if let Ok(fd) = vfs::open(
+            "/etc/rc",
+            vfs::OpenFlags(vfs::OpenFlags::CREATE.0 | vfs::OpenFlags::WRONLY.0),
+        ) {
+            let rc_content =
+                b"# EspressoOS Startup Script\n/bin/echo [rc] System started!\n/bin/ls\n";
             let _ = vfs::write(fd, rc_content);
             let _ = vfs::close(fd);
         }
     }
-    
 
     if let Err(_) = vfs::mount::resolve("/etc/passwd") {
-        if let Ok(fd) = vfs::open("/etc/passwd", vfs::OpenFlags(vfs::OpenFlags::CREATE.0 | vfs::OpenFlags::WRONLY.0)) {
+        if let Ok(fd) = vfs::open(
+            "/etc/passwd",
+            vfs::OpenFlags(vfs::OpenFlags::CREATE.0 | vfs::OpenFlags::WRONLY.0),
+        ) {
             let passwd_content = b"root:root\nguest:guest\n";
             let _ = vfs::write(fd, passwd_content);
             let _ = vfs::close(fd);

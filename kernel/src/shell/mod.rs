@@ -9,7 +9,7 @@ use crate::prelude::*;
 use crate::scheduler;
 use alloc::format;
 
-const PROMPT: &str = "esp32s3-os> ";
+const PROMPT: &str = "EspressoOS> ";
 
 const MAX_LINE: usize = 256;
 
@@ -18,7 +18,7 @@ pub fn run() {
 }
 
 pub(crate) fn banner_bytes() -> &'static [u8] {
-    b"\r\nesp32s3-os shell. Escribe 'help' para ver los comandos.\r\n"
+    b"\r\nEspressoOS shell. Escribe 'help' para ver los comandos.\r\n"
 }
 
 
@@ -34,7 +34,7 @@ pub(crate) fn execute_line(line: &str) {
 
 fn banner() {
     console_write(b"\r\n");
-    console_write(b"esp32s3-os shell. Escribe 'help' para ver los comandos.\r\n");
+    console_write(b"EspressoOS shell. Escribe 'help' para ver los comandos.\r\n");
 }
 
 fn read_line(buf: &mut String) {

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Genera la tabla de particiones binaria de esp32s3-os a partir de un CSV.
+"""Genera la tabla de particiones binaria de EspressoOS a partir de un CSV.
 
 Produce el formato de tabla de particiones de Espressif (entradas de 32 bytes
 con magic 0xAA50 + entrada MD5 final), compatible con la ROM del ESP32-S3 y con

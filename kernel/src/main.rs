@@ -243,7 +243,7 @@ fn main() -> ! {
 fn banner() {
     println!();
     println!("========================================");
-    println!("   esp32s3-os   ·   kernel");
+    println!("   EspressoOS   ·   kernel");
     println!("   Consola viva. Arrancando subsistemas.");
     println!("   Heap del kernel: {} bytes", mm::heap::size());
     println!("========================================");
@@ -258,18 +258,13 @@ fn heartbeat_task(_arg: usize) {
     let _ = drivers::gpio::configure(LED_GPIO, drivers::gpio::PinMode::Output);
 
     let mut encendido = false;
-    let mut tick: u64 = 0;
     loop {
         encendido = !encendido;
         let _ = drivers::gpio::write(LED_GPIO, encendido);
 
-        println!(
-            "[heartbeat] tick={} uptime={}ms led={}",
-            tick,
-            arch::xtensa::timer::uptime_ms(),
-            encendido as u8
-        );
-        tick = tick.wrapping_add(1);
+        // Sin traza por serial: el heartbeat inundaba la consola y corrompía la
+        // escritura interactiva en el shell. El parpadeo del LED sigue siendo la
+        // prueba visual de que la multitarea preemptiva está viva.
         sleep_ms(HEARTBEAT_MS);
     }
 }

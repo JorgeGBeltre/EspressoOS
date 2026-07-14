@@ -162,7 +162,15 @@ pub fn run_with_io(io: &mut dyn ShellIo) {
             break;
         }
 
-        let prompt = alloc::format!("esp32s3-os:{}> ", crate::shell::commands::cwd_get());
+        // Prompt estilo Unix: usuario@host:cwd$ . El directorio raíz se muestra
+        // como `~` (home), igual que bash.
+        let cwd = crate::shell::commands::cwd_get();
+        let display_cwd = if cwd == "/" { "~" } else { cwd.as_str() };
+        let prompt = alloc::format!(
+            "{}@EspressoOS:{}$ ",
+            crate::drivers::ssh::config::DEV_USER,
+            display_cwd,
+        );
         io.write(prompt.as_bytes());
         line.clear();
         if !read_line_io(io, &mut line) {

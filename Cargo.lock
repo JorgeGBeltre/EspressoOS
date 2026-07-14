@@ -823,7 +823,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "esp32s3-os-kernel"
+name = "espressoos-kernel"
 version = "0.1.0"
 dependencies = [
  "chacha20",

@@ -55,7 +55,7 @@ fn sys_dup2(args: &[usize]) -> isize {
     }
 }
 
-/// pipe(fds: *mut [i32;2]) — crea una tubería y devuelve [read_fd, write_fd].
+
 fn sys_pipe(args: &[usize]) -> isize {
     let out = match unsafe { user_slice_mut(arg(args, 0), 8) } {
         Ok(s) => s,
@@ -227,7 +227,7 @@ fn sys_spawn(args: &[usize]) -> isize {
     let entry_raw = arg(args, 2);
     
     if entry_raw == 0 {
-        // Carga y ejecución de un ELF de usuario
+
         match crate::fs::elf::load_elf(name) {
             Ok((entry_point, total_size, load_addr)) => {
                 let entry: fn(usize) = unsafe { core::mem::transmute(entry_point as usize) };
@@ -246,7 +246,7 @@ fn sys_spawn(args: &[usize]) -> isize {
             Err(e) => e.as_errno(),
         }
     } else {
-        // Creación de una tarea kernel regular
+
         let entry: fn(usize) = unsafe { core::mem::transmute::<usize, fn(usize)>(entry_raw) };
         let entry_arg = arg(args, 3);
         let mut stack_size = arg(args, 4);
@@ -269,7 +269,7 @@ fn sys_wait(args: &[usize]) -> isize {
     let status_ptr = arg(args, 0) as *mut i32;
     let current_tid = crate::scheduler::current();
 
-    // Localizar el PID del proceso llamante.
+
     let mut current_pid = None;
     {
         let pt = crate::scheduler::process::PROCESS_TABLE.lock();
@@ -285,13 +285,13 @@ fn sys_wait(args: &[usize]) -> isize {
         None => return KError::NotFound.as_errno(),
     };
 
-    // Una sola pasada, SIN bucle ni `yield_now()` (que sería un `syscall` anidado
-    // dentro de `__exception`):
-    //   - hijo zombie presente -> cosechar y devolver su pid.
-    //   - sin hijos            -> ECHILD (NotFound).
-    //   - hijos vivos sin morir -> bloquear y rebobinar el PC para RE-EJECUTAR la
-    //                              instrucción `syscall` cuando la tarea despierte.
-    let mut reaped: Option<(u32, i32, *mut u8, usize)> = None; // (pid, code, addr, size)
+
+
+
+
+
+
+    let mut reaped: Option<(u32, i32, *mut u8, usize)> = None;
     {
         let mut pt = crate::scheduler::process::PROCESS_TABLE.lock();
 
@@ -342,8 +342,8 @@ fn sys_wait(args: &[usize]) -> isize {
                 *status_ptr = code;
             }
         }
-        // Los ELF cargados en PSRAM ejecutable (Ruta B) traen load_addr nulo: no se
-        // liberan aquí. Sólo liberamos los cargados en heap (PIC).
+
+
         if !load_addr.is_null() && size > 0 && load_addr != 0x3c000000 as *mut u8 {
             let layout = core::alloc::Layout::from_size_align(size, 4096).unwrap();
             unsafe {
@@ -354,12 +354,12 @@ fn sys_wait(args: &[usize]) -> isize {
         return child_pid as isize;
     }
 
-    // Hay hijos vivos pero ninguno ha terminado: bloquear la tarea y pedir que la
-    // `syscall` se re-ejecute al reanudar (bandera `restart_syscall`). El epílogo
-    // del trap, al verla, no avanza el PC ni sobreescribe A2 -> la instrucción
-    // `syscall` queda intacta. Cuando el `exit` del hijo haga `unblock_task` y la
-    // tarea vuelva a planificarse, re-ejecuta la llamada y re-entra aquí,
-    // encontrando ya el zombie. Sin `yield_now()` (sería un `syscall` anidado).
+
+
+
+
+
+
     crate::scheduler::block_current_noswitch();
     crate::scheduler::set_restart_syscall();
     0
@@ -508,7 +508,7 @@ fn sys_kill(args: &[usize]) -> isize {
     if let Some(proc) = pt.table.get_mut(&pid) {
         proc.pending_signals |= 1 << sig;
         
-        // Despertar la tarea si estaba bloqueada
+
         crate::scheduler::unblock_task(proc.main_task);
         crate::scheduler::set_need_resched();
         

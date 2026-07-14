@@ -55,10 +55,10 @@ struct RelaEntry {
 }
 
 pub fn load_elf(path: &str) -> KResult<(u32, usize, *mut u8)> {
-    // 1. Abrir el archivo
+
     let fd = crate::vfs::open(path, crate::vfs::OpenFlags::RDONLY)?;
     
-    // 2. Leer cabecera ELF
+
     let mut eh = unsafe { core::mem::zeroed::<ElfHeader>() };
     let eh_slice = unsafe { core::slice::from_raw_parts_mut(&mut eh as *mut _ as *mut u8, size_of::<ElfHeader>()) };
     if crate::vfs::read(fd, eh_slice)? != size_of::<ElfHeader>() {
@@ -66,19 +66,19 @@ pub fn load_elf(path: &str) -> KResult<(u32, usize, *mut u8)> {
         return Err(KError::Corrupt);
     }
     
-    // Validar firma ELF
+
     if eh.e_ident[0..4] != [0x7f, b'E', b'L', b'F'] {
         let _ = crate::vfs::close(fd);
         return Err(KError::Corrupt);
     }
     
-    // Validar arquitectura Xtensa (94)
+
     if eh.e_machine != 94 {
         let _ = crate::vfs::close(fd);
         return Err(KError::Corrupt);
     }
     
-    // 3. Leer cabeceras de programa
+
     let ph_size = eh.e_phnum as usize * eh.e_phentsize as usize;
     let mut ph_bytes = vec![0u8; ph_size];
     if let Err(e) = crate::vfs::seek(fd, crate::vfs::SeekFrom::Start(eh.e_phoff as u64)) {
@@ -90,13 +90,13 @@ pub fn load_elf(path: &str) -> KResult<(u32, usize, *mut u8)> {
         return Err(KError::Corrupt);
     }
     
-    // 4. Calcular rango virtual total de los segmentos PT_LOAD
+
     let mut min_vaddr = u32::MAX;
     let mut max_vaddr = 0;
     
     let phs = unsafe { core::slice::from_raw_parts(ph_bytes.as_ptr() as *const ProgramHeader, eh.e_phnum as usize) };
     for ph in phs {
-        if ph.p_type == 1 { // PT_LOAD
+        if ph.p_type == 1 {
             if ph.p_vaddr < min_vaddr {
                 min_vaddr = ph.p_vaddr;
             }
@@ -114,7 +114,7 @@ pub fn load_elf(path: &str) -> KResult<(u32, usize, *mut u8)> {
     
     let total_size = (max_vaddr - min_vaddr) as usize;
     
-    // 5. Modo PIC (ET_DYN): carga reubicable al heap con relocalizaciones.
+
     if eh.e_type == 3 {
         let layout = core::alloc::Layout::from_size_align(total_size, 4096)
             .map_err(|_| KError::InvalidArgument)?;
@@ -148,7 +148,7 @@ pub fn load_elf(path: &str) -> KResult<(u32, usize, *mut u8)> {
             }
         }
 
-        // Relocalizaciones R_XTENSA_RELATIVE (PT_DYNAMIC).
+
         for ph in phs {
             if ph.p_type == 2 {
                 let dyn_addr = (ph.p_vaddr as i32 + load_bias) as *const DynEntry;
@@ -201,11 +201,11 @@ pub fn load_elf(path: &str) -> KResult<(u32, usize, *mut u8)> {
         return Ok((entry, total_size, load_addr));
     }
 
-    // 6. Modo estático (ET_EXEC): split Harvard en la PSRAM de userland (Ruta B).
-    //    - .text (bus de instrucciones 0x428xxxxx) -> se ESCRIBE a su alias de datos
-    //      (para poder fetch-earlo luego por el bus de instrucciones).
-    //    - .data/.rodata/.bss (bus de datos 0x3c1xxxxx) -> directo.
-    //    Usan páginas físicas distintas, así que no se solapan.
+
+
+
+
+
     let dbase = crate::mm::psram_exec::user_data_base();
     if dbase == 0 {
         let _ = crate::vfs::close(fd);
@@ -244,11 +244,11 @@ pub fn load_elf(path: &str) -> KResult<(u32, usize, *mut u8)> {
         }
     }
 
-    // El .text se escribió por el bus de datos: volcar DCache + invalidar ICache
-    // para que el fetch por el bus de instrucciones vea el código nuevo.
+
+
     crate::mm::psram_exec::sync_caches();
     let _ = crate::vfs::close(fd);
 
-    // load_addr = null: la PSRAM de userland es fija; el cleanup NO debe liberarla.
+
     Ok((eh.e_entry, total_size, core::ptr::null_mut()))
 }

@@ -66,7 +66,7 @@ impl Inode for SocketInode {
         
         let handle = *self.handle.lock();
         
-        // 1. Esperar a que el socket se conecte (estado Established)
+
         loop {
             let mut guard = crate::drivers::wifi::NET_SOCKETS.lock();
             if let Some(sockets) = guard.as_mut() {
@@ -82,21 +82,21 @@ impl Inode for SocketInode {
             crate::scheduler::yield_now();
         }
         
-        // 2. El socket actual se ha conectado.
-        // Creamos un NUEVO socket TCP en la tabla para que siga escuchando en el puerto local.
+
+
         let local_port = self.local_port.lock().ok_or(KError::InvalidArgument)?;
         
         let mut guard = crate::drivers::wifi::NET_SOCKETS.lock();
         let sockets = guard.as_mut().ok_or(KError::IoError)?;
         
-        // Crear el nuevo socket de escucha
+
         let rx_buf = smoltcp::socket::tcp::SocketBuffer::new(alloc::vec![0; 4096]);
         let tx_buf = smoltcp::socket::tcp::SocketBuffer::new(alloc::vec![0; 4096]);
         let mut new_sock = smoltcp::socket::tcp::Socket::new(rx_buf, tx_buf);
         new_sock.listen(local_port).map_err(|_| KError::IoError)?;
         let new_handle = sockets.add(new_sock);
         
-        // Intercambiar el handle del Inode de escucha actual por el nuevo handle
+
         let mut current_handle_guard = self.handle.lock();
         let connected_handle = *current_handle_guard;
         *current_handle_guard = new_handle;

@@ -19,9 +19,9 @@ extern "C" {
 unsafe extern "C" fn __level_1_interrupt(level: u32, save_frame: &mut esp_hal::xtensa_lx_rt::exception::Context) {
     handle_interrupts(level, save_frame);
 
-    // Conmutación de tarea por preempción del timer: preempt_switch MUTA
-    // *save_frame en sitio (copia el contexto de la siguiente tarea). Al retornar,
-    // el vector de xtensa-lx-rt restaura *save_frame -> siguiente tarea.
+
+
+
     if crate::scheduler::need_resched() {
         crate::scheduler::preempt_switch(save_frame);
     }

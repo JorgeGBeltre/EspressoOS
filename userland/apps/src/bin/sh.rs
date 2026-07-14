@@ -46,7 +46,7 @@ pub extern "C" fn main() -> i32 {
             }
 
             if let Some(pipe_idx) = cmd_str.find('|') {
-                // Comando con tubería
+
                 let left_cmd = cmd_str[..pipe_idx].trim();
                 let right_cmd = cmd_str[pipe_idx + 1..].trim();
                 
@@ -74,16 +74,16 @@ pub extern "C" fn main() -> i32 {
                     continue;
                 }
                 
-                // Ejecutar izquierdo (redireccionando su stdout a la escritura del pipe)
+
                 dup2(p[1], 1);
                 let pid1 = spawn(path1, 0, 0, 0, 0);
                 
-                // Ejecutar derecho (redireccionando su stdin a la lectura del pipe y restaurando stdout)
+
                 dup2(p[0], 0);
                 dup2(saved_stdout as i32, 1);
                 let pid2 = spawn(path2, 0, 0, 0, 0);
                 
-                // Restaurar stdin
+
                 dup2(saved_stdin as i32, 0);
                 
                 close(p[0]);
@@ -99,7 +99,7 @@ pub extern "C" fn main() -> i32 {
                     println!("Error spawning pipeline processes");
                 }
             } else {
-                // Comando simple
+
                 let mut path_buf = [0u8; 64];
                 let path = resolve_path(cmd_str, &mut path_buf);
                 if !path.is_empty() {

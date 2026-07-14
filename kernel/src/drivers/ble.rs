@@ -31,35 +31,35 @@ pub fn start_advertising() {
     
     use embedded_io::Write;
     
-    // 1. Configurar Parámetros de Publicidad (HCI LE Set Advertising Parameters)
+
     let params: [u8; 19] = [
-        0x01, // HCI Command Indicator
-        0x06, 0x20, // Opcode: 0x2006
-        0x0f, // Parameter Length: 15
-        0x00, 0x08, // Interval Min: 0x0800 (1.28s)
-        0x00, 0x08, // Interval Max: 0x0800
-        0x00, // Adv Type: Connectable Undirected
-        0x00, // Own Addr Type: Public
-        0x00, // Peer Addr Type: Public
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // Peer Addr
-        0x07, // Channel Map: All channels
-        0x00, // Filter Policy: Allow all
+        0x01,
+        0x06, 0x20,
+        0x0f,
+        0x00, 0x08,
+        0x00, 0x08,
+        0x00,
+        0x00,
+        0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x07,
+        0x00,
     ];
     let _ = conn.write(&params);
     
-    // 2. Configurar Datos de Publicidad (HCI LE Set Advertising Data)
+
     let mut data: [u8; 36] = [0; 36];
-    data[0] = 0x01; // HCI Command Indicator
-    data[1] = 0x08; data[2] = 0x20; // Opcode: 0x2008
-    data[3] = 32; // Parameter Length: 32 (1 + 31)
-    data[4] = 14; // Advertising Data Length (Flags: 3 bytes + Name: 11 bytes)
+    data[0] = 0x01;
+    data[1] = 0x08; data[2] = 0x20;
+    data[3] = 32;
+    data[4] = 14;
     
-    // AD Structure 1: Flags (Len: 2, Type: 0x01, Flags: 0x06)
+
     data[5] = 2;
     data[6] = 0x01;
     data[7] = 0x06;
     
-    // AD Structure 2: Complete Local Name (Len: 11, Type: 0x09, Name: "EspressoOS")
+
     data[8] = 11;
     data[9] = 0x09;
     let name = b"EspressoOS";
@@ -67,12 +67,12 @@ pub fn start_advertising() {
     
     let _ = conn.write(&data);
     
-    // 3. Habilitar Publicidad (HCI LE Set Advertising Enable)
+
     let enable: [u8; 5] = [
-        0x01, // HCI Command Indicator
-        0x0a, 0x20, // Opcode: 0x200a
-        0x01, // Parameter Length: 1
-        0x01, // Enable: 1
+        0x01,
+        0x0a, 0x20,
+        0x01,
+        0x01,
     ];
     let _ = conn.write(&enable);
     

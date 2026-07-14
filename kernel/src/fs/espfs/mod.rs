@@ -1,27 +1,27 @@
 #![allow(dead_code)]
 
-//! EspFs — sistema de archivos persistente *log-structured* sobre el flash NOR
-//! interno (Fase 4). Implementa los traits `vfs::inode::{FileSystem, Inode}`, por
-//! lo que se monta igual que `ramfs` pero sobrevive a reinicios.
-//!
-//! ## Diseño
-//! La región `fs` del flash ([`layout::FS_OFFSET`], [`layout::FS_SIZE`]) se divide en:
-//! - 2 sectores de **superbloque** (ping-pong para tolerancia a cortes).
-//! - 2 **mitades** de log de igual tamaño (A y B).
-//!
-//! El estado vive en RAM como un árbol de inodos; en flash sólo hay una secuencia
-//! append-only de registros (ver [`wire`]). Al montar se reproduce el log de la
-//! mitad activa. Cada operación de escritura añade un registro (durable al
-//! instante). Cuando la mitad activa se llena, se **compacta**: se reescribe el
-//! conjunto vivo en la otra mitad y se conmuta el superbloque; un corte durante la
-//! compactación deja intacta la generación anterior.
-//!
-//! ## Límites conocidos
-//! - Las escrituras a flash bloquean interrupciones (vía esp-storage). Hacerlas con
-//!   el WiFi activo (p. ej. `write` sobre SSH) puede perturbar la radio; validar en
-//!   hardware. La ruta por consola (UART) es segura.
-//! - La compactación es una sección crítica larga: pausa el planificador mientras
-//!   dura (rara: sólo tras ~4 MB de escrituras).
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 mod wire;
 
@@ -33,21 +33,21 @@ use alloc::collections::BTreeMap;
 
 use wire::*;
 
-/// Tamaño de sector del flash NOR.
+
 const SEC: u32 = layout::FLASH_SECTOR_SIZE as u32;
 
-/// Inodo raíz (siempre presente, implícito, no se registra en el log).
+
 const ROOT_INO: u32 = 1;
 
-/// Longitud máxima de nombre.
+
 const MAX_NAME: usize = 255;
 
-/// Tamaño de trozo al reescribir contenido durante la compactación.
+
 const COMPACT_CHUNK: usize = 2048;
 
-// ===========================================================================
-// Geometría.
-// ===========================================================================
+
+
+
 
 #[derive(Clone, Copy)]
 struct Geom {
@@ -69,9 +69,9 @@ fn geometry() -> Geom {
     }
 }
 
-// ===========================================================================
-// Índice en RAM.
-// ===========================================================================
+
+
+
 
 #[derive(Clone, Copy)]
 struct Extent {
@@ -110,9 +110,9 @@ fn zeroed(len: usize) -> Vec<u8> {
     v
 }
 
-// ===========================================================================
-// Estado del sistema de archivos (protegido por Mutex).
-// ===========================================================================
+
+
+
 
 struct FsState {
     geom: Geom,
@@ -147,7 +147,7 @@ impl FsState {
         }
     }
 
-    // --- Aplicación de registros (RAM), compartida por replay y ops en vivo ---
+
 
     fn apply_mk(&mut self, kind: InodeKind, ino: u32, parent: u32, name: &str) {
         let body = match kind {
@@ -225,7 +225,7 @@ impl FsState {
         }
     }
 
-    // --- Lectura de contenido ---
+
 
     fn read_file(&self, ino: u32, off: u64, buf: &mut [u8]) -> KResult<usize> {
         let node = self.nodes.get(&ino).ok_or(KError::NotFound)?;
@@ -260,7 +260,7 @@ impl FsState {
         Ok(n)
     }
 
-    // --- Operaciones en vivo (añaden registro y actualizan RAM) ---
+
 
     fn create(&mut self, parent: u32, name: &str, kind: InodeKind) -> KResult<u32> {
         match self.nodes.get(&parent) {
@@ -336,7 +336,7 @@ impl FsState {
             None => return Err(KError::NotFound),
         };
         let ci = child.ok_or(KError::NotFound)?;
-        // No borrar directorios no vacíos.
+
         if let Some(Node {
             body: Body::Dir(sub),
             ..
@@ -382,7 +382,7 @@ impl FsState {
         }
     }
 
-    // --- Append + compactación ---
+
 
     fn half_end(&self, half: usize) -> u32 {
         self.geom.half_off[half] + self.geom.half_size
@@ -404,20 +404,20 @@ impl FsState {
         Ok(off)
     }
 
-    /// Reescribe el conjunto vivo en la otra mitad y conmuta el superbloque.
+
     fn compact(&mut self) -> KResult<()> {
         let dst = 1 - self.active_half;
         let dbase = self.geom.half_off[dst];
         let dend = dbase + self.geom.half_size;
 
-        // Borrar la mitad destino.
+
         let mut o = dbase;
         while o < dend {
             flash::erase_sector(o)?;
             o += SEC;
         }
 
-        // Recorrido en preorden desde la raíz: (ino, parent, name, kind).
+
         let plan = self.build_plan();
 
         let mut cur = dbase;
@@ -425,7 +425,7 @@ impl FsState {
         let mut new_ext: BTreeMap<u32, Vec<Extent>> = BTreeMap::new();
 
         for (ino, parent, name, kind) in &plan {
-            // Registro de creación.
+
             let rtype = if *kind == InodeKind::Dir {
                 RecType::MkDir
             } else {
@@ -440,7 +440,7 @@ impl FsState {
             cur += rec.len() as u32;
             seq += 1;
 
-            // Contenido de archivos (reescrito en trozos, coalescido).
+
             if *kind == InodeKind::File {
                 let size = self.nodes.get(ino).map(|n| n.size_of() as u32).unwrap_or(0);
                 let mut exts = Vec::new();
@@ -448,7 +448,7 @@ impl FsState {
                 while coff < size {
                     let clen = core::cmp::min(COMPACT_CHUNK as u32, size - coff);
                     let mut tmp = zeroed(clen as usize);
-                    // Leer desde las extensiones actuales (mitad origen intacta).
+
                     self.read_file(*ino, coff as u64, &mut tmp)?;
                     let payload = enc_write(*ino, coff, &tmp);
                     let rec = encode_record(RecType::Write, seq, &payload);
@@ -470,7 +470,7 @@ impl FsState {
             }
         }
 
-        // Aplicar las nuevas extensiones al índice.
+
         for (ino, exts) in new_ext {
             if let Some(Node {
                 body: Body::File(f),
@@ -481,7 +481,7 @@ impl FsState {
             }
         }
 
-        // Nuevo superbloque (durabilidad: se escribe DESPUÉS del log nuevo).
+
         let new_slot = 1 - self.super_slot;
         let new_gen = self.generation + 1;
         self.write_super(new_slot, new_gen, dst as u32)?;
@@ -494,7 +494,7 @@ impl FsState {
         Ok(())
     }
 
-    /// Lista (ino, parent, name, kind) en preorden desde la raíz (excluye la raíz).
+
     fn build_plan(&self) -> Vec<(u32, u32, String, InodeKind)> {
         let mut plan = Vec::new();
         let mut stack: Vec<u32> = alloc::vec![ROOT_INO];
@@ -530,7 +530,7 @@ impl FsState {
         Ok(())
     }
 
-    /// Reproduce el log de la mitad `half`, dejando `cursor` al final válido.
+
     fn replay(&mut self, half: usize) -> KResult<()> {
         let base = self.geom.half_off[half];
         let end = base + self.geom.half_size;
@@ -553,7 +553,7 @@ impl FsState {
                 break;
             }
             let payload_off = cur + HEADER_LEN as u32;
-            // Verificar CRC leyendo el payload en trozos (memoria acotada).
+
             let mut crc = crc32_update(crc32_init(), &hbuf[0..12]);
             let mut remaining = plen;
             let mut o = payload_off;
@@ -570,9 +570,9 @@ impl FsState {
                 remaining -= c;
             }
             if !crc_ok || crc32_final(crc) != h.crc {
-                break; // cola rota = fin del log
+                break;
             }
-            // Aplicar.
+
             match h.rtype {
                 RecType::Write => {
                     let mut p8 = [0u8; 8];
@@ -631,7 +631,7 @@ impl FsState {
         Ok(())
     }
 
-    /// Intenta cargar un FS existente. `Ok(None)` = sin superbloque válido (no formateado).
+
     fn load(geom: Geom) -> KResult<Option<FsState>> {
         let mut a = [0u8; SB_LEN];
         let mut b = [0u8; SB_LEN];
@@ -661,7 +661,7 @@ impl FsState {
         Ok(Some(st))
     }
 
-    /// Formatea la región y devuelve un FS vacío montado.
+
     fn format(geom: Geom) -> KResult<FsState> {
         flash::erase_sector(geom.super_off[0])?;
         flash::erase_sector(geom.super_off[1])?;
@@ -680,7 +680,7 @@ impl FsState {
     }
 }
 
-/// Inserta/solapa una extensión manteniendo la lista ordenada y sin solapes.
+
 fn splice_extent(f: &mut FileData, off: u32, len: u32, flash_off: u32) {
     if len == 0 {
         return;
@@ -721,9 +721,9 @@ fn splice_extent(f: &mut FileData, off: u32, len: u32, flash_off: u32) {
     }
 }
 
-// ===========================================================================
-// Envoltura compartida + inodos.
-// ===========================================================================
+
+
+
 
 struct EspFsInner {
     state: Mutex<FsState>,
@@ -818,7 +818,7 @@ impl Inode for EspNode {
         self.inner.unlink(self.ino, name)
     }
     fn sync(&self) -> KResult<()> {
-        // Cada escritura ya es durable (append al log). Nada que vaciar.
+
         Ok(())
     }
 }
@@ -828,7 +828,7 @@ pub struct EspFs {
 }
 
 impl EspFs {
-    /// Monta el FS existente; si la región no está formateada, la formatea.
+
     pub fn mount() -> KResult<Arc<EspFs>> {
         let geom = geometry();
         let st = match FsState::load(geom)? {
@@ -842,7 +842,7 @@ impl EspFs {
         }))
     }
 
-    /// Formatea la región y monta un FS vacío.
+
     pub fn format_and_mount() -> KResult<Arc<EspFs>> {
         let geom = geometry();
         let st = FsState::format(geom)?;

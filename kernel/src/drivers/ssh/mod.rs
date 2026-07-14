@@ -140,10 +140,10 @@ pub struct Connection {
 
     channel: Option<Channel>,
 
-    // Cierre iniciado por el shell (`exit`): tras enviar CHANNEL_EOF/CLOSE,
-    // esperamos el CHANNEL_CLOSE del cliente (o el `closing_deadline`) antes de
-    // cerrar el TCP, para un cierre ORDENADO (evita que el cliente reporte
-    // "closed by remote host").
+
+
+
+
     closing: bool,
     closing_deadline: u64,
 
@@ -226,11 +226,11 @@ impl Connection {
 
         if self.state == State::Session {
             self.pump_shell_output()?;
-            // El shell pidió `exit`: una vez drenada su última salida, enviamos
-            // CHANNEL_EOF/CLOSE. NO cerramos el TCP aquí: dejamos la sesión en
-            // `closing` y esperamos el CHANNEL_CLOSE del cliente (que llega en el
-            // bucle de paquetes de arriba y pone State::Closed) para un cierre
-            // ordenado.
+
+
+
+
+
             if !self.closing && remote::bridge_exit_requested() && !remote::bridge_has_output() {
                 self.close_channel_from_shell()?;
                 remote::bridge_clear_exit();
@@ -238,7 +238,7 @@ impl Connection {
                 self.closing_deadline =
                     crate::arch::xtensa::timer::uptime_ms().saturating_add(1500);
             }
-            // Salvaguarda: si el cliente no envía su CLOSE a tiempo, cerramos.
+
             if self.closing && crate::arch::xtensa::timer::uptime_ms() >= self.closing_deadline {
                 self.state = State::Closed;
             }
@@ -667,9 +667,9 @@ impl Connection {
             }
             proto::SSH_MSG_CHANNEL_EOF => Ok(()),
             proto::SSH_MSG_CHANNEL_CLOSE => {
-                // Si el cierre lo iniciamos NOSOTROS (shell `exit`, `closing`), este
-                // es el ACK del cliente: no reenviamos CLOSE, solo cerramos. Si lo
-                // inició el cliente, le devolvemos su CLOSE (medio-cierre estándar).
+
+
+
                 if !self.closing {
                     if let Some(ch) = self.channel.as_ref() {
                         let remote_id = ch.remote_id;
@@ -813,9 +813,9 @@ impl Connection {
         Ok(())
     }
 
-    /// Cierra el canal de sesión a petición del shell (`exit`): CHANNEL_EOF
-    /// seguido de CHANNEL_CLOSE hacia el cliente. Espeja el camino de cierre que
-    /// ya existe cuando el cliente envía CHANNEL_CLOSE.
+
+
+
     fn close_channel_from_shell(&mut self) -> KResult<()> {
         if let Some(ch) = self.channel.as_ref() {
             let remote_id = ch.remote_id;

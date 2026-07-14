@@ -155,9 +155,9 @@ pub fn init() -> KResult<()> {
 }
 
 pub fn write(buf: &[u8]) -> usize {
-    // Salida por el MISMO puerto que el kernel: esp-println → UART0 (CH343/COM5),
-    // NO por el USB-Serial-JTAG (que bloqueaba en drain_tx si nadie lo lee y
-    // mandaba la salida de userland a un puerto que no se monitoriza).
+
+
+
     match core::str::from_utf8(buf) {
         Ok(s) => esp_println::print!("{}", s),
         Err(_) => {
@@ -169,7 +169,7 @@ pub fn write(buf: &[u8]) -> usize {
     buf.len()
 }
 
-/// Lee un byte del RX FIFO de UART0 (CH343/COM5) si hay alguno disponible.
+
 #[inline]
 fn uart0_read_byte() -> Option<u8> {
     let uart = unsafe { &*esp_hal::peripherals::UART0::PTR };
@@ -181,8 +181,8 @@ fn uart0_read_byte() -> Option<u8> {
 }
 
 pub fn read(buf: &mut [u8]) -> usize {
-    // Entrada por UART0 (COM5), MISMO puerto que la salida (esp-println), NO por
-    // el USB-Serial-JTAG.
+
+
     let mut n = 0usize;
     while n < buf.len() {
         match uart0_read_byte() {

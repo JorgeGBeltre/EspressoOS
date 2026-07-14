@@ -114,8 +114,8 @@ impl<T: ?Sized> Mutex<T> {
         }
     }
 
-    /// Intento no bloqueante. `Some(guard)` si se adquirió; `None` si estaba
-    /// ocupado (en cuyo caso se restauran de inmediato las interrupciones).
+
+
     pub fn try_lock(&self) -> Option<MutexGuard<'_, T>> {
         let irq_state = interrupts::disable();
         if self.lock.try_lock() {
@@ -147,8 +147,8 @@ pub struct MutexGuard<'a, T: ?Sized> {
 impl<T: ?Sized> Deref for MutexGuard<'_, T> {
     type Target = T;
     fn deref(&self) -> &T {
-        // SAFETY: mientras el guard viva, el cerrojo está tomado, así que somos
-        // el único acceso vivo al dato.
+
+
         unsafe { &*self.mutex.data.get() }
     }
 }

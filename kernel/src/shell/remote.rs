@@ -41,8 +41,8 @@ struct Bridge {
 
     open: bool,
 
-    // El shell pidió salir (`exit`). El transporte SSH, tras drenar la salida
-    // pendiente, envía CHANNEL_EOF/CLOSE al cliente y cierra la sesión.
+
+
     exit_requested: bool,
 }
 
@@ -67,11 +67,11 @@ pub fn bridge_close() {
     }
 }
 
-/// El shell solicita salir (`exit`). Marca la bandera y cierra el bridge para
-/// que `run_with_io`/`ssh_shell_entry` no reinicien el shell; la salida ya
-/// encolada (p.ej. "logout") sigue drenándose porque `bridge_take_output` no
-/// mira `open`. El transporte SSH consulta `bridge_exit_requested()` para
-/// enviar el CHANNEL_CLOSE al cliente una vez drenada.
+
+
+
+
+
 pub fn bridge_request_exit() {
     let mut g = BRIDGE.lock();
     if let Some(b) = g.as_mut() {
@@ -186,18 +186,18 @@ pub fn run_with_io(io: &mut dyn ShellIo) {
             break;
         }
 
-        // Enruta la salida de los comandos al sink de ESTE shell. Como la consola
-        // local y una sesión SSH pueden coexistir, se fija en cada iteración (no una
-        // sola vez), para que cada comando escriba donde corresponde.
+
+
+
         if io.is_ssh() {
             crate::shell::commands::set_base_ssh();
         } else {
             crate::shell::commands::set_base_console();
         }
 
-        // Prompt estilo Unix, con el cwd (`/` se muestra como `~`, igual que bash).
-        // Por SSH incluye el usuario autenticado (`user@EspressoOS:~$`); en la
-        // consola local no hay login, así que se omite (`EspressoOS:~$`).
+
+
+
         let cwd = crate::shell::commands::cwd_get();
         let display_cwd = if cwd == "/" { "~" } else { cwd.as_str() };
         let prompt = if io.is_ssh() {
@@ -222,8 +222,8 @@ pub fn run_with_io(io: &mut dyn ShellIo) {
         if trimmed == "exit" || trimmed == "quit" || trimmed == "logout" {
             io.write(b"logout\r\n");
             if io.is_ssh() {
-                // Cierra la sesión SSH: el transporte drena esta última salida y
-                // envía CHANNEL_EOF/CLOSE al cliente.
+
+
                 bridge_request_exit();
             }
             break;

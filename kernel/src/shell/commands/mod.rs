@@ -302,7 +302,7 @@ fn cmd_wifi(args: &[&str]) -> i32 {
 
 fn cmd_ip(_args: &[&str]) -> i32 {
     use crate::drivers::wifi;
-    // `ip`, `ip a`, `ip addr`: muestra la dirección de wlan0.
+
     match wifi::current_ip() {
         Some(ip) => emit_line(&format!(
             "wlan0: {}.{}.{}.{}  ssid \"{}\"  state {:?}",
@@ -319,7 +319,7 @@ fn cmd_ip(_args: &[&str]) -> i32 {
 }
 
 fn cmd_sudo(args: &[&str]) -> i32 {
-    // EspressoOS no separa privilegios: `sudo CMD ...` simplemente ejecuta CMD.
+
     if args.is_empty() {
         eprint_line("sudo: usage: sudo COMMAND [ARGS...]");
         return 1;
@@ -328,7 +328,7 @@ fn cmd_sudo(args: &[&str]) -> i32 {
 }
 
 fn cmd_nmcli(args: &[&str]) -> i32 {
-    // Shim de compatibilidad con nmcli para las operaciones WiFi habituales.
+
     match args {
         ["device", "status"] | ["dev", "status"] | ["general", "status"] | ["g", "status"] => {
             cmd_wifi(&["status"])
@@ -623,9 +623,9 @@ fn cmd_write(args: &[&str]) -> i32 {
     }
 }
 
-// ============================================================================
-// Comandos de bus (Fase 3): i2c / spi.
-// ============================================================================
+
+
+
 
 fn parse_u8_hex(s: &str) -> Option<u8> {
     let t = s
@@ -766,9 +766,9 @@ fn cmd_spi(args: &[&str]) -> i32 {
     }
 }
 
-// ============================================================================
-// Comando OTA A/B (Fase 5): status / set.
-// ============================================================================
+
+
+
 
 fn slot_name(s: crate::ota::Slot) -> &'static str {
     match s {
@@ -875,9 +875,9 @@ fn cmd_ota(args: &[&str]) -> i32 {
     }
 }
 
-// ============================================================================
-// Ejercicio de la ABI de syscalls (Fase 6).
-// ============================================================================
+
+
+
 
 fn cmd_syscalltest() -> i32 {
     use crate::syscall::{invoke, Syscall};
@@ -888,7 +888,7 @@ fn cmd_syscalltest() -> i32 {
     let free = invoke(Syscall::Sbrk.number(), [0; 6]);
     emit_line(&format!("SYS_Sbrk(free) -> {} bytes", free));
 
-    // Open/Write/Close sobre /dev/console vía la ABI.
+
     let path = "/dev/console";
     let flags = OpenFlags::WRONLY.0 as usize;
     let fd = invoke(
@@ -921,9 +921,9 @@ fn cmd_syscalltest() -> i32 {
     0
 }
 
-// ============================================================================
-// Estado SMP (Fase 9).
-// ============================================================================
+
+
+
 
 fn cmd_smp() -> i32 {
     use crate::scheduler::core_sync;
@@ -943,9 +943,9 @@ fn cmd_smp() -> i32 {
     0
 }
 
-// ============================================================================
-// Protección de memoria PMS (Fase 8).
-// ============================================================================
+
+
+
 
 fn cmd_pms(args: &[&str]) -> i32 {
     if !cfg!(feature = "pms") {

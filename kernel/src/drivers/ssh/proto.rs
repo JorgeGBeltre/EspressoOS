@@ -153,7 +153,7 @@ impl<'a> Reader<'a> {
         self.take(len)
     }
 
-    /// `name-list` → Vec de nombres.
+
     pub fn get_name_list(&mut self) -> KResult<Vec<String>> {
         let s = self.get_string()?;
         let text = core::str::from_utf8(s).map_err(|_| KError::InvalidArgument)?;

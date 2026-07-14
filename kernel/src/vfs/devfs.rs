@@ -158,8 +158,8 @@ pub fn init() -> KResult<Arc<DevFs>> {
     register(&devfs, "null", Arc::new(NullDevice))?;
     register(&devfs, "zero", Arc::new(ZeroDevice))?;
     register(&devfs, "console", Arc::new(ConsoleDevice))?;
-    // Buses (Fase 3): los nodos existen aunque el bus no esté inicializado;
-    // las operaciones devuelven IoError hasta que `main` llame a `init`.
+
+
     register(&devfs, "i2c0", crate::drivers::i2c::devfs_device())?;
     register(&devfs, "spi0", crate::drivers::spi::devfs_device())?;
     Ok(devfs)

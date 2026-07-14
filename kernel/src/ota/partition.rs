@@ -255,7 +255,7 @@ fn write_otadata_copy(copy: usize, entry: &OtaSelectEntry) -> KResult<()> {
     flash::write(off, &entry.to_bytes())
 }
 
-/// Lee las dos copias de otadata (para inspección desde la shell).
+
 pub fn otadata_entries() -> KResult<[OtaSelectEntry; 2]> {
     read_otadata()
 }

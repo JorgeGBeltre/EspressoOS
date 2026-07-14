@@ -15,8 +15,8 @@ userland/dist/
 __pycache__/
 *.pyc
 
-# Credenciales WiFi (no versionar; usar el .example como plantilla)
-kernel/src/wifi_credentials.rs
+
+
 
 # IDE
 .idea/

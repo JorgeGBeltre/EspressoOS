@@ -458,7 +458,9 @@ pub fn net_task(_arg: usize) {
         }
         if !warned && uptime_ms() >= warn_at {
             warned = true;
-            println!("[net] no Wi-Fi yet; system is up. Join with: wifi connect \"SSID\" \"password\"");
+            println!(
+                "[net] no Wi-Fi yet; system is up. Join with: wifi connect \"SSID\" \"password\""
+            );
         }
         scheduler::yield_now();
     }
@@ -706,8 +708,8 @@ pub fn net_task(_arg: usize) {
                 let connected = matches!(controller.is_connected(), Ok(true));
                 // Chequeo frecuente (1s) mientras no hay enlace, para (re)conectar
                 // rápido; espaciado (LINK_CHECK_MS) cuando ya está asociado.
-                next_link_check = uptime_ms()
-                    .saturating_add(if connected { LINK_CHECK_MS } else { 1_000 });
+                next_link_check =
+                    uptime_ms().saturating_add(if connected { LINK_CHECK_MS } else { 1_000 });
                 if connected {
                     if !associated {
                         // El enlace acaba de subir: pedir un DHCP fresco.

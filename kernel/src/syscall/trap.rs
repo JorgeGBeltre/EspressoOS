@@ -39,19 +39,6 @@ unsafe extern "C" fn __exception(cause: ExceptionCause, save_frame: &mut Context
             save_frame.A7 as usize,
             save_frame.A8 as usize,
         ];
-        // DIAGNÓSTICO temporal: traza los primeros syscalls para localizar dónde
-        // llega el userland.
-        {
-            use core::sync::atomic::{AtomicU32, Ordering};
-            static N: AtomicU32 = AtomicU32::new(0);
-            let c = N.fetch_add(1, Ordering::Relaxed);
-            if c < 12 {
-                esp_println::println!(
-                    "[trap] #{} syscall num={} a3={:#x} a4={:#x} pc={:#x}",
-                    c, num, save_frame.A3, save_frame.A4, save_frame.PC
-                );
-            }
-        }
         let ret = crate::syscall::dispatch(num, &args, save_frame as *mut Context);
         save_frame.A2 = ret as u32;
         // Avanzar EPC más allá de `syscall` para no re-ejecutarla al volver.

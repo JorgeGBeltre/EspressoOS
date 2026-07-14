@@ -53,16 +53,21 @@ fn main() -> ! {
             }),
     );
 
-    mm::heap::init();
-
     let (psram_base, psram_len) = esp_hal::psram::psram_raw_parts(&peripherals.PSRAM);
-    
+
     // Reservar el primer 1 MB de PSRAM (0x3c000000) para binarios estáticos de usuario (userland)
     let user_psram_size = 1024 * 1024;
     let heap_psram_base = unsafe { psram_base.add(user_psram_size) };
     let heap_psram_len = psram_len - user_psram_size;
-    
+
+    // ORDEN IMPORTANTE: PSRAM al heap PRIMERO, RAM interna DESPUÉS. esp_alloc prueba
+    // las regiones en orden de alta y `GlobalAlloc::alloc` usa caps EMPTY (cualquier
+    // región), así que las asignaciones GENERALES (ramfs /bin ~140KB, tablas, etc.)
+    // van a PSRAM y la RAM interna (KERNEL_HEAP, 128KB) queda LIBRE para esp-wifi,
+    // que exige memoria `Internal` para la pila de su task de WiFi (si no la hay,
+    // su `malloc` devuelve NULL y crashea en task_create con StoreProhibited).
     mm::heap::add_psram(heap_psram_base, heap_psram_len);
+    mm::heap::init();
     // Base de datos de la región de userland (alias de escritura del .text).
     mm::psram_exec::set_data_base(psram_base as usize as u32);
     println!(
@@ -169,11 +174,6 @@ fn main() -> ! {
     let mut init_spawned = false;
     match crate::fs::elf::load_elf("/bin/init") {
         Ok((entry, size, addr)) => {
-            // DIAG: primeros bytes del .text de init (leídos por el alias de datos).
-            let tb = unsafe {
-                core::slice::from_raw_parts(mm::psram_exec::user_data_base() as *const u8, 12)
-            };
-            println!("[diag] init entry={:#x} .text[0..12]@datos={:02x?}", entry, tb);
             let entry_fn: fn(usize) = unsafe { core::mem::transmute(entry as usize) };
             match scheduler::spawn("/bin/init", entry_fn, 0, layout::DEFAULT_STACK_SIZE, PRIO_DEFAULT, true) {
                 Ok(tid) => {

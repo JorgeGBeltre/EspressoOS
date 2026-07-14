@@ -169,6 +169,11 @@ fn main() -> ! {
     let mut init_spawned = false;
     match crate::fs::elf::load_elf("/bin/init") {
         Ok((entry, size, addr)) => {
+            // DIAG: primeros bytes del .text de init (leídos por el alias de datos).
+            let tb = unsafe {
+                core::slice::from_raw_parts(mm::psram_exec::user_data_base() as *const u8, 12)
+            };
+            println!("[diag] init entry={:#x} .text[0..12]@datos={:02x?}", entry, tb);
             let entry_fn: fn(usize) = unsafe { core::mem::transmute(entry as usize) };
             match scheduler::spawn("/bin/init", entry_fn, 0, layout::DEFAULT_STACK_SIZE, PRIO_DEFAULT, true) {
                 Ok(tid) => {

@@ -268,7 +268,8 @@ fn sys_spawn(args: &[usize]) -> isize {
 fn sys_wait(args: &[usize]) -> isize {
     let status_ptr = arg(args, 0) as *mut i32;
     let current_tid = crate::scheduler::current();
-    
+
+    // Localizar el PID del proceso llamante.
     let mut current_pid = None;
     {
         let pt = crate::scheduler::process::PROCESS_TABLE.lock();
@@ -279,60 +280,89 @@ fn sys_wait(args: &[usize]) -> isize {
             }
         }
     }
-    
     let current_pid = match current_pid {
         Some(pid) => pid,
         None => return KError::NotFound.as_errno(),
     };
-    
-    loop {
+
+    // Una sola pasada, SIN bucle ni `yield_now()` (que sería un `syscall` anidado
+    // dentro de `__exception`):
+    //   - hijo zombie presente -> cosechar y devolver su pid.
+    //   - sin hijos            -> ECHILD (NotFound).
+    //   - hijos vivos sin morir -> bloquear y rebobinar el PC para RE-EJECUTAR la
+    //                              instrucción `syscall` cuando la tarea despierte.
+    let mut reaped: Option<(u32, i32, *mut u8, usize)> = None; // (pid, code, addr, size)
+    {
         let mut pt = crate::scheduler::process::PROCESS_TABLE.lock();
-        let current_proc = pt.table.get(&current_pid).unwrap();
-        
-        if current_proc.children.is_empty() {
-            return KError::NotFound.as_errno();
-        }
-        
-        let mut zombie_pid = None;
-        for &child_pid in &current_proc.children {
-            if let Some(child_proc) = pt.table.get(&child_pid) {
-                if child_proc.state == crate::scheduler::process::ProcessState::Zombie {
-                    zombie_pid = Some(child_pid);
-                    break;
-                }
-            }
-        }
-        
-        if let Some(child_pid) = zombie_pid {
-            let child_proc = pt.table.remove(&child_pid).unwrap();
-            let current_proc_mut = pt.table.get_mut(&current_pid).unwrap();
-            current_proc_mut.children.retain(|&x| x != child_pid);
-            
-            if !status_ptr.is_null() {
-                unsafe {
-                    *status_ptr = child_proc.exit_code;
-                }
-            }
-            
-            if !child_proc.elf_load_addr.is_null() && child_proc.elf_size > 0 {
-                if child_proc.elf_load_addr != 0x3c000000 as *mut u8 {
-                    let layout = core::alloc::Layout::from_size_align(child_proc.elf_size, 4096).unwrap();
-                    unsafe {
-                        alloc::alloc::dealloc(child_proc.elf_load_addr, layout);
+
+        let (children_empty, zombie_pid) = {
+            let current_proc = match pt.table.get(&current_pid) {
+                Some(p) => p,
+                None => return KError::NotFound.as_errno(),
+            };
+            if current_proc.children.is_empty() {
+                (true, None)
+            } else {
+                let mut z = None;
+                for &child_pid in &current_proc.children {
+                    if let Some(child_proc) = pt.table.get(&child_pid) {
+                        if child_proc.state
+                            == crate::scheduler::process::ProcessState::Zombie
+                        {
+                            z = Some(child_pid);
+                            break;
+                        }
                     }
                 }
+                (false, z)
             }
-            
-            crate::vfs::cleanup_process_fds(child_pid);
-            
-            return child_pid as isize;
+        };
+
+        if children_empty {
+            return KError::NotFound.as_errno();
         }
-        
-        crate::scheduler::block_current();
-        
-        drop(pt);
-        crate::scheduler::yield_now();
+
+        if let Some(child_pid) = zombie_pid {
+            let child_proc = pt.table.remove(&child_pid).unwrap();
+            if let Some(current_proc_mut) = pt.table.get_mut(&current_pid) {
+                current_proc_mut.children.retain(|&x| x != child_pid);
+            }
+            reaped = Some((
+                child_pid,
+                child_proc.exit_code,
+                child_proc.elf_load_addr,
+                child_proc.elf_size,
+            ));
+        }
     }
+
+    if let Some((child_pid, code, load_addr, size)) = reaped {
+        if !status_ptr.is_null() {
+            unsafe {
+                *status_ptr = code;
+            }
+        }
+        // Los ELF cargados en PSRAM ejecutable (Ruta B) traen load_addr nulo: no se
+        // liberan aquí. Sólo liberamos los cargados en heap (PIC).
+        if !load_addr.is_null() && size > 0 && load_addr != 0x3c000000 as *mut u8 {
+            let layout = core::alloc::Layout::from_size_align(size, 4096).unwrap();
+            unsafe {
+                alloc::alloc::dealloc(load_addr, layout);
+            }
+        }
+        crate::vfs::cleanup_process_fds(child_pid);
+        return child_pid as isize;
+    }
+
+    // Hay hijos vivos pero ninguno ha terminado: bloquear la tarea y pedir que la
+    // `syscall` se re-ejecute al reanudar (bandera `restart_syscall`). El epílogo
+    // del trap, al verla, no avanza el PC ni sobreescribe A2 -> la instrucción
+    // `syscall` queda intacta. Cuando el `exit` del hijo haga `unblock_task` y la
+    // tarea vuelva a planificarse, re-ejecuta la llamada y re-entra aquí,
+    // encontrando ya el zombie. Sin `yield_now()` (sería un `syscall` anidado).
+    crate::scheduler::block_current_noswitch();
+    crate::scheduler::set_restart_syscall();
+    0
 }
 
 fn sys_seek(args: &[usize]) -> isize {

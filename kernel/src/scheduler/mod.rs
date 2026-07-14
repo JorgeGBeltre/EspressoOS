@@ -81,6 +81,23 @@ use core::sync::atomic::{AtomicBool, Ordering};
 
 static NEED_RESCHED: [AtomicBool; 2] = [AtomicBool::new(false), AtomicBool::new(false)];
 
+/// Señala que el syscall en curso quiere **re-ejecutarse** al reanudar la tarea
+/// (semántica bloqueante, p.ej. `wait`). El epílogo del trap la consulta: si está
+/// puesta, NO avanza el PC ni sobreescribe `A2`, dejando la instrucción `syscall`
+/// intacta para que se vuelva a ejecutar cuando la tarea sea replanificada.
+static RESTART_SYSCALL: [AtomicBool; 2] = [AtomicBool::new(false), AtomicBool::new(false)];
+
+pub fn set_restart_syscall() {
+    let core = core_id();
+    RESTART_SYSCALL[core].store(true, Ordering::Relaxed);
+}
+
+/// Devuelve y limpia la bandera de reinicio del syscall para el núcleo actual.
+pub fn take_restart_syscall() -> bool {
+    let core = core_id();
+    RESTART_SYSCALL[core].swap(false, Ordering::Relaxed)
+}
+
 pub fn set_need_resched() {
     let core = core_id();
     NEED_RESCHED[core].store(true, Ordering::Relaxed);
@@ -508,6 +525,27 @@ pub fn block_current() {
     });
     set_need_resched();
     yield_now();
+}
+
+/// Como [`block_current`], pero **no** cede la CPU aquí (no ejecuta `yield_now`,
+/// es decir, no emite la instrucción `syscall`). Pensada para llamarse DENTRO de
+/// un handler de syscall: el `preempt_switch` del epílogo del trap hará la
+/// conmutación con el `save_frame` correcto tras retornar del handler. Llamar
+/// `yield_now()` desde dentro del handler sería un `syscall` **anidado** dentro de
+/// `__exception`, que corrompe el cambio de contexto (o dispara doble excepción).
+pub fn block_current_noswitch() {
+    with_sched(|s| {
+        #[cfg(feature = "smp")]
+        let cur = if core_id() == 1 { s.current1 } else { s.current };
+        #[cfg(not(feature = "smp"))]
+        let cur = s.current;
+
+        if let Some(t) = s.tasks.get_mut(&cur) {
+            t.state = TaskState::Blocked;
+        }
+        s.ready.retain(|x| *x != cur);
+    });
+    set_need_resched();
 }
 
 pub fn unblock_task(tid: Tid) {

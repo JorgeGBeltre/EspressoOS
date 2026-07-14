@@ -40,9 +40,15 @@ unsafe extern "C" fn __exception(cause: ExceptionCause, save_frame: &mut Context
             save_frame.A8 as usize,
         ];
         let ret = crate::syscall::dispatch(num, &args, save_frame as *mut Context);
-        save_frame.A2 = ret as u32;
-        // Avanzar EPC más allá de `syscall` para no re-ejecutarla al volver.
-        save_frame.PC = save_frame.PC.wrapping_add(SYSCALL_INSN_LEN);
+        // Un syscall bloqueante (p.ej. `wait` sin hijo zombie) pide reiniciarse: en
+        // ese caso NO tocamos A2 ni PC, dejando la instrucción `syscall` intacta
+        // para re-ejecutarla cuando la tarea sea replanificada (A2 conserva el
+        // número de syscall que puso el llamante). En el caso normal, escribimos el
+        // retorno en A2 y avanzamos el PC más allá de `syscall`.
+        if !crate::scheduler::take_restart_syscall() {
+            save_frame.A2 = ret as u32;
+            save_frame.PC = save_frame.PC.wrapping_add(SYSCALL_INSN_LEN);
+        }
 
         // Conmutación de tarea: preempt_switch MUTA *save_frame en sitio (copia el
         // contexto de la siguiente tarea). Al retornar, el vector de xtensa-lx-rt

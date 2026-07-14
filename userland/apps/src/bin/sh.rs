@@ -1,7 +1,7 @@
 #![no_std]
 #![no_main]
 
-use libc::{println, print, read, spawn, wait, yield_now, pipe, dup2, close};
+use libc::{println, print, read, spawn, wait, yield_now, pipe, dup2, close, readdir};
 
 #[no_mangle]
 pub extern "C" fn main() -> i32 {
@@ -39,7 +39,12 @@ pub extern "C" fn main() -> i32 {
                 println!("Exiting the shell...");
                 break;
             }
-            
+
+            if cmd_str == "help" {
+                print_help();
+                continue;
+            }
+
             if let Some(pipe_idx) = cmd_str.find('|') {
                 // Comando con tubería
                 let left_cmd = cmd_str[..pipe_idx].trim();
@@ -110,6 +115,37 @@ pub extern "C" fn main() -> i32 {
         }
     }
     0
+}
+
+fn print_help() {
+    println!("EspressoOS userland shell -- built-in commands:");
+    println!("  help              show this help");
+    println!("  exit              exit the shell");
+    println!("  <cmd> | <cmd>     pipe one command's output into another");
+    println!("");
+    println!("Programs in /bin (run by name, e.g. 'ls' or '/bin/ls'):");
+    let mut buf = [0u8; 1024];
+    let n = readdir("/bin", &mut buf);
+    if n < 0 {
+        println!("  (could not read /bin)");
+        return;
+    }
+    let mut pos = 0;
+    let limit = n as usize;
+    while pos < limit {
+        if pos + 11 > limit {
+            break;
+        }
+        let name_len = u16::from_le_bytes([buf[pos + 9], buf[pos + 10]]) as usize;
+        pos += 11;
+        if pos + name_len > limit {
+            break;
+        }
+        if let Ok(name) = core::str::from_utf8(&buf[pos..pos + name_len]) {
+            println!("  {}", name);
+        }
+        pos += name_len;
+    }
 }
 
 fn resolve_path<'a>(cmd: &str, out_buf: &'a mut [u8]) -> &'a str {

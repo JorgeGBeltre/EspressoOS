@@ -185,6 +185,10 @@ pub fn dispatch(name: &str, args: &[&str]) -> i32 {
         "power" => cmd_power(args),
         "sha256" => cmd_sha256(args),
         "ble" => cmd_ble(args),
+        "wifi" => cmd_wifi(args),
+        "ip" => cmd_ip(args),
+        "nmcli" => cmd_nmcli(args),
+        "sudo" => cmd_sudo(args),
         "" => 0,
         other => {
             eprint_line(&format!("shell: command not found: {}", other));
@@ -218,6 +222,154 @@ fn cmd_echo(args: &[&str]) -> i32 {
     0
 }
 
+fn cmd_wifi(args: &[&str]) -> i32 {
+    use crate::drivers::wifi;
+    match args {
+        [] | ["status"] => {
+            emit_line(&format!("state:  {:?}", wifi::status()));
+            emit_line(&format!(
+                "ssid:   {}",
+                wifi::current_ssid().unwrap_or_else(|| String::from("(none)"))
+            ));
+            match wifi::current_ip() {
+                Some(ip) => {
+                    emit_line(&format!("ip:     {}.{}.{}.{}", ip[0], ip[1], ip[2], ip[3]))
+                }
+                None => emit_line("ip:     (none)"),
+            }
+            0
+        }
+        ["scan"] | ["list"] => {
+            emit_line("Scanning for networks...");
+            wifi::request_scan();
+            let start = timer::uptime_ms();
+            while wifi::scan_state() == wifi::SCAN_RUNNING {
+                if timer::uptime_ms().saturating_sub(start) > 12_000 {
+                    eprint_line("wifi: scan timed out");
+                    return 1;
+                }
+                scheduler::yield_now();
+            }
+            if wifi::scan_state() == wifi::SCAN_ERROR {
+                eprint_line("wifi: scan failed");
+                return 1;
+            }
+            let mut aps = wifi::scan_results();
+            aps.sort_by(|a, b| b.rssi.cmp(&a.rssi));
+            emit_line(&format!("{:<32} {:>5}  {:>3}  {}", "SSID", "RSSI", "CH", "SEC"));
+            for ap in aps.iter() {
+                let name = if ap.ssid.is_empty() {
+                    "(hidden)"
+                } else {
+                    ap.ssid.as_str()
+                };
+                emit_line(&format!(
+                    "{:<32} {:>5}  {:>3}  {}",
+                    name,
+                    ap.rssi,
+                    ap.channel,
+                    if ap.secured { "WPA" } else { "open" }
+                ));
+            }
+            if aps.is_empty() {
+                emit_line("(no networks found)");
+            }
+            0
+        }
+        ["connect", ssid] => {
+            emit_line(&format!("Connecting to '{}' (open network)...", ssid));
+            wifi::request_connect(String::from(*ssid), String::new());
+            emit_line("(use 'wifi status' to check the result)");
+            0
+        }
+        ["connect", ssid, password] => {
+            emit_line(&format!("Connecting to '{}'...", ssid));
+            wifi::request_connect(String::from(*ssid), String::from(*password));
+            emit_line("(use 'wifi status' to check the result)");
+            0
+        }
+        ["disconnect"] => {
+            wifi::request_disconnect();
+            emit_line("Disconnecting...");
+            0
+        }
+        _ => {
+            emit_line("usage: wifi status | scan | connect \"SSID\" [PASSWORD] | disconnect");
+            1
+        }
+    }
+}
+
+fn cmd_ip(_args: &[&str]) -> i32 {
+    use crate::drivers::wifi;
+    // `ip`, `ip a`, `ip addr`: muestra la dirección de wlan0.
+    match wifi::current_ip() {
+        Some(ip) => emit_line(&format!(
+            "wlan0: {}.{}.{}.{}  ssid \"{}\"  state {:?}",
+            ip[0],
+            ip[1],
+            ip[2],
+            ip[3],
+            wifi::current_ssid().unwrap_or_else(|| String::from("(none)")),
+            wifi::status()
+        )),
+        None => emit_line(&format!("wlan0: <no address>  state {:?}", wifi::status())),
+    }
+    0
+}
+
+fn cmd_sudo(args: &[&str]) -> i32 {
+    // EspressoOS no separa privilegios: `sudo CMD ...` simplemente ejecuta CMD.
+    if args.is_empty() {
+        eprint_line("sudo: usage: sudo COMMAND [ARGS...]");
+        return 1;
+    }
+    dispatch(args[0], &args[1..])
+}
+
+fn cmd_nmcli(args: &[&str]) -> i32 {
+    // Shim de compatibilidad con nmcli para las operaciones WiFi habituales.
+    match args {
+        ["device", "status"] | ["dev", "status"] | ["general", "status"] | ["g", "status"] => {
+            cmd_wifi(&["status"])
+        }
+        ["radio", ..] => {
+            emit_line("wifi radio is always on");
+            0
+        }
+        ["device", "wifi", "list"]
+        | ["dev", "wifi", "list"]
+        | ["device", "wifi"]
+        | ["dev", "wifi"] => cmd_wifi(&["scan"]),
+        ["device", "wifi", "connect", rest @ ..] | ["dev", "wifi", "connect", rest @ ..] => {
+            let ssid = match rest.first() {
+                Some(s) => *s,
+                None => {
+                    eprint_line("nmcli: missing SSID");
+                    return 1;
+                }
+            };
+            let pass = match rest {
+                [_, "password", p, ..] => *p,
+                _ => "",
+            };
+            if pass.is_empty() {
+                cmd_wifi(&["connect", ssid])
+            } else {
+                cmd_wifi(&["connect", ssid, pass])
+            }
+        }
+        _ => {
+            emit_line("nmcli (EspressoOS shim). Supported:");
+            emit_line("  nmcli device status");
+            emit_line("  nmcli device wifi list");
+            emit_line("  nmcli device wifi connect \"SSID\" password \"PASS\"");
+            emit_line("(native equivalent: the 'wifi' command)");
+            0
+        }
+    }
+}
+
 fn cmd_help(_args: &[&str]) -> i32 {
     emit_line("Available commands:");
     emit_line("  echo [-n] TEXT...     print text");
@@ -244,6 +396,8 @@ fn cmd_help(_args: &[&str]) -> i32 {
     emit_line("  power sleep|deep-sleep [seconds]  power management");
     emit_line("  sha256 [text]         hardware SHA-256 hashing");
     emit_line("  ble status|advertise  Bluetooth LE management and advertising");
+    emit_line("  wifi status|scan|connect \"SSID\" [PASS]|disconnect   Wi-Fi management");
+    emit_line("  ip                    show the wlan0 address");
     emit_line("");
     emit_line("Redirection: '> file' (truncate) and '>> file' (append).");
     0

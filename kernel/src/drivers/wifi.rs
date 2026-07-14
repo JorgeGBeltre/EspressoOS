@@ -59,6 +59,65 @@ pub enum NetCmd {
 pub static NET_SOCKETS: Mutex<Option<SocketSet<'static>>> = Mutex::new(None);
 pub static NET_CMD_QUEUE: Mutex<Vec<NetCmd>> = Mutex::new(Vec::new());
 
+// ============================================================================
+// Gestión WiFi en runtime (scan / connect) — comandos desde la shell `wifi`.
+// El `WifiController` vive en `net_task`; la shell ENCOLA comandos aquí y el
+// `net_task` los ejecuta en su loop de servicio (es el único dueño del radio).
+// ============================================================================
+
+pub enum WifiCmd {
+    Scan,
+    Connect { ssid: String, password: String },
+    Disconnect,
+}
+pub static WIFI_CMD_QUEUE: Mutex<Vec<WifiCmd>> = Mutex::new(Vec::new());
+
+/// Un punto de acceso visto en el último scan.
+#[derive(Clone)]
+pub struct ApInfo {
+    pub ssid: String,
+    pub rssi: i8,
+    pub channel: u8,
+    pub secured: bool,
+}
+pub static SCAN_RESULTS: Mutex<Vec<ApInfo>> = Mutex::new(Vec::new());
+
+pub const SCAN_IDLE: u8 = 0;
+pub const SCAN_RUNNING: u8 = 1;
+pub const SCAN_DONE: u8 = 2;
+pub const SCAN_ERROR: u8 = 3;
+static SCAN_STATE: AtomicU8 = AtomicU8::new(SCAN_IDLE);
+
+/// IP y SSID actuales (para `wifi status` / `ip`). Escritos por `net_task`.
+pub static CURRENT_IP: Mutex<Option<[u8; 4]>> = Mutex::new(None);
+pub static CURRENT_SSID: Mutex<Option<String>> = Mutex::new(None);
+
+/// La shell pide un scan de APs. `net_task` lo ejecuta (bloqueante) y deja los
+/// resultados en `SCAN_RESULTS` con `SCAN_STATE = SCAN_DONE`.
+pub fn request_scan() {
+    SCAN_STATE.store(SCAN_RUNNING, Ordering::Release);
+    WIFI_CMD_QUEUE.lock().push(WifiCmd::Scan);
+}
+pub fn scan_state() -> u8 {
+    SCAN_STATE.load(Ordering::Acquire)
+}
+pub fn scan_results() -> Vec<ApInfo> {
+    SCAN_RESULTS.lock().clone()
+}
+/// La shell pide conectar a `ssid` con `password` (vacío = red abierta).
+pub fn request_connect(ssid: String, password: String) {
+    WIFI_CMD_QUEUE.lock().push(WifiCmd::Connect { ssid, password });
+}
+pub fn request_disconnect() {
+    WIFI_CMD_QUEUE.lock().push(WifiCmd::Disconnect);
+}
+pub fn current_ip() -> Option<[u8; 4]> {
+    *CURRENT_IP.lock()
+}
+pub fn current_ssid() -> Option<String> {
+    CURRENT_SSID.lock().clone()
+}
+
 struct TcpTransport<'s> {
     sock: &'s mut tcp::Socket<'static>,
 }
@@ -271,6 +330,7 @@ pub fn net_task(_arg: usize) {
         return;
     }
     set_status(WifiStatus::Connecting);
+    *CURRENT_SSID.lock() = Some(String::from(WIFI_SSID));
     println!("[net] connecting to SSID '{}'...", WIFI_SSID);
     let _ = controller.connect();
 
@@ -341,17 +401,112 @@ pub fn net_task(_arg: usize) {
     loop {
         {
             let t = now_smoltcp();
-            
+
+            // -- Comandos de gestión WiFi (scan/connect/disconnect). Usan el
+            // `controller`; el scan es BLOQUEANTE (~1-2 s), por eso se procesa
+            // aquí, antes de tomar el lock de sockets. --
+            let mut reconnect_dhcp = false;
+            {
+                let mut wcmds = Vec::new();
+                {
+                    let mut q = WIFI_CMD_QUEUE.lock();
+                    wcmds.extend(q.drain(..));
+                }
+                for wc in wcmds {
+                    match wc {
+                        WifiCmd::Scan => match controller.scan_n::<24>() {
+                            Ok((aps, _)) => {
+                                let mut out = Vec::new();
+                                for ap in aps.iter() {
+                                    out.push(ApInfo {
+                                        ssid: String::from(ap.ssid.as_str()),
+                                        rssi: ap.signal_strength,
+                                        channel: ap.channel,
+                                        secured: !matches!(
+                                            ap.auth_method,
+                                            None | Some(AuthMethod::None)
+                                        ),
+                                    });
+                                }
+                                *SCAN_RESULTS.lock() = out;
+                                SCAN_STATE.store(SCAN_DONE, Ordering::Release);
+                            }
+                            Err(e) => {
+                                println!("[net] scan error: {:?}", e);
+                                SCAN_STATE.store(SCAN_ERROR, Ordering::Release);
+                            }
+                        },
+                        WifiCmd::Connect { ssid, password } => {
+                            let ssid_h = match ssid.as_str().try_into() {
+                                Ok(s) => s,
+                                Err(_) => {
+                                    println!("[net] ERROR: SSID too long (>32)");
+                                    continue;
+                                }
+                            };
+                            let pass_h = match password.as_str().try_into() {
+                                Ok(p) => p,
+                                Err(_) => {
+                                    println!("[net] ERROR: password too long (>64)");
+                                    continue;
+                                }
+                            };
+                            let cfg = ClientConfiguration {
+                                ssid: ssid_h,
+                                password: pass_h,
+                                auth_method: if password.is_empty() {
+                                    AuthMethod::None
+                                } else {
+                                    AuthMethod::WPA2Personal
+                                },
+                                ..Default::default()
+                            };
+                            let _ = controller.disconnect();
+                            if let Err(e) =
+                                controller.set_configuration(&Configuration::Client(cfg))
+                            {
+                                println!("[net] ERROR set_configuration: {:?}", e);
+                                continue;
+                            }
+                            *CURRENT_SSID.lock() = Some(ssid.clone());
+                            *CURRENT_IP.lock() = None;
+                            have_ip = false;
+                            reconnect_dhcp = true;
+                            set_status(WifiStatus::Connecting);
+                            println!("[net] switching to SSID '{}'...", ssid);
+                            let _ = controller.connect();
+                        }
+                        WifiCmd::Disconnect => {
+                            let _ = controller.disconnect();
+                            *CURRENT_IP.lock() = None;
+                            have_ip = false;
+                            reconnect_dhcp = true;
+                            set_status(WifiStatus::Down);
+                            println!("[net] disconnected by user");
+                        }
+                    }
+                }
+            }
+
             // Procesar comandos encolados
             let mut cmds = Vec::new();
             {
                 let mut q = NET_CMD_QUEUE.lock();
                 cmds.extend(q.drain(..));
             }
-            
+
             let mut sockets_guard = NET_SOCKETS.lock();
             let sockets = sockets_guard.as_mut().unwrap();
-            
+
+            // Tras un (re)connect o disconnect, forzar un DHCP nuevo: limpiar la IP
+            // y la ruta, y resetear el socket DHCP para que emita DISCOVER en la
+            // nueva red.
+            if reconnect_dhcp {
+                iface.update_ip_addrs(|a| a.clear());
+                iface.routes_mut().remove_default_ipv4_route();
+                sockets.get_mut::<dhcpv4::Socket>(dhcp_handle).reset();
+            }
+
             for cmd in cmds {
                 match cmd {
                     NetCmd::Connect { handle, ip, port } => {
@@ -380,6 +535,7 @@ pub fn net_task(_arg: usize) {
                     }
                     if !have_ip {
                         if let Some(ip) = iface.ipv4_addr() {
+                            *CURRENT_IP.lock() = Some(ip.octets());
                             println!("[net] IP = {}", ip);
                             println!(
                                 "[net] SSH listening on port {}, ECHO on {}, OTA on {}",
@@ -393,6 +549,7 @@ pub fn net_task(_arg: usize) {
                 Some(dhcpv4::Event::Deconfigured) => {
                     iface.update_ip_addrs(|addrs| addrs.clear());
                     iface.routes_mut().remove_default_ipv4_route();
+                    *CURRENT_IP.lock() = None;
                     have_ip = false;
                     if status() == WifiStatus::Connected {
                         set_status(WifiStatus::Connecting);

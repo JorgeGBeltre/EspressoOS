@@ -217,6 +217,13 @@ impl Connection {
 
         if self.state == State::Session {
             self.pump_shell_output()?;
+            // El shell pidió `exit`: una vez drenada su última salida, enviamos
+            // CHANNEL_EOF/CLOSE para que el cliente `ssh` termine la sesión.
+            if remote::bridge_exit_requested() && !remote::bridge_has_output() {
+                self.close_channel_from_shell()?;
+                remote::bridge_clear_exit();
+                self.state = State::Closed;
+            }
         }
 
         self.flush(t)?;
@@ -780,6 +787,24 @@ impl Connection {
         }
         if let Some(ch) = self.channel.as_mut() {
             ch.send_window = window;
+        }
+        Ok(())
+    }
+
+    /// Cierra el canal de sesión a petición del shell (`exit`): CHANNEL_EOF
+    /// seguido de CHANNEL_CLOSE hacia el cliente. Espeja el camino de cierre que
+    /// ya existe cuando el cliente envía CHANNEL_CLOSE.
+    fn close_channel_from_shell(&mut self) -> KResult<()> {
+        if let Some(ch) = self.channel.as_ref() {
+            let remote_id = ch.remote_id;
+            let mut w = Writer::new();
+            w.put_u8(proto::SSH_MSG_CHANNEL_EOF).put_u32(remote_id);
+            let eof = w.into_bytes();
+            self.send_packet(&eof)?;
+            let mut w2 = Writer::new();
+            w2.put_u8(proto::SSH_MSG_CHANNEL_CLOSE).put_u32(remote_id);
+            let close = w2.into_bytes();
+            self.send_packet(&close)?;
         }
         Ok(())
     }

@@ -751,9 +751,7 @@ fn sys_ota_state(args: &[usize]) -> isize {
                 if state_raw == crate::ota::OtaImgState::Invalid.as_raw() 
                     || state_raw == crate::ota::OtaImgState::Aborted.as_raw() {
                     crate::println!("[kernel] Particion marcada como invalida/abortada. Reiniciando...");
-                    unsafe {
-                        esp_hal::reset::software_reset();
-                    }
+                    esp_hal::reset::software_reset();
                 }
                 0
             }

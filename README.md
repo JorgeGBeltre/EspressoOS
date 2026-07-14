@@ -2,7 +2,7 @@
 
 [![Rust Version](https://img.shields.io/badge/Rust-Xtensa%20(esp)-orange?logo=rust)](https://github.com/esp-rs/rust)
 [![Target Platform](https://img.shields.io/badge/Platform-ESP32--S3--WROOM--1--N16R8-blue?logo=espressif)](https://www.espressif.com/en/products/socs/esp32-s3)
-[![License](https://img.shields.io/badge/License-MIT%20or%20Apache--2.0-teal)](LICENSE)
+[![License](https://img.shields.io/badge/License-MIT)](LICENSE)
 [![Status](https://img.shields.io/badge/Status-Interactive%20shell%20%2B%20WiFi%20%2B%20SSH%20on%20hardware-brightgreen)](#current-status-running-on-hardware)
 
 ---

@@ -234,18 +234,21 @@ fn cmd_wifi(args: &[&str]) -> i32 {
             0
         }
         ["scan"] | ["list"] => {
-            emit_line("Scanning for networks...");
+            emit_line("Scanning for networks (briefly drops the Wi-Fi link)...");
             wifi::request_scan();
             let start = timer::uptime_ms();
             while wifi::scan_state() == wifi::SCAN_RUNNING {
-                if timer::uptime_ms().saturating_sub(start) > 12_000 {
-                    eprint_line("wifi: scan timed out");
+                if timer::uptime_ms().saturating_sub(start) > 20_000 {
+                    eprint_line(&format!(
+                        "wifi: scan timed out [diag: {}]",
+                        wifi::scan_diag()
+                    ));
                     return 1;
                 }
                 scheduler::yield_now();
             }
             if wifi::scan_state() == wifi::SCAN_ERROR {
-                eprint_line("wifi: scan failed");
+                eprint_line(&format!("wifi: scan failed [diag: {}]", wifi::scan_diag()));
                 return 1;
             }
             let mut aps = wifi::scan_results();
@@ -290,8 +293,20 @@ fn cmd_wifi(args: &[&str]) -> i32 {
             emit_line("Disconnecting...");
             0
         }
+        ["forget"] => match crate::drivers::wifi_store::clear() {
+            Ok(()) => {
+                emit_line("Saved Wi-Fi credentials cleared (reboot uses compiled defaults).");
+                0
+            }
+            Err(e) => {
+                eprint_line(&format!("wifi: could not clear credentials: {:?}", e));
+                1
+            }
+        },
         _ => {
-            emit_line("usage: wifi status | scan | connect \"SSID\" [PASSWORD] | disconnect");
+            emit_line(
+                "usage: wifi status | scan | connect \"SSID\" [PASSWORD] | disconnect | forget",
+            );
             1
         }
     }

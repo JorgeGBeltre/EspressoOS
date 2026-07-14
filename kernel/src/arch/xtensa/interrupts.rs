@@ -19,29 +19,13 @@ extern "C" {
 unsafe extern "C" fn __level_1_interrupt(level: u32, save_frame: &mut esp_hal::xtensa_lx_rt::exception::Context) {
     handle_interrupts(level, save_frame);
 
-    let mut next_sp: Option<u32> = None;
+    // Conmutación de tarea por preempción del timer: preempt_switch MUTA
+    // *save_frame en sitio (copia el contexto de la siguiente tarea). Al retornar,
+    // el vector de xtensa-lx-rt restaura *save_frame -> siguiente tarea.
     if crate::scheduler::need_resched() {
-        next_sp = crate::scheduler::preempt_switch(save_frame);
+        crate::scheduler::preempt_switch(save_frame);
     }
-
-    if let Some(sp) = next_sp {
-        let next_frame = &mut *(sp as *mut esp_hal::xtensa_lx_rt::exception::Context);
-        let _ = crate::scheduler::process::check_signals(next_frame);
-        core::arch::asm!(
-            "mov a5, {0}",
-            "movi a4, 1",
-            "rsr.windowbase a6",
-            "ssl a6",
-            "sll a4, a4",
-            "wsr.windowstart a4",
-            "rsync",
-            in(reg) sp,
-            out("a6") _,
-            out("a4") _
-        );
-    } else {
-        let _ = crate::scheduler::process::check_signals(save_frame);
-    }
+    let _ = crate::scheduler::process::check_signals(save_frame);
 }
 
 #[inline(always)]

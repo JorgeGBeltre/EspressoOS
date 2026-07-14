@@ -254,7 +254,7 @@ pub fn current() -> Tid {
 
 pub fn run() -> ! {
     let _prev = interrupts::disable();
-    let mut target: Option<(u32, bool)> = None;
+    let mut target: Option<(u32, bool, u32)> = None; // (frame_ptr, is_user, sp)
     {
         let mut guard = SCHED.lock();
         if let Some(s) = guard.as_mut() {
@@ -268,14 +268,17 @@ pub fn run() -> ! {
             let base = task.stack_base as u32;
             let top = (task.stack_base as usize + task.stack_size) as u32;
             crate::mm::mpu::configure_stack_guard(0, base, top);
-            target = Some((task.context.sp, task.is_user));
+            // El frame vive dentro del Task (Box estable en SCHED): su dirección
+            // sigue válida tras soltar el lock.
+            let fp = &task.context.frame as *const _ as u32;
+            target = Some((fp, task.is_user, task.context.frame.A1));
         }
     }
 
-    if let Some((next_sp, is_user)) = target {
-        crate::mm::mpu::prepare_world_switch(is_user, next_sp);
+    if let Some((frame_ptr, is_user, sp)) = target {
+        crate::mm::mpu::prepare_world_switch(is_user, sp);
         unsafe {
-            context::resume_task(next_sp);
+            context::resume_task(frame_ptr);
         }
     }
 
@@ -315,11 +318,10 @@ fn core_id() -> usize {
     }
 }
 
-pub fn preempt_switch(save_frame: &mut esp_hal::xtensa_lx_rt::exception::Context) -> Option<u32> {
+pub fn preempt_switch(save_frame: &mut esp_hal::xtensa_lx_rt::exception::Context) {
     clear_need_resched();
 
     let prev = interrupts::disable();
-    let mut next_sp: Option<u32> = None;
     let core = core_id();
 
     {
@@ -356,9 +358,10 @@ pub fn preempt_switch(save_frame: &mut esp_hal::xtensa_lx_rt::exception::Context
                 }
             }
 
-            // Guardar el SP actual
+            // Guardar el contexto de la tarea saliente: copiar los registros vivos
+            // FUERA del frame del vector, a su almacenamiento por-tarea.
             if let Some(t) = s.tasks.get_mut(&cur) {
-                t.context.sp = save_frame as *mut esp_hal::xtensa_lx_rt::exception::Context as u32;
+                t.context.frame = *save_frame;
             }
 
             // Elegir la siguiente tarea
@@ -396,14 +399,20 @@ pub fn preempt_switch(save_frame: &mut esp_hal::xtensa_lx_rt::exception::Context
             crate::mm::mpu::configure_stack_guard(core, base, top);
 
             if next != cur {
-                next_sp = Some(next_task.context.sp);
-                crate::mm::mpu::prepare_world_switch(next_task.is_user, next_task.context.sp);
+                // Conmutación REAL: copiar el contexto de la siguiente tarea DENTRO
+                // de *save_frame. Al volver del handler, el vector de xtensa-lx-rt
+                // restaura *save_frame -> registros de la siguiente tarea (su A1
+                // cambia de pila, su PC/PS dirigen el rfe). Sin trucos de `a5`.
+                *save_frame = next_task.context.frame;
+                crate::mm::mpu::prepare_world_switch(
+                    next_task.is_user,
+                    next_task.context.frame.A1,
+                );
             }
         }
     }
 
     interrupts::restore(prev);
-    next_sp
 }
 
 // ===========================================================================

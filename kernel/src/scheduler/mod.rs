@@ -128,7 +128,7 @@ pub fn init() {
             idle1: IDLE_TID,
         };
 
-        if let Ok(idle) = Task::new(IDLE_TID, "idle", idle_entry, 0, layout::DEFAULT_STACK_SIZE, 0)
+        if let Ok(idle) = Task::new(IDLE_TID, "idle", idle_entry, 0, layout::DEFAULT_STACK_SIZE, 0, false)
         {
             let mut t = idle;
             t.affinity = Some(0);
@@ -141,7 +141,7 @@ pub fn init() {
             let idle1_tid = sched.next_tid;
             sched.next_tid += 1;
             if let Ok(idle1) =
-                Task::new(idle1_tid, "idle1", idle_entry, 0, layout::DEFAULT_STACK_SIZE, 0)
+                Task::new(idle1_tid, "idle1", idle_entry, 0, layout::DEFAULT_STACK_SIZE, 0, false)
             {
                 let mut t = idle1;
                 t.affinity = Some(1);
@@ -161,6 +161,7 @@ pub fn spawn(
     arg: usize,
     stack_size: usize,
     priority: u8,
+    is_user: bool,
 ) -> KResult<Tid> {
 
     let reserved = with_sched(|s| match s.next_tid.checked_add(1) {
@@ -177,7 +178,7 @@ pub fn spawn(
         None => return Err(KError::NotSupported),
     };
 
-    let mut task = Task::new(tid, name, entry, arg, stack_size, priority)?;
+    let mut task = Task::new(tid, name, entry, arg, stack_size, priority, is_user)?;
     if name == "net" {
         task.affinity = Some(0);
     }
@@ -431,7 +432,7 @@ pub fn spawn_core1(
         Some(Err(e)) => return Err(e),
         None => return Err(KError::NotSupported),
     };
-    let mut task = Task::new(tid, name, entry, arg, stack_size, priority)?;
+    let mut task = Task::new(tid, name, entry, arg, stack_size, priority, false)?;
     task.affinity = Some(1);
     let inserted = with_sched(|s| {
         s.tasks.insert(tid, task);

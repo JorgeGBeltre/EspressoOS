@@ -15,6 +15,7 @@ pub use inode::{DirEntry, FileSystem, Inode, InodeKind, VfsError};
 
 const MAX_OPEN_FILES: usize = 64;
 
+#[derive(Clone)]
 struct FdTable {
 
     entries: Vec<Option<OpenFile>>,
@@ -246,4 +247,37 @@ pub fn remove_fd(fd: Fd) -> KResult<()> {
     let table = tables.entry(pid).or_insert_with(FdTable::new_process_table);
     table.remove(fd)?;
     Ok(())
+}
+
+pub fn dup2(oldfd: Fd, newfd: Fd) -> KResult<Fd> {
+    if oldfd < 0 || newfd < 0 || newfd >= MAX_OPEN_FILES as Fd {
+        return Err(KError::BadFd);
+    }
+    let pid = crate::scheduler::process::get_current_pid().unwrap_or(0);
+    let mut tables = PROCESS_FD_TABLES.lock();
+    let table = tables.entry(pid).or_insert_with(FdTable::new_process_table);
+    
+    let open_file = match table.entries.get(oldfd as usize) {
+        Some(Some(f)) => f.clone(),
+        _ => return Err(KError::BadFd),
+    };
+    
+    if oldfd == newfd {
+        return Ok(newfd);
+    }
+    
+    while table.entries.len() <= newfd as usize {
+        table.entries.push(None);
+    }
+    
+    table.entries[newfd as usize] = Some(open_file);
+    Ok(newfd)
+}
+
+pub fn clone_fd_table(parent_pid: Pid, child_pid: Pid) {
+    let mut tables = PROCESS_FD_TABLES.lock();
+    let parent_table = tables.get(&parent_pid).cloned();
+    if let Some(t) = parent_table {
+        tables.insert(child_pid, t);
+    }
 }

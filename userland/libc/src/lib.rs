@@ -114,6 +114,10 @@ pub fn pipe(fds: &mut [i32; 2]) -> isize {
     unsafe { syscall(26, fds.as_mut_ptr() as usize, 0, 0, 0, 0, 0) }
 }
 
+pub fn dup2(oldfd: i32, newfd: i32) -> isize {
+    unsafe { syscall(27, oldfd as usize, newfd as usize, 0, 0, 0, 0) }
+}
+
 pub fn sbrk(size: usize) -> isize {
     unsafe { syscall(13, size, 0, 0, 0, 0, 0) }
 }

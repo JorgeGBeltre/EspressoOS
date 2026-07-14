@@ -57,6 +57,8 @@ pub enum Syscall {
     OtaState = 25,
 
     Pipe = 26,
+
+    Dup2 = 27,
 }
 
 impl Syscall {
@@ -90,6 +92,7 @@ impl Syscall {
             24 => Syscall::SetTimeOfDay,
             25 => Syscall::OtaState,
             26 => Syscall::Pipe,
+            27 => Syscall::Dup2,
             _ => return None,
         };
         Some(sc)

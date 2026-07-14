@@ -147,7 +147,7 @@ fn main() -> ! {
     match crate::fs::elf::load_elf("/bin/init") {
         Ok((entry, size, addr)) => {
             let entry_fn: fn(usize) = unsafe { core::mem::transmute(entry as usize) };
-            match scheduler::spawn("/bin/init", entry_fn, 0, layout::DEFAULT_STACK_SIZE, PRIO_DEFAULT) {
+            match scheduler::spawn("/bin/init", entry_fn, 0, layout::DEFAULT_STACK_SIZE, PRIO_DEFAULT, true) {
                 Ok(tid) => {
                     let pid = scheduler::process::register_process("/bin/init", tid, true, addr, size);
                     println!("[kernel] Proceso init (PID {}) creado con éxito", pid);
@@ -161,7 +161,7 @@ fn main() -> ! {
 
     if !init_spawned {
         println!("[kernel] Usando fallback a consola del kernel...");
-        match scheduler::spawn("shell", shell_task, 0, layout::DEFAULT_STACK_SIZE, PRIO_DEFAULT) {
+        match scheduler::spawn("shell", shell_task, 0, layout::DEFAULT_STACK_SIZE, PRIO_DEFAULT, false) {
             Ok(tid) => println!("[kernel] tarea 'shell' creada (tid={})", tid),
             Err(e) => println!("[kernel] ERROR: no se pudo crear la shell: {:?}", e),
         }
@@ -173,6 +173,7 @@ fn main() -> ! {
         0,
         layout::DEFAULT_STACK_SIZE,
         PRIO_DEFAULT,
+        false,
     ) {
         Ok(tid) => println!("[kernel] tarea 'heartbeat' creada (tid={})", tid),
         Err(e) => println!("[kernel] aviso: no se pudo crear el latido: {:?}", e),
@@ -185,7 +186,7 @@ fn main() -> ! {
         peripherals.WIFI,
         peripherals.BT,
     );
-    match scheduler::spawn("net", drivers::wifi::net_task, 0, NET_STACK_SIZE, PRIO_DEFAULT) {
+    match scheduler::spawn("net", drivers::wifi::net_task, 0, NET_STACK_SIZE, PRIO_DEFAULT, false) {
         Ok(tid) => println!("[kernel] tarea 'net' creada (tid={})", tid),
         Err(e) => println!("[kernel] aviso: no se pudo crear la red: {:?}", e),
     }
@@ -253,19 +254,37 @@ fn sleep_ms(ms: u64) {
 }
 
 fn install_userland() {
-    // Monta un ramfs en /bin y vuelca los binarios de userland empotrados en la
-    // imagen del kernel. No toca flash: /bin siempre coincide con el firmware.
     if userland_bin::USERLAND_BINARIES.is_empty() {
-        println!("[kernel] userland no empotrado (corre tools/build-userland.ps1 y recompila)");
+        println!("[kernel] userland no empotrado");
         return;
     }
-    if let Err(e) = vfs::mount("/bin", fs::ramfs::RamFs::new()) {
-        println!("[kernel] aviso: mount /bin fallo: {:?}", e);
-        return;
-    }
+    
+    // Asegurar existencia del directorio /bin en EspFs
+    let _ = vfs::mkdir("/bin");
+
     let mut n = 0u32;
     for (name, bytes) in userland_bin::USERLAND_BINARIES {
         let path = alloc::format!("/bin/{}", name);
+        
+        // Comprobar si el archivo ya existe en EspFs y coincide en tamaño
+        let mut match_exists = false;
+        let read_flags = vfs::OpenFlags(vfs::OpenFlags::RDONLY.0);
+        if let Ok(fd) = vfs::open(&path, read_flags) {
+            if let Ok(inode) = vfs::get_inode(fd) {
+                if inode.size() == bytes.len() as u64 {
+                    match_exists = true;
+                }
+            }
+            let _ = vfs::close(fd);
+        }
+        
+        if match_exists {
+            continue;
+        }
+        
+        // Borrar el archivo viejo si ya existía con otro tamaño
+        let _ = vfs::unlink(&path);
+        
         let flags = vfs::OpenFlags(
             vfs::OpenFlags::WRONLY.0 | vfs::OpenFlags::CREATE.0 | vfs::OpenFlags::TRUNC.0,
         );
@@ -274,11 +293,16 @@ fn install_userland() {
                 let _ = vfs::write(fd, bytes);
                 let _ = vfs::close(fd);
                 n += 1;
+                println!("[kernel] Desplegado /bin/{} ({} bytes) en EspFs", name, bytes.len());
             }
             Err(e) => println!("[kernel] aviso: instalar {} fallo: {:?}", path, e),
         }
     }
-    println!("[kernel] userland: {} binarios instalados en /bin", n);
+    if n > 0 {
+        println!("[kernel] userland: {} binarios instalados/actualizados en EspFs", n);
+    } else {
+        println!("[kernel] userland: todos los binarios están actualizados en EspFs");
+    }
 }
 
 fn init_etc_files() {

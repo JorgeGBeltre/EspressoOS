@@ -42,6 +42,16 @@ pub fn dispatch(
         Syscall::SetTimeOfDay => sys_settimeofday(args),
         Syscall::OtaState => sys_ota_state(args),
         Syscall::Pipe => sys_pipe(args),
+        Syscall::Dup2 => sys_dup2(args),
+    }
+}
+
+fn sys_dup2(args: &[usize]) -> isize {
+    let oldfd = arg(args, 0) as i32;
+    let newfd = arg(args, 1) as i32;
+    match crate::vfs::dup2(oldfd, newfd) {
+        Ok(fd) => fd as isize,
+        Err(e) => e.as_errno(),
     }
 }
 
@@ -221,7 +231,7 @@ fn sys_spawn(args: &[usize]) -> isize {
         match crate::fs::elf::load_elf(name) {
             Ok((entry_point, total_size, load_addr)) => {
                 let entry: fn(usize) = unsafe { core::mem::transmute(entry_point as usize) };
-                match crate::scheduler::spawn(name, entry, 0, layout::DEFAULT_STACK_SIZE, 10) {
+                match crate::scheduler::spawn(name, entry, 0, layout::DEFAULT_STACK_SIZE, 10, true) {
                     Ok(tid) => {
                         let pid = crate::scheduler::process::register_process(name, tid, true, load_addr, total_size);
                         pid as isize
@@ -245,7 +255,7 @@ fn sys_spawn(args: &[usize]) -> isize {
         }
         let priority = arg(args, 5) as u8;
 
-        match crate::scheduler::spawn(name, entry, entry_arg, stack_size, priority) {
+        match crate::scheduler::spawn(name, entry, entry_arg, stack_size, priority, false) {
             Ok(tid) => {
                 let pid = crate::scheduler::process::register_process(name, tid, false, core::ptr::null_mut(), 0);
                 pid as isize

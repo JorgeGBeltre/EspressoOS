@@ -1,49 +1,65 @@
-// build.rs — Empotra los binarios de userland (userland/dist/*.elf) en el kernel.
-//
-// Genera $OUT_DIR/userland_bin.rs con una tabla `USERLAND_BINARIES` de
-// (nombre, &[u8]) usando include_bytes!. Si userland/dist/ no existe o esta
-// vacio (no se corrio tools/build-userland.ps1), la tabla queda vacia y el
-// kernel arranca con su shell interna (fallback). Asi el build NUNCA falla por
-// falta de userland.
-
-use std::fmt::Write as _;
-use std::path::PathBuf;
+use std::fs::File;
+use std::io::Write as IoWrite;
+use std::path::Path;
+use std::process::Command;
+use std::env;
 
 fn main() {
-    let manifest = std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR");
-    let dist = PathBuf::from(&manifest)
-        .parent()
-        .expect("kernel parent")
-        .join("userland")
-        .join("dist");
+    println!("cargo:rerun-if-changed=../userland/apps/src");
+    println!("cargo:rerun-if-changed=../userland/libc/src");
 
-    println!("cargo:rerun-if-changed={}", dist.display());
-
-    let mut code = String::from("pub static USERLAND_BINARIES: &[(&str, &[u8])] = &[\n");
-
-    if let Ok(rd) = std::fs::read_dir(&dist) {
-        let mut files: Vec<PathBuf> = rd
-            .filter_map(|e| e.ok().map(|e| e.path()))
-            .filter(|p| p.extension().map(|x| x == "elf").unwrap_or(false))
-            .collect();
-        files.sort();
-        for p in files {
-            let name = p
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .unwrap_or("")
-                .to_string();
-            if name.is_empty() {
-                continue;
-            }
-            let path_str = p.to_string_lossy().replace('\\', "/");
-            println!("cargo:rerun-if-changed={}", p.display());
-            writeln!(code, "    ({:?}, include_bytes!({:?})),", name, path_str).unwrap();
-        }
+    // 1. Compilar userland usando cargo
+    let rustflags = "-C link-arg=-Tuser.x -C force-frame-pointers -C link-arg=-nostartfiles";
+    
+    let mut cmd = Command::new("cargo");
+    cmd.args(&["build", "--release"]);
+    cmd.current_dir("../userland");
+    cmd.env("RUSTFLAGS", rustflags);
+    
+    // Quitar variables que puedan interferir
+    cmd.env_remove("CARGO_ENCODED_RUSTFLAGS");
+    cmd.env_remove("RUSTC_WORKSPACE_WRAPPER");
+    
+    let status = cmd.status().expect("Fallo al ejecutar cargo build en userland");
+    if !status.success() {
+        panic!("La compilación de userland falló");
     }
 
-    code.push_str("];\n");
+    // 2. Generar el archivo userland_bin.rs en OUT_DIR con rutas absolutas
+    let project_root = env::current_dir().unwrap(); // Directorio kernel/
+    let workspace_root = project_root.parent().unwrap();
+    let userland_target_dir = workspace_root
+        .join("userland")
+        .join("target")
+        .join("xtensa-esp32s3-none-elf")
+        .join("release");
 
-    let out = PathBuf::from(std::env::var("OUT_DIR").expect("OUT_DIR")).join("userland_bin.rs");
-    std::fs::write(&out, code).expect("write userland_bin.rs");
+    let out_dir = env::var("OUT_DIR").unwrap();
+    let dest_path = Path::new(&out_dir).join("userland_bin.rs");
+    let mut f = File::create(&dest_path).unwrap();
+
+    let binaries = &[
+        "init",
+        "sh",
+        "cat",
+        "echo",
+        "ls",
+        "ota",
+        "ping",
+        "sntp",
+        "netstat",
+        "httpd",
+    ];
+
+    writeln!(f, "pub const USERLAND_BINARIES: &[(&str, &[u8])] = &[").unwrap();
+    for name in binaries {
+        let binary_path = userland_target_dir.join(name);
+        let path_str = binary_path.to_str().unwrap().replace("\\", "/");
+        writeln!(
+            f,
+            "    (\"{}\", include_bytes!(\"{}\")),",
+            name, path_str
+        ).unwrap();
+    }
+    writeln!(f, "];").unwrap();
 }

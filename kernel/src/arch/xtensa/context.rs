@@ -17,7 +17,7 @@ const PS_WOE: u32 = 1 << 18;     // Window Overflow Enable
 const PS_CALLINC1: u32 = 1 << 16; // Call Increment 1
 
 #[inline(never)]
-pub fn init_task_stack(stack_top: *mut u8, entry: fn(usize), arg: usize) -> Context {
+pub fn init_task_stack(stack_top: *mut u8, entry: fn(usize), arg: usize, is_user: bool) -> Context {
     let top = (stack_top as usize) & !STACK_ALIGN_MASK;
     
     // Reservar espacio para la estructura ExceptionContext completa
@@ -32,7 +32,11 @@ pub fn init_task_stack(stack_top: *mut u8, entry: fn(usize), arg: usize) -> Cont
         
         let frame = &mut *frame_ptr;
         frame.PC = entry as usize as u32;
-        frame.PS = PS_UM | PS_WOE | PS_CALLINC1;
+        if is_user {
+            frame.PS = PS_UM | PS_WOE | PS_CALLINC1;
+        } else {
+            frame.PS = PS_WOE | PS_CALLINC1; // Privileged mode
+        }
         frame.A0 = 0; // Dirección de retorno (llamará a la salida de la tarea si retorna)
         frame.A1 = top as u32; // Stack pointer de la tarea (cuando se retire el ExceptionContext)
         frame.A6 = arg as u32; // Argumento a pasar a la tarea (convenio call4)

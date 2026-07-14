@@ -63,10 +63,33 @@ fn main() -> ! {
     let heap_psram_len = psram_len - user_psram_size;
     
     mm::heap::add_psram(heap_psram_base, heap_psram_len);
+    // Base de datos de la región de userland (alias de escritura del .text).
+    mm::psram_exec::set_data_base(psram_base as usize as u32);
     println!(
         "[kernel] PSRAM añadida al heap: {} bytes @ {:p} (1MB reservado para Userland @ {:p})",
         heap_psram_len, heap_psram_base, psram_base
     );
+
+    // Ruta B (userland ejecutable): mapea el 1 MB de PSRAM reservado (@psram_base,
+    // páginas físicas 0..N) también al bus de INSTRUCCIONES, y autotesta que se
+    // puede EJECUTAR desde PSRAM. Paso 1 antes de cablear el loader de dos regiones.
+    let user_pages = (user_psram_size / mm::psram_exec::MMU_PAGE_SIZE as usize) as u32;
+    match mm::psram_exec::map_instruction(0, user_pages) {
+        Ok(()) => {
+            println!(
+                "[psram-exec] PSRAM reservada mapeada al bus de instrucciones @ {:#x} ({} páginas)",
+                mm::psram_exec::USER_IBUS_BASE,
+                user_pages
+            );
+            let v = mm::psram_exec::selftest(psram_base as usize as u32);
+            if v == 42 {
+                println!("[psram-exec] OK: código EJECUTADO desde PSRAM devolvió {} (esperado 42)", v);
+            } else {
+                println!("[psram-exec] FALLO: devolvió {} (esperado 42)", v);
+            }
+        }
+        Err(code) => println!("[psram-exec] ERROR: Cache_Ibus_MMU_Set devolvió {}", code),
+    }
 
     drivers::power::init(peripherals.LPWR);
     drivers::device::init();

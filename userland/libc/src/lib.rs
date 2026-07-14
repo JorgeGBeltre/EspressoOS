@@ -17,7 +17,9 @@ extern "Rust" {
 #[unsafe(naked)]
 pub unsafe extern "C" fn _start() -> ! {
     core::arch::naked_asm!(
-        "movi a1, 0", // a1 ya está apuntando al tope de la pila por el kernel
+        // a1 (stack pointer) ya lo deja el kernel en el tope de la pila de la
+        // tarea (init_task_stack -> A1). NO tocarlo: `movi a1,0` lo pondría a 0
+        // y `main` petaría al primer uso de pila.
         "call4 main",
         "mov a2, a6", // Código de retorno de main en la ventana rotada
         "call4 exit",

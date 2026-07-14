@@ -1,535 +1,483 @@
 # EspressoOS — A `no_std` Unix-like Operating System in Rust for ESP32-S3
 
-[![Rust Version](https://img.shields.io/badge/Rust-1.75%2B%20%2F%20Xtensa-orange?logo=rust)](https://github.com/esp-rs/rust)
-[![Target Platform](https://img.shields.io/badge/Platform-ESP32--S3--WROOM--1-blue?logo=espressif)](https://www.espressif.com/en/products/socs/esp32-s3)
+[![Rust Version](https://img.shields.io/badge/Rust-Xtensa%20(esp)-orange?logo=rust)](https://github.com/esp-rs/rust)
+[![Target Platform](https://img.shields.io/badge/Platform-ESP32--S3--WROOM--1--N16R8-blue?logo=espressif)](https://www.espressif.com/en/products/socs/esp32-s3)
 [![License](https://img.shields.io/badge/License-MIT%20or%20Apache--2.0-teal)](LICENSE)
-[![Status](https://img.shields.io/badge/Status-Boots%20%2B%20SSH%20login%20on%20hardware-brightgreen)](#current-status-running-on-hardware)
+[![Status](https://img.shields.io/badge/Status-Interactive%20shell%20%2B%20WiFi%20%2B%20SSH%20on%20hardware-brightgreen)](#current-status-running-on-hardware)
 
 ---
 
-**EspressoOS** is a Unix-like operating system written entirely from scratch in `no_std` Rust for the **ESP32-S3-WROOM-1-N16R8** development board (Xtensa LX7 dual-core, 16 MB flash, and 8 MB PSRAM). 
+**EspressoOS** is a Unix-like operating system written entirely from scratch in `no_std` Rust for the **ESP32-S3-WROOM-1-N16R8** development board (Xtensa LX7 dual-core, 16 MB flash, 8 MB PSRAM).
 
-The system implements fundamental operating system concepts (a Virtual File System "VFS" with an everything-is-a-file abstraction, a cooperative/preemptive multitasking scheduler with a hand-written Xtensa context switch, kernel-level peripheral drivers, a stable system call "syscall" ABI, a WiFi + TCP/IP network stack, an SSH-2.0 server, and an interactive REPL shell) in a resource-constrained embedded hardware environment.
+It behaves *"like Linux, but for the ESP32-S3"*: preemptive multitasking with a hand-written Xtensa context switch, a Virtual File System (everything-is-a-file), kernel device drivers, a stable syscall ABI, ELF userland programs that execute from PSRAM, a WiFi + TCP/IP stack, an SSH-2.0 server, and one interactive shell reachable **both** over the serial console **and** over SSH — with runtime **Wi-Fi management from the shell**.
 
----
-
-## Current Status (Running on Hardware)
-
-EspressoOS **boots and runs on a physical ESP32-S3** and is reachable over the network via SSH. The following is verified working on real silicon:
-
-| Capability | Status |
-| :--- | :--- |
-| Compiles & links for `xtensa-esp32s3-none-elf` | ✅ |
-| Boots: HAL init, kernel heap, VFS (`ramfs` on `/` and `/tmp`, `devfs` on `/dev`) | ✅ |
-| **Multitasking** — hand-written Xtensa windowed-register context switch | ✅ cooperative, stable |
-| **8 MB PSRAM** mapped and added to the kernel heap | ✅ |
-| **WiFi (STA) + DHCP + TCP/IP** (`esp-wifi` + `smoltcp`) | ✅ (obtains an IP, TCP echo on port 2323) |
-| **SSH-2.0 server** (curve25519-sha256, ssh-ed25519, chacha20-poly1305@openssh) | ✅ `ssh <user>@<ip>` opens the shell |
-| Interactive shell over SSH (`ls`, `cat`, `mkdir`, `cd`, `pwd`, `write`, redirections…) | ✅ |
-
-> **Log in with a standard client:** `ssh youareme@<board-ip>` (dev credentials in [`ssh/config.rs`](kernel/src/drivers/ssh/config.rs); see [Connecting via SSH](#3-connect-over-ssh)).
-
-**Implemented since (compile-clean, pending on-device checks):** persistent storage (`EspFs` at `/`, survives reboot), I2C/SPI bus drivers (`/dev/i2c0` · `/dev/spi0`), the **syscall ABI** (+ a real `syscall`-instruction trap under `--features syscall-trap`), an **OTA image receiver** (TCP :3300 → `ota apply`), and — behind opt-in features — **PMS** memory protection enforced at boot (`--features pms`) and **real cross-core scheduling** on the APP_CPU (`--features smp`). Every feature combination builds and links in `--release`; **104/104** logic tests pass. **Still open:** safe **preemptive** scheduling (`need_resched` in the vector epilogue), verifying OTA boot-switch against the stock bootloader, and shared-queue cross-core migration. See the [roadmap](#project-status-and-development-roadmap).
+All command output and the shell present in **English**; the whole system identifies itself as **EspressoOS**.
 
 ---
 
 ## Table of Contents
 
-- [Project Status and Development Roadmap](#project-status-and-development-roadmap)
-- [Key Features](#key-features)
+- [What's New](#whats-new)
+- [Current Status (Running on Hardware)](#current-status-running-on-hardware)
+- [Quick Start (TL;DR)](#quick-start-tldr)
+- [1. Environment Prerequisites](#1-environment-prerequisites)
+- [2. Build & Flash — Step by Step](#2-build--flash--step-by-step)
+- [3. Connecting to the Shell](#3-connecting-to-the-shell)
+  - [3a. Serial console (UART0)](#3a-serial-console-uart0)
+  - [3b. SSH over the network](#3b-ssh-over-the-network)
+- [4. Connecting to Wi-Fi from the shell](#4-connecting-to-wi-fi-from-the-shell)
+- [5. Command Reference](#5-command-reference)
+- [6. The Shell — prompts, redirection, pipes, exit](#6-the-shell--prompts-redirection-pipes-exit)
+- [Architecture & Kernel Subsystems](#architecture--kernel-subsystems)
 - [Repository Structure](#repository-structure)
-- [Environment Prerequisites](#environment-prerequisites)
-- [Building and Flashing](#building-and-flashing)
-- [Memory Map and Partition Table](#memory-map-and-partition-table)
-- [Kernel Subsystems](#kernel-subsystems)
-  - [VFS (Virtual File System)](#vfs-virtual-file-system)
-  - [Task Scheduler](#task-scheduler)
-  - [Syscall Mechanism (System Calls)](#syscall-mechanism-system-calls)
-  - [A/B Update Scheme (OTA)](#ab-update-scheme-ota)
-  - [Peripheral Device Drivers](#peripheral-device-drivers)
-  - [Networking (WiFi + TCP/IP)](#networking-wifi--tcpip)
-  - [SSH Server (Working)](#ssh-server-working)
-- [Interactive REPL Shell](#interactive-repl-shell)
-- [Verification and Mock Testing](#verification-and-mock-testing)
-- [Contribution and License](#contribution-and-license)
+- [Memory Map & Partition Table](#memory-map--partition-table)
+- [Development Roadmap](#development-roadmap)
 - [License](#license)
 - [Contact](#contact)
 - [Support](#support)
 
 ---
 
-## Project Status and Development Roadmap
+## What's New
 
-EspressoOS development is structured into **10 incremental phases**. Bring-up (P0), memory/PSRAM (P1), multitasking (P2, cooperative), and networking with an SSH server (P7) are **verified on hardware**. Bus drivers (P3), persistent storage (P4, `EspFs`), and the syscall ABI (P6) are **wired and compile-clean** (pending on-device checks). OTA (P5) is partially wired; memory protection (P8) and SMP (P9) are implemented **behind opt-in cargo features** so the default image stays the known-good one. Progress is not strictly sequential — SSH was brought up early because the scheduler and network stack were ready.
+The most recent development cycle brought the system from "boots + SSH login" to a **fully interactive multitasking OS**:
 
-```
-Phase 0 ──────► Phase 1 ──────► Phase 2 ──────► Phase 3 ──────► Phase 4 
-Bring-up       Memory         Multitasking   Bus Drivers    Storage & VFS
-(✅ done)       (✅ PSRAM)      (✅ sched.)     (✅ I2C/SPI)    (✅ EspFs)
-  │
-  ├──────────► Phase 5 ──────► Phase 6 ──────► Phase 7 ──────► Phase 8 ──────► Phase 9
-               OTA A/B        Syscalls/      Networking     Memory         SMP Dual-Core
-               (✅ OTA rx)     (✅ ABI)        (✅ WiFi+SSH)   (feat: pms)     (feat: smp)
-```
-
-### Development Phases Roadmap Table
-
-| Phase | Title | Involved Components / Status |
-| :--- | :--- | :--- |
-| **Phase 0** | **Bring-up** | **DONE (on hardware).** Xtensa CPU clock setup, kernel heap (SRAM), console over UART0, VFS boot (mounting `/dev`, `/`, `/tmp`), scheduler with `idle` thread, interactive `shell`, and a `heartbeat` task. Requires `build-std` + the `-Tlinkall.x` linker script (see [Building](#building-and-flashing)). |
-| **Phase 1** | **Memory Management (PSRAM)** | **DONE.** The 8 MB external octal PSRAM is mapped in `esp_hal::init` and registered as a secondary `esp-alloc` heap region ([mm/heap.rs](kernel/src/mm/heap.rs)). |
-| **Phase 2** | **Task Scheduler** | **DONE (cooperative, on hardware).** Round-robin scheduling ([policy.rs](kernel/src/scheduler/policy.rs)) over a hand-written Xtensa windowed-register context switch ([context.rs](kernel/src/arch/xtensa/context.rs), FreeRTOS/esp-idf-style `XT_STK` frame + `rfe`/`retw`). **Pending:** safe preemption (`need_resched` in the vector epilogue) instead of switching inside the SYSTIMER ISR. |
-| **Phase 3** | **Bus Drivers** | **Wired (compiles; needs a device to verify on hardware).** Master I2C ([i2c.rs](kernel/src/drivers/i2c.rs)) and SPI ([spi.rs](kernel/src/drivers/spi.rs)) drivers now receive their peripherals from `main` (no `Peripherals::steal()`), are exposed as `/dev/i2c0` and `/dev/spi0`, and driven by the `i2c` / `spi` shell commands (`i2c scan`, `spi transfer …`). |
-| **Phase 4** | **Storage & Filesystems** | **Wired (compiles + logic-tested; verify persistence on hardware).** `EspFs` ([fs/espfs](kernel/src/fs/espfs/mod.rs)) — a pure-Rust **log-structured, wear-leveled** filesystem over the internal NOR flash ([flash.rs](kernel/src/drivers/flash.rs)) — is mounted at `/` (RamFs fallback), so files survive reboots. Chosen over the C `littlefs2` (kept as a stub) to avoid a bindgen/cc build on this `no_std` Xtensa target. 11 logic tests in `tools/tests/espfs_tests.py`. |
-| **Phase 5** | **OTA A/B Updates** | **Wired.** An OTA image receiver on TCP **port 3300** ([drivers/wifi.rs](kernel/src/drivers/wifi.rs)) buffers the firmware into PSRAM (safe: no flash writes during the WiFi transfer); `ota apply` then flashes the inactive slot and updates `otadata` ([ota](kernel/src/ota/mod.rs)). `ota status`/`set`/`rx`/`apply` shell commands. **Boot-switching** relies on the ESP-IDF 2nd-stage bootloader `espflash` writes (it reads `otadata`) — verify on hardware; a custom bootloader is only needed if the stock one doesn't honor it. |
-| **Phase 6** | **Syscalls & Userland** | **Wired.** `syscall::invoke` + the `syscalltest` command exercise the full ABI (arg marshalling → `dispatch` → errno). A real Xtensa `syscall`-instruction trap (EXCCAUSE=1, overriding the weak `__exception` and delegating other causes to esp-backtrace) is available behind `--features syscall-trap` ([syscall/trap.rs](kernel/src/syscall/trap.rs)). No privilege rings yet, so it is a mechanism, not isolation. |
-| **Phase 7** | **Networking (WiFi) + SSH** | **DONE (on hardware).** 802.11 STA radio via `esp-wifi` bound to the `smoltcp` TCP/IP stack ([drivers/wifi.rs](kernel/src/drivers/wifi.rs)); DHCP-assigned IP; a **working SSH-2.0 server** on port 22 ([drivers/ssh](kernel/src/drivers/ssh)) serving the shell. |
-| **Phase 8** | **Memory Protection (PMS)** | **Behind `--features pms`, enforced at boot.** [mm/mpu.rs](kernel/src/mm/mpu.rs) enables the ESP32-S3 DRAM0 PMS **violation monitor** and applies **World-1 SRAM enforcement** at boot (safe: the kernel runs in **World-0**), confining a future userland; `pms` / `pms world1` inspect and re-apply. The exact permission-field encoding still needs TRM validation on hardware. |
-| **Phase 9** | **SMP Dual-Core** | **Behind `--features smp`, real cross-core scheduling.** [scheduler/core_sync.rs](kernel/src/scheduler/core_sync.rs) starts the **APP_CPU (core 1)** via `esp_hal::CpuControl`; core 1 runs the scheduler over its **own run-queue** (`ready1`) — `spawn_core1` places tasks there while WiFi stays on core 0 (esp-wifi affinity). A demo `core1-worker` proves execution on core 1 (`smp` command / `core1` serial heartbeats). Shared-queue migration with per-core preemption is the next hardware step. |
+- **Preemptive multitasking works on hardware.** The context switch was rewritten around the real esp-hal exception/interrupt model: the switch happens by overwriting the saved trap frame (`*save_frame`) in the vector epilogue on both the `syscall` trap and the SYSTIMER interrupt. `init`, `sh`, `net`, and a `heartbeat` task all run concurrently.
+- **Userland ELF execution from PSRAM.** User programs are compiled to per-process fixed-address slots, deployed into `/bin`, and executed from PSRAM mapped onto the **instruction bus** via the MMU (Harvard-split `.text`/`.data`, ROM `Cache_Ibus_MMU_Set`). A blocking `wait()` with a syscall-restart flag closes the `spawn → wait → exit → reap` loop.
+- **One unified shell, everywhere.** The **interactive console (UART0)** now runs the same full kernel shell as **SSH** — every built-in command works locally with argument parsing.
+- **Runtime Wi-Fi management.** New `wifi`, `ip`, and `nmcli`-compatible commands **scan** for networks and **connect/disconnect** at runtime, without recompiling.
+- **Clean session handling.** `exit`/`quit`/`logout` closes an SSH session with a proper channel-close handshake (client prints `Connection to <ip> closed.`).
+- **English + EspressoOS branding** across all runtime output, prompts, banners, and the SSH server identity (`SSH-2.0-EspressoOS_0.1`).
 
 ---
 
-## Key Features
+## Current Status (Running on Hardware)
 
-- **Pure Rust `no_std` Development**: Zero dependency on the C-based ESP-IDF framework or standard library; complete low-level control of the hardware.
-- **Virtual File System (VFS)**: Uniform abstractions for devices and file operations (`/dev/console`, `/dev/null`, `/dev/zero`, `/tmp`). Standardized file descriptors (`Fd`) supporting `open`/`close`/`read`/`write`/`seek`/`readdir`.
-- **Task Scheduler**: Round-robin multitasking with a **hand-written Xtensa windowed-register context switch** in assembly ([context.rs](kernel/src/arch/xtensa/context.rs)) — verified stable on hardware in **cooperative** mode (`yield_now()`). A SYSTIMER-driven preemptive path exists; making preemption fully safe (switching in the interrupt-vector epilogue rather than inside the ISR) is in progress.
-- **System Call ABI**: POSIX-like system calls utilizing registers (e.g., `a2` for syscall index) to transition from user mode to kernel mode safely.
-- **OTA Updates & Partition Mappings**: Core logic and structures compatible with the Espressif partition table format, prepared for safe, atomic OTA updates.
-- **Custom Partition Generator**: Bundled Python utility to generate and inspect bin tables compatible with the hardware ROM bootloader.
-- **Logical Verification Simulator**: A comprehensive Python-based mock test harness ([logic_tests.py](tools/tests/logic_tests.py)) that mimics the exact behavior of key OS modules for verification in targetless host environments.
+EspressoOS **boots and runs on a physical ESP32-S3**, is reachable over SSH, and drives an interactive shell over both the serial console and the network.
+
+| Capability | Status |
+| :--- | :--- |
+| Compiles & links for `xtensa-esp32s3-none-elf` (`--release`) | ✅ |
+| Boots: HAL init, kernel heap, VFS (`ramfs` on `/` + `/tmp`, `devfs` on `/dev`, `procfs` on `/proc`, `sysfs` on `/sys`) | ✅ |
+| **8 MB PSRAM** mapped, added to the heap, and **executable** (instruction-bus MMU mapping) | ✅ |
+| **Preemptive multitasking** — hand-written Xtensa windowed-register context switch | ✅ on hardware |
+| **Userland**: ELF programs loaded from `/bin` and executed from PSRAM (`spawn`/`wait`/`exit`) | ✅ on hardware |
+| **WiFi (STA) + DHCP + TCP/IP** (`esp-wifi` + `smoltcp`) | ✅ obtains an IP |
+| **SSH-2.0 server** (curve25519-sha256 · ssh-ed25519 · chacha20-poly1305@openssh) | ✅ `ssh youareme@<ip>` |
+| **Interactive shell** over UART **and** SSH (30+ commands, args, redirection, pipes) | ✅ on hardware |
+| **Runtime Wi-Fi CLI** (`wifi scan` / `wifi connect` / `ip` / `nmcli` shim) | ✅ builds; validate scan on hardware |
+| Persistent `EspFs` on `/` (survives reboot) | ⚠️ falls back to `ramfs` on device (open bug) |
+
+> **Known open items:** `EspFs::mount` returns `IoError` on hardware, so `/` currently uses `ramfs` (files do **not** survive reboot yet); running `/bin/*` userland binaries *from the kernel shell* is not wired (their stdout would need routing); and `scan` while associated may need a disconnect→scan→reconnect fallback depending on `esp-wifi` behavior.
+
+---
+
+## Quick Start (TL;DR)
+
+```bash
+# 0. One-time toolchain install (see §1 for detail)
+cargo install espup --locked
+cargo install espflash@3.3.0 --locked      # 3.x — NOT 4.x
+espup install
+. $HOME/export-esp.ps1                       # PowerShell   (Linux/macOS: source $HOME/export-esp.sh)
+
+# 1. Enter the repo
+cd EspressoOS
+
+# 2. Set your boot Wi-Fi credentials (git-ignored file)
+cp kernel/src/wifi_credentials.rs.example kernel/src/wifi_credentials.rs
+#   edit WIFI_SSID / WIFI_PASSWORD inside it
+
+# 3. Generate the partition table
+python tools/partition-gen/partition_gen.py
+
+# 4. Build + flash + open the serial monitor (one command)
+cargo run --release
+```
+
+Then, on the serial monitor you'll see the boot log, the board's IP, and the shell prompt `EspressoOS:~$`. From another terminal: `ssh youareme@<board-ip>`.
+
+---
+
+## 1. Environment Prerequisites
+
+You need the Espressif Xtensa Rust toolchain, flashing tools, and Python 3.
+
+### 1.1 Install the toolchain & flashing tools
+
+```bash
+cargo install espup --locked
+cargo install espflash@3.3.0 --locked
+espup install
+```
+
+> **Use espflash 3.x — not 4.x.** This project targets `esp-hal 0.23`, whose image format predates the ESP-IDF App Descriptor that espflash **4.x** requires. With 4.x the flashed image is rejected by the bootloader (`no bootable app`). Pin `espflash@3.3.0` until the project migrates to `esp-hal 1.0`.
+
+### 1.2 Load the environment in your shell
+
+**Windows (PowerShell):**
+```powershell
+Set-ExecutionPolicy RemoteSigned -Scope CurrentUser   # once, if scripts are blocked
+. $HOME\export-esp.ps1
+```
+**Linux / macOS:**
+```bash
+source $HOME/export-esp.sh
+```
+Verify: `espflash --version` (should report a 3.x version).
+
+### 1.3 Hardware
+
+Connect the **ESP32-S3** to the host over USB. The console is on **UART0** (`esp-println` `uart` feature), exposed by the on-board USB-to-UART bridge (CH343 / CP2102 / CH340) as e.g. `COM5` (Windows) or `/dev/ttyUSB0` (Linux). A **2.4 GHz Wi-Fi** network must be in range (the ESP32-S3 radio is 2.4 GHz only).
+
+> If your board exposes only the native USB-Serial-JTAG peripheral, switch the `esp-println` feature in [`kernel/Cargo.toml`](kernel/Cargo.toml) from `uart` to `jtag-serial`.
+
+---
+
+## 2. Build & Flash — Step by Step
+
+From the repository root (`EspressoOS/`):
+
+### Step 1 — Generate the partition table
+```bash
+python tools/partition-gen/partition_gen.py
+```
+Parses [`partitions.csv`](partitions.csv) into `partitions.bin`, validating alignment/boundaries (see [Memory Map](#memory-map--partition-table)).
+
+### Step 2 — Set your boot Wi-Fi credentials
+```bash
+cp kernel/src/wifi_credentials.rs.example kernel/src/wifi_credentials.rs
+```
+```rust
+// kernel/src/wifi_credentials.rs — GIT-IGNORED, never committed
+pub const WIFI_SSID: &str = "your-2.4GHz-ssid";
+pub const WIFI_PASSWORD: &str = "your-password";
+```
+This is the network the board joins **at boot**. You can switch networks later at runtime with the `wifi connect` command (§4). `wifi_credentials.rs` is in `.gitignore`, so your password never lands in version control.
+
+### Step 3 — Build (release is mandatory)
+```bash
+cargo build --release
+```
+> A **release** build is required — PSRAM and `esp-wifi` do not work in debug. The build script also compiles the userland programs and embeds them into the kernel image.
+
+### Step 4 — Flash and monitor
+```bash
+cargo run --release
+```
+This runs `espflash flash --monitor` (configured in [`.cargo/config.toml`](.cargo/config.toml)): it writes the image and opens the serial monitor. Pick the serial port when prompted.
+
+### Expected serial output
+```
+[kernel] PSRAM added to heap: 7340032 bytes @ 0x3c1f0000 (1MB reserved for Userland @ 0x3c0f0000)
+[psram-exec] reserved PSRAM mapped to the instruction bus @ 0x42800000 (16 pages)
+[psram-exec] OK: code EXECUTED from PSRAM returned 42 (expected 42)
+
+========================================
+   EspressoOS   ·   kernel
+   Live console. Starting subsystems.
+   Kernel heap: 7471104 bytes
+========================================
+[kernel] userland: 10 binaries installed/updated in EspFs
+[kernel] starting interactive console (kernel shell) on UART0...
+[kernel] task 'shell' created (tid=1)
+[kernel] task 'heartbeat' created (tid=2)
+[kernel] task 'net' created (tid=3)
+[net] connecting to SSID 'your-ssid'...
+[net] associated with AP; negotiating DHCP...
+[net] IP = 192.168.2.146
+[net] SSH listening on port 22, ECHO on 2323, OTA on 3300
+
+EspressoOS shell. Type 'help' to see the commands.
+EspressoOS:~$
+```
+The on-board LED blinks (~1 Hz) as the heartbeat proof-of-multitasking. If it doesn't, adjust `LED_GPIO` in [`main.rs`](kernel/src/main.rs) (typically GPIO 2 or GPIO 48).
+
+Monitor controls: **Ctrl+R** resets the chip, **Ctrl+C** exits the monitor.
+
+---
+
+## 3. Connecting to the Shell
+
+EspressoOS runs **one** shell, reachable two ways. Both share the same command set and behavior.
+
+### 3a. Serial console (UART0)
+
+The serial monitor opened by `cargo run --release` **is** an interactive terminal. After boot you get the prompt:
+```
+EspressoOS:~$
+```
+Type commands directly. Examples:
+```
+EspressoOS:~$ help
+EspressoOS:~$ ls /
+EspressoOS:~$ cat /etc/passwd
+EspressoOS:~$ wifi status
+```
+
+### 3b. SSH over the network
+
+Once the board prints its IP and `SSH listening on port 22`, log in from any standard OpenSSH client on the same network:
+
+```bash
+ssh youareme@192.168.2.146          # then enter the dev password
+```
+
+| Item | Value | Where |
+| :--- | :--- | :--- |
+| Username | `youareme` | `DEV_USER` in [`ssh/config.rs`](kernel/src/drivers/ssh/config.rs) |
+| Password | `851963Y@#` | `DEV_PASSWORD` in [`ssh/config.rs`](kernel/src/drivers/ssh/config.rs) |
+| Host key | stable ed25519 (fixed dev seed) | `HOST_KEY_SEED` in `ssh/config.rs` |
+
+The SSH prompt shows the logged-in user: `youareme@EspressoOS:~$`. The host key is derived from a fixed dev seed, so its fingerprint is **stable across reboots and re-flashes** — you won't need to clear `known_hosts`.
+
+You can also check the raw network path with the TCP echo server on port 2323:
+```bash
+printf 'hello\n' | nc 192.168.2.146 2323     # echoes "hello" back
+```
+
+> **Security note (dev-only):** the SSH password and host-key seed are placeholders embedded in the binary for development. Change `DEV_USER` / `DEV_PASSWORD` / `HOST_KEY_SEED` for your setup, and do **not** expose this server to the internet.
+
+---
+
+## 4. Connecting to Wi-Fi from the shell
+
+The board joins the network in `wifi_credentials.rs` **at boot**. To **scan** and **switch networks at runtime**, use the `wifi` command (or the `nmcli`-compatible shim). These work from either the console or SSH.
+
+### The `wifi` command
+
+```
+EspressoOS:~$ wifi scan
+Scanning for networks...
+SSID                              RSSI   CH  SEC
+Neighbor                           -48    6  WPA
+Neighbor_5G                        -71   11  WPA
+CafeLibre                          -80    1  open
+
+EspressoOS:~$ wifi connect "Neighbor" "[PASSWORD]"
+Connecting to 'Neighbor'...
+(use 'wifi status' to check the result)
+
+EspressoOS:~$ wifi status
+state:  Connected
+ssid:   Neighbor
+ip:     192.168.2.146
+
+EspressoOS:~$ ip
+wlan0: 192.168.2.146  ssid "Neighbor"  state Connected
+
+EspressoOS:~$ wifi disconnect
+Disconnecting...
+```
+
+- **SSIDs with spaces** work because the shell honors quotes: `wifi connect "My Home Net" "pass"`.
+- For an **open network**, omit the password: `wifi connect "GuestWifi"`.
+- `wifi scan` briefly pauses (~1–2 s) while the radio scans; the SSID list is sorted by signal strength.
+
+### The `nmcli` shim (familiar syntax)
+
+An `nmcli`-compatible front-end maps the common operations to the same engine. A no-op `sudo` prefix is also accepted (EspressoOS has no privilege separation).
+
+| `nmcli` command | Equivalent |
+| :--- | :--- |
+| `nmcli device status` | `wifi status` |
+| `nmcli radio wifi on` | (no-op — the radio is always on) |
+| `nmcli device wifi list` | `wifi scan` |
+| `nmcli device wifi connect "SSID" password "PASS"` | `wifi connect "SSID" "PASS"` |
+| `sudo nmcli device wifi connect "SSID" password "PASS"` | same (the `sudo` is ignored) |
+
+```
+EspressoOS:~$ nmcli device wifi list
+EspressoOS:~$ sudo nmcli device wifi connect "Neighbor" "[PASSWORD]"
+```
+
+> **How it works:** the network task (`net`) is the sole owner of the Wi-Fi controller. The shell **enqueues** a command; the `net` task executes it in its service loop (scan is a blocking radio operation; `connect` reconfigures credentials, reconnects, and forces a fresh DHCP lease).
+
+---
+
+## 5. Command Reference
+
+Type `help` in the shell to print this list. Multiple file arguments and quoted strings are supported everywhere.
+
+### Shell built-ins
+
+| Command | Syntax | Description |
+| :--- | :--- | :--- |
+| `help` | `help` | Show the command list. |
+| `clear` | `clear` | Clear the screen (ANSI). |
+| `echo` | `echo [-n] TEXT...` | Print text; `-n` suppresses the trailing newline. |
+| `uptime` | `uptime` | Time since boot (days/h/m/s). |
+| `free` | `free` | Kernel heap usage (total / used / free). |
+| `ps` | `ps` | List scheduler tasks. |
+| `reboot` | `reboot` | Software-reset the board. |
+| `exit` | `exit` \| `quit` \| `logout` | End the SSH session; on the console, restart the shell. |
+
+### Filesystem
+
+| Command | Syntax | Description |
+| :--- | :--- | :--- |
+| `ls` | `ls [PATH]` | List a directory (defaults to CWD). Dirs are suffixed `/`, devices `@`. |
+| `cd` | `cd [PATH]` | Change directory (defaults to `/`). |
+| `pwd` | `pwd` | Print the current directory. |
+| `cat` | `cat FILE...` | Print file contents. |
+| `mkdir` | `mkdir DIR...` | Create directories. |
+| `touch` | `touch FILE...` | Create empty files. |
+| `rm` | `rm FILE...` | Remove files. |
+| `write` | `write FILE TEXT...` | Write TEXT into FILE (truncates). |
+
+```
+EspressoOS:~$ mkdir /tmp/demo
+EspressoOS:~$ write /tmp/demo/hello.txt hola mundo
+EspressoOS:~$ cat /tmp/demo/hello.txt
+hola mundo
+EspressoOS:~$ ls /tmp/demo
+hello.txt
+```
+
+### Networking
+
+| Command | Syntax | Description |
+| :--- | :--- | :--- |
+| `wifi` | `wifi status \| scan \| connect "SSID" [PASS] \| disconnect` | Runtime Wi-Fi management (§4). |
+| `ip` | `ip` | Show the `wlan0` address, SSID, and link state. |
+| `nmcli` | `nmcli device status \| device wifi list \| device wifi connect "SSID" password "PASS"` | `nmcli`-compatible shim (§4). |
+| `sudo` | `sudo COMMAND [ARGS...]` | Run a command (no privilege separation; the prefix is a no-op). |
+
+### Hardware & buses
+
+| Command | Syntax | Description |
+| :--- | :--- | :--- |
+| `i2c` | `i2c scan` · `i2c read ADDR_HEX LEN(1..64)` · `i2c write ADDR_HEX B0 [B1 ...]` | Master I2C on `/dev/i2c0`. |
+| `spi` | `spi transfer B0 [B1 ...]` | Full-duplex SPI transfer on `/dev/spi0`. |
+| `sha256` | `sha256 [TEXT]` | Hardware SHA-256 of TEXT. |
+| `power` | `power sleep [SECONDS]` · `power deep-sleep [SECONDS]` | Light/Deep sleep (deep-sleep reboots on wake). |
+| `ble` | `ble status` · `ble advertise` | Bluetooth LE status / start advertising as `EspressoOS`. |
+
+```
+EspressoOS:~$ i2c scan
+EspressoOS:~$ i2c write 0x3c 0x00 0xAE
+EspressoOS:~$ spi transfer 0x9F 0x00 0x00
+EspressoOS:~$ sha256 hello
+```
+
+### System & advanced
+
+| Command | Syntax | Description |
+| :--- | :--- | :--- |
+| `syscalltest` | `syscalltest` | Exercise the syscall ABI end to end. |
+| `smp` | `smp` | Multicore (SMP) status. Requires the `smp` build feature to schedule on core 1. |
+| `pms` | `pms [world1]` | Memory-protection (PMS) status; `pms world1` re-applies World-1 enforcement. Requires the `pms` build feature. |
+| `ota` | `ota status` · `ota set factory\|ota0` · `ota rx` · `ota apply` | A/B firmware update: inspect `otadata`, select the boot slot, check the received buffer, and flash the inactive slot (image is received over TCP :3300). |
+
+---
+
+## 6. The Shell — prompts, redirection, pipes, exit
+
+**Two prompts, one shell.** The prompt shows the current directory (`/` is displayed as `~`, like bash):
+- **Serial console:** `EspressoOS:~$` (no user — there's no local login).
+- **SSH:** `youareme@EspressoOS:~$` (the authenticated `DEV_USER`).
+
+**Redirection & pipes:**
+```
+EspressoOS:~$ echo saved > /tmp/a.txt          # truncate
+EspressoOS:~$ echo more >> /tmp/a.txt          # append
+EspressoOS:~$ ls / | cat                        # pipe (first stage is executed)
+```
+> Multi-stage pipelines are parsed; currently the **first stage** runs (full N-stage piping in userland is a work item).
+
+**Ending a session:** `exit` (also `quit` / `logout`).
+- Over **SSH**, it performs a clean channel-close handshake — your client prints `Connection to <ip> closed.` and the server re-listens for the next connection.
+- On the **console**, it prints `logout` and restarts the shell.
+
+**Concurrency:** the console and an SSH session can be used at the same time; command output is routed to the correct session per command. (The current working directory is shared global state between them.)
+
+---
+
+## Architecture & Kernel Subsystems
+
+- **Arch (Xtensa LX7)** — [`arch/xtensa`](kernel/src/arch/xtensa): hand-written windowed-register context switch ([`context.rs`](kernel/src/arch/xtensa/context.rs)), exception/interrupt vectors with a **preempt-in-epilogue** switch ([`interrupts.rs`](kernel/src/arch/xtensa/interrupts.rs), [`syscall/trap.rs`](kernel/src/syscall/trap.rs)), SYSTIMER ([`timer.rs`](kernel/src/arch/xtensa/timer.rs)), SMP-ready `Mutex`.
+- **Memory** — [`mm`](kernel/src/mm): 8 MB octal PSRAM added to the `esp-alloc` heap ([`heap.rs`](kernel/src/mm/heap.rs)); the first 1 MB is reserved and **mapped to the instruction bus** so userland executes from PSRAM ([`psram_exec.rs`](kernel/src/mm/psram_exec.rs)); PMS memory protection behind `--features pms` ([`mpu.rs`](kernel/src/mm/mpu.rs)).
+- **Scheduler & processes** — [`scheduler`](kernel/src/scheduler): round-robin over per-task frames; `spawn`/`exit`/`wait`, zombie reaping, blocking `wait` via a syscall-restart flag; SMP core-1 run-queue behind `--features smp`.
+- **VFS** — [`vfs`](kernel/src/vfs): everything-is-a-file (`open`/`close`/`read`/`write`/`seek`/`readdir`), `devfs` (`/dev/console`, `/dev/null`, `/dev/zero`, `/dev/i2c0`, `/dev/spi0`), `ramfs`, `procfs` (`/proc`), `sysfs` (`/sys`), pipes.
+- **Filesystem** — [`fs`](kernel/src/fs): `EspFs`, a pure-Rust log-structured, wear-leveled FS over internal NOR flash, mounted at `/` (currently falls back to `ramfs` on device).
+- **Syscalls** — [`syscall`](kernel/src/syscall): stable ABI (`a2`=number, `a3..a8`=args); real `syscall`-instruction trap under `--features syscall-trap` (default).
+- **Userland** — [`userland`](userland): `no_std` `libc` + ELF programs (`init`, `sh`, `cat`, `echo`, `ls`, `ota`, `ping`, `sntp`, `netstat`, `httpd`) built to per-process PSRAM slots by [`kernel/build.rs`](kernel/build.rs) and deployed to `/bin`.
+- **Drivers** — [`drivers`](kernel/src/drivers): GPIO, UART, I2C, SPI, crypto/SHA, power, BLE, and Wi-Fi ([`wifi.rs`](kernel/src/drivers/wifi.rs)) bound to `smoltcp`.
+- **SSH-2.0 server** — [`drivers/ssh`](kernel/src/drivers/ssh): curve25519 KEX, ed25519 host key, chacha20-poly1305 transport, password auth, session channel bridged to the shell.
+- **OTA** — [`ota`](kernel/src/ota): A/B slots + `otadata`, TCP :3300 receiver buffered in PSRAM, `ota apply`.
 
 ---
 
 ## Repository Structure
 
-The workspace is organized as follows:
-
 ```
 EspressoOS/
-├── .cargo/                 # Target configuration for Xtensa cross-compilation
-├── bootloader/             # Second-stage custom bootloader (stub crate, Phase 5+)
+├── .cargo/config.toml       # Xtensa target + `cargo run` = espflash flash --monitor
+├── bootloader/              # 2nd-stage bootloader (stub crate, standalone)
+├── kernel/                  # Kernel crate (package: espressoos-kernel, binary: kernel)
+│   ├── build.rs             # Builds userland ELFs → per-slot linker scripts → embeds them
 │   ├── src/
-│   │   ├── flash.rs        # Direct flash reading methods for boot
-│   │   ├── multiboot2.rs   # Multiboot headers mapping
-│   │   ├── partition_table.rs # Basic partition table parser
-│   │   └── main.rs         # Low-level boot initialization and kernel jump
+│   │   ├── arch/xtensa/     # context switch, vectors, timer, sync
+│   │   ├── drivers/         # gpio, uart, i2c, spi, crypto, power, ble, wifi, ssh/
+│   │   ├── fs/              # espfs, ramfs, procfs, sysfs, devfs
+│   │   ├── mm/              # heap, psram_exec, mpu
+│   │   ├── scheduler/       # tasks, policy, processes, core_sync (SMP)
+│   │   ├── shell/           # commands/, parser, remote (console+SSH runner)
+│   │   ├── syscall/         # table, handler, trap
+│   │   ├── vfs/             # inode, file, devfs, pipe, socket, mount
+│   │   ├── ota/             # A/B slots + otadata
+│   │   ├── wifi_credentials.rs   # GIT-IGNORED boot Wi-Fi SSID/password
+│   │   └── main.rs          # boot sequencer
 │   └── Cargo.toml
-├── kernel/                 # Core EspressoOS Kernel Crate
-│   ├── src/
-│   │   ├── arch/           # Architecture Specific Abstractions (Xtensa LX7)
-│   │   │   ├── xtensa/
-│   │   │   │   ├── context.rs    # Context saving/restoring and switch_to (Assembly)
-│   │   │   │   ├── interrupts.rs # Vector table configuration & critical sections
-│   │   │   │   ├── sync.rs       # Atomic synchronization (SMP-ready Mutex)
-│   │   │   │   ├── timer.rs      # Driver for SYSTIMER (systick counting)
-│   │   │   │   └── mod.rs
-│   │   │   └── mod.rs
-│   │   ├── drivers/        # Hardware Device Drivers
-│   │   │   ├── gpio.rs     # GPIO configuration (Input/Output/Pull-up/Pull-down)
-│   │   │   ├── uart.rs     # Console serial driver using native USB-Serial-JTAG
-│   │   │   ├── flash.rs    # NOR flash driver via ROM SPI routines
-│   │   │   ├── spi.rs      # SPI master bus driver (skeleton)
-│   │   │   ├── i2c.rs      # I2C master bus driver (skeleton)
-│   │   │   ├── wifi.rs     # Network task: esp-wifi STA + smoltcp + DHCP + echo/SSH (working)
-│   │   │   ├── ssh/        # Working SSH-2.0 server (serves the shell on port 22)
-│   │   │   │   ├── auth.rs        # User authentication (password / publickey ed25519)
-│   │   │   │   ├── channel.rs     # Session channels & shell routing logic
-│   │   │   │   ├── crypt.rs       # Session AEAD (chacha20-poly1305@openssh.com)
-│   │   │   │   ├── kex.rs         # Key exchange (curve25519-sha256 ECDH + KDF, ed25519 host key)
-│   │   │   │   ├── proto.rs       # RFC 4251 types and Binary Packet Protocol
-│   │   │   │   ├── crypto_rng.rs  # Hardware TRNG -> rand_core adapter
-│   │   │   │   ├── config.rs      # Dev credentials, authorized keys, host-key seed
-│   │   │   │   └── mod.rs         # Connection state machine and server entry
-│   │   │   └── mod.rs
-│   │   ├── fs/             # Core File System Drivers
-│   │   │   ├── ramfs.rs    # In-memory RAM filesystem
-│   │   │   ├── littlefs/   # LittleFS integration layer (draft wrapper)
-│   │   │   └── mod.rs
-│   │   ├── mm/             # Memory Management Units
-│   │   │   ├── heap.rs     # Kernel static allocator configuration (esp-alloc)
-│   │   │   ├── mpu.rs      # Memory protection interface (PMS / World Controller)
-│   │   │   └── mod.rs
-│   │   ├── ota/            # Firmware updates and slot rotation logic
-│   │   │   ├── partition.rs # CRC32 checker and Espressif otadata partition selector
-│   │   │   └── mod.rs
-│   │   ├── scheduler/      # CPU Task Scheduling
-│   │   │   ├── task.rs     # Task Control Block (TCB), stacks and task lifecycle states
-│   │   │   ├── policy.rs   # Round-Robin scheduling policy implementations
-│   │   │   ├── core_sync.rs # Multicore/SMP boot and sync routines (skeleton)
-│   │   │   └── mod.rs
-│   │   ├── shell/          # Interactive REPL Environment
-│   │   │   ├── parser.rs   # CLI tokenizer and syntax parser (redirections, pipes)
-│   │   │   ├── remote.rs   # Shell Io trait and local/remote (SSH) adapters
-│   │   │   ├── commands/   # Shell built-in coreutils (echo, uptime, free, ps, etc.)
-│   │   │   └── mod.rs
-│   │   ├── syscall/        # Syscall Dispatcher
-│   │   │   ├── table.rs    # Syscall numbers mapping table
-│   │   │   ├── handler.rs  # Kernel-side syscall handlers
-│   │   │   └── mod.rs
-│   │   ├── vfs/            # Virtual File System Layers
-│   │   │   ├── devfs.rs    # Device files mount provider (/dev/null, /dev/console)
-│   │   │   ├── file.rs     # Open file descriptors and access flags
-│   │   │   ├── inode.rs    # VFS traits for inodes and filesystems
-│   │   │   ├── mount.rs    # VFS mount point database and path normalization
-│   │   │   └── mod.rs
-│   │   ├── prelude.rs      # Shared definitions (KError, KResult, layout constants)
-│   │   └── main.rs         # Kernel boot sequencer and main entry point
-│   └── Cargo.toml
-├── tools/                  # Build tools and utilities
-│   ├── partition-gen/      # CSV-to-Binary partition layout compiler
-│   │   └── partition_gen.py
-│   ├── mkimage/            # Packaging tools for firmware binary creation (skeleton)
-│   │   └── README.md
-│   └── tests/              # Test suites
-│       ├── logic_tests.py  # Python emulation suite to test OS logic
-│       ├── ssh_proto_tests.py # Test suite for SSH packet formatting & types
-│       └── run_all.py         # Unified Python test runner
-├── Cargo.toml              # Parent workspace Cargo configuration
-├── partitions.csv          # Flash memory layout specification
-├── rust-toolchain.toml     # Toolchain pin configuration
-└── README.md               # This documentation file
+├── userland/                # no_std libc + /bin programs (ELF, run from PSRAM)
+│   ├── libc/                # syscall wrappers, _start
+│   └── apps/src/bin/        # init, sh, cat, echo, ls, ota, ping, sntp, netstat, httpd
+├── tools/                   # partition-gen (CSV→bin), test harnesses
+├── partitions.csv           # 16 MB flash layout
+└── README.md                # this file
 ```
 
 ---
 
-## Environment Prerequisites
+## Memory Map & Partition Table
 
-To compile and flash EspressoOS, you will need the Espressif Xtensa Rust toolchain, flashing tools, and Python 3.
+The **16 MB** external SPI flash is laid out for the A/B update scheme, honoring 4 KB erase sectors and 64 KB app alignment:
 
-### 1. Install Rust + Espressif Xtensa Toolchain & Flashing Tools
-
-Install `espup` (the toolchain installer) and `espflash` (flashing and monitoring utility) using Cargo:
-
-```bash
-# Install toolchain and flashing utilities
-cargo install espup --locked
-cargo install espflash@3.3.0 --locked
+```
+0x000000 ┤ Bootloader (2nd stage, 32 KB)
+0x008000 ┤ Partition table (3072 B)
+0x009000 ┤ NVS (24 KB)
+0x00F000 ┤ otadata (A/B boot control, 8 KB)
+0x020000 ┤ factory app — Slot A (primary kernel, 4 MB)
+0x420000 ┤ ota_0 app  — Slot B (secondary kernel, 4 MB)
+0x820000 ┤ filesystem (EspFs / ramfs, ~7.8 MB)
+0xFF0000 ┤ coredump (64 KB)
 ```
 
-> **Important — use espflash 3.x.** This project targets `esp-hal 0.23`, whose image format predates the **ESP-IDF App Descriptor** that `espflash` **4.x** requires. With espflash 4.x the flashed image is rejected by the bootloader (`Image requires efuse blk rev …` / `no bootable app`). Until the project migrates to `esp-hal 1.0` + `esp-bootloader-esp-idf`, pin espflash to the **3.x** line (`3.3.0`).
+Flash layout constants live in [`prelude.rs`](kernel/src/prelude.rs); the table is generated from [`partitions.csv`](partitions.csv) by `tools/partition-gen/partition_gen.py`.
 
-Once installed, run `espup` to set up the toolchain on your system:
-```bash
-espup install
-```
-
-### 2. Configure Environment Variables
-
-Based on your operating system and shell, you must source the environment script to make the Xtensa toolchain accessible in your current terminal session:
-
-#### On Windows (PowerShell)
-You may need to adjust the execution policy in your session to run the script:
-```powershell
-# Allow local script execution (run as Administrator if needed, or CurrentUser)
-Set-ExecutionPolicy RemoteSigned -Scope CurrentUser
-
-# Load Espressif environment variables
-. $HOME\export-esp.ps1
-```
-
-#### On Linux / macOS
-```bash
-source $HOME/export-esp.sh
-```
-
-To verify that the tools and environment are set up correctly, check the flashing tool version:
-```bash
-espflash --version
-```
-
-### 3. Hardware Connections
-Connect your **ESP32-S3** board to the host PC over USB. The kernel console is configured for **UART0** (`esp-println` `uart` feature), which is what most dev boards expose through an on-board USB-to-UART bridge (CH343 / CP2102 / CH340). The serial port will appear as e.g. `COM5` (Windows) or `/dev/ttyUSB0` (Linux).
-
-> If your board only exposes the **native USB-Serial-JTAG** peripheral instead of a UART bridge, switch the `esp-println` feature in [`kernel/Cargo.toml`](kernel/Cargo.toml) from `uart` to `jtag-serial` (exactly one of `uart`/`jtag-serial`/`auto` may be enabled).
-
-Your board also needs a **2.4 GHz WiFi** network in range for the networking/SSH features (the ESP32-S3 radio is 2.4 GHz only).
+**RAM:** 512 KB internal SRAM (kernel heap + esp-wifi `Internal` allocations) plus 8 MB PSRAM (general heap + the reserved 1 MB executable userland region at data alias `0x3c0f0000` / instruction alias `0x42800000`).
 
 ---
 
-## Building and Flashing
+## Development Roadmap
 
-Make sure you are in the repository directory before building:
-```bash
-cd EspressoOS
-```
+Structured into 10 incremental phases. Bring-up (P0), memory/PSRAM (P1), **preemptive** multitasking (P2), the syscall ABI + **userland execution** (P6), and networking with an SSH server (P7) are **verified on hardware**. Bus drivers (P3) and persistent `EspFs` (P4) are wired and compile-clean (P4 persistence has an open device bug). OTA (P5), PMS (P8, `--features pms`), and SMP (P9, `--features smp`) are implemented behind opt-in features so the default image stays the known-good one.
 
-### 1. Compile the Partition Table
-The flash memory must be partitioned before compiling and flashing the operating system. Run the Python generator from the repository root:
+| Phase | Title | Status |
+| :--- | :--- | :--- |
+| P0 | Bring-up (clock, heap, UART console, VFS, scheduler) | ✅ hardware |
+| P1 | Memory management (8 MB PSRAM heap) | ✅ hardware |
+| P2 | Task scheduler (preemptive context switch) | ✅ hardware |
+| P3 | Bus drivers (I2C `/dev/i2c0`, SPI `/dev/spi0`) | ✅ wired |
+| P4 | Storage & filesystems (`EspFs` on `/`) | ⚠️ ramfs fallback on device |
+| P5 | OTA A/B updates (TCP :3300 → `ota apply`) | ✅ wired |
+| P6 | Syscalls & userland (ABI + ELF exec from PSRAM) | ✅ hardware |
+| P7 | Networking (WiFi STA) + SSH-2.0 server + shell | ✅ hardware |
+| P8 | Memory protection (PMS, World-0/World-1) | 🔒 `--features pms` |
+| P9 | SMP dual-core (APP_CPU run-queue) | 🔒 `--features smp` |
 
-```bash
-python tools/partition-gen/partition_gen.py
-```
-This utility parses [partitions.csv](partitions.csv) and compiles it into `partitions.bin`, validating partition alignments and boundary limits.
-
-### 2. Configure WiFi Credentials
-The networking and SSH features need the credentials of a **2.4 GHz** network. Copy the template to a git-ignored file and fill in your SSID/password:
-
-```bash
-cp kernel/src/wifi_credentials.rs.example kernel/src/wifi_credentials.rs
-```
-```rust
-// kernel/src/wifi_credentials.rs  — git-ignored, never committed
-pub const WIFI_SSID: &str = "your-2.4GHz-ssid";
-pub const WIFI_PASSWORD: &str = "your-password";
-```
-> `wifi_credentials.rs` is listed in `.gitignore`, so your password never lands in version control — only the `.example` template is tracked.
-
-### 3. Build the Kernel
-Compile the kernel binary optimized for the Xtensa architecture. **A release build is required** (PSRAM and esp-wifi do not work in debug):
-```bash
-cargo build --release
-```
-
-### 4. Flash and Monitor
-Write the binary onto the ESP32-S3 flash and start the serial monitor with a single command:
-```bash
-cargo run --release
-```
-*(This command runs `espflash flash --monitor` automatically as configured in `.cargo/config.toml`)*
-
-#### Expected Serial Output
-```
-[kernel] PSRAM added to heap: 8388608 bytes @ 0x3c000000
-========================================
-   EspressoOS   ·   kernel
-========================================
-[kernel] task 'shell' created (tid=1)
-[kernel] task 'heartbeat' created (tid=2)
-[net] connecting to SSID 'your-ssid'...
-[net] associated; negotiating DHCP...
-[net] IP = 192.168.2.126
-[net] TCP echo server listening on port 2323
-[ssh] SSH server on port 22 (try: ssh youareme@192.168.2.126)
-[ssh] host key: SHA256:ODaZ7h4sUydeKsOw4lDsvi4bSji78Jrczj4kYWfTrS8
-[heartbeat] tick=0 uptime=236ms led=1
-[heartbeat] tick=1 uptime=736ms led=0
-...
-```
-The on-board LED blinks (~1 Hz). If it doesn't, adjust the `LED_GPIO` constant in [main.rs](kernel/src/main.rs) to match your board (typically GPIO 2 or GPIO 48).
-
-### 5. Connect over SSH
-Once the board prints its IP and `SSH server on port 22`, log in from any standard OpenSSH client on the same network:
-
-```bash
-ssh youareme@192.168.2.126        # then enter the dev password
-```
-
-Development credentials live in [`kernel/src/drivers/ssh/config.rs`](kernel/src/drivers/ssh/config.rs) (`DEV_USER` / `DEV_PASSWORD`) — change them for your setup. The **host key** is derived from a **fixed dev seed** (`HOST_KEY_SEED`) so its fingerprint is **stable across reboots and re-flashes** — you won't need to clear `known_hosts` on every connection.
-
-You can also verify the raw network path with the TCP echo server:
-```bash
-# sends "hello" and gets it back
-printf 'hello\n' | nc 192.168.2.126 2323
-```
-
-> **Security note (dev-only):** the SSH password, the authorized-keys list, and the host-key seed are placeholders embedded in the binary for the MVP. In production these would come from persistent storage (LittleFS: hashed passwords, `authorized_keys`, a TRNG-generated host key). Do **not** expose this server to the internet.
-
----
-
-## Memory Map and Partition Table
-
-EspressoOS lays out the **16 Megabytes** (`0x1000000` bytes) external SPI Flash to fit the A/B update rotation scheme, complying with the **4 KB** erase sector sizes and **64 KB** app partition alignment required by Xtensa:
-
-```
-Flash Address Map (16 MB):
-0x000000 ├────────────────────────────┤ 0x008000: Bootloader (2nd Stage, 32 KB)
-0x008000 ├────────────────────────────┤ 0x008C00: Partition Table binary (3072 B)
-0x009000 ├────────────────────────────┤ 0x00F000: NVS (Non-Volatile Storage, 24 KB)
-0x00F000 ├────────────────────────────┤ 0x011000: otadata (A/B Boot control data, 8 KB)
-0x020000 ├────────────────────────────┤ 0x420000: Slot A - factory app (Primary Kernel, 4 MB)
-0x420000 ├────────────────────────────┤ 0x820000: Slot B - ota_0 app (Secondary Kernel, 4 MB)
-0x820000 ├────────────────────────────┤ 0xFF0000: File System (fs) (LittleFS / devfs / ramfs, ~7.8 MB)
-0xFF0000 ├────────────────────────────┤ 0x100000: coredump (Crash dumps, 64 KB)
-```
-
-The matching flash map layout constants are declared in [prelude.rs](kernel/src/prelude.rs#L83-L106):
-
-| Name | Type | Subtype | Flash Offset | Size | Purpose |
-| :--- | :--- | :--- | :--- | :--- | :--- |
-| `nvs` | `data` | `nvs` | `0x9000` | 24 KB (`0x6000`) | Non-Volatile key-value system config store. |
-| `otadata` | `data` | `ota` | `0xF000` | 8 KB (`0x2000`) | Sequence state counters for A/B boot selection. |
-| `factory` | `app` | `factory` | `0x20000` | 4 MB (`0x400000`) | Slot A: Primary boot kernel application. |
-| `ota_0` | `app` | `ota_0` | `0x420000` | 4 MB (`0x400000`) | Slot B: Fail-over kernel application for OTA updates. |
-| `fs` | `data` | `spiffs` / `littlefs` | `0x820000` | ~7.8 MB (`0x7D0000`) | LittleFS partition for user data storage. |
-| `coredump`| `data` | `coredump`| `0xFF0000` | 64 KB (`0x10000`) | Memory logs compiled during a panic event. |
-
----
-
-## Kernel Subsystems
-
-### VFS (Virtual File System)
-The VFS is the central hub for I/O routing. Filesystems and custom nodes implement the [Inode](kernel/src/vfs/inode.rs) trait to interact with standard file handlers.
-
-- **File Descriptors (`Fd`)**: Aliased to `i32`. The global descriptor table (`FdTable` in [vfs/mod.rs](kernel/src/vfs/mod.rs#L27)) permits up to **64** concurrently open descriptors.
-- **Mount points**: In Phase 0, VFS mounts a RAM-based volatile filesystem (`RamFs` at [fs/ramfs.rs](kernel/src/fs/ramfs.rs)) at `/` and `/tmp`, and a devices filesystem (`DevFs` at [vfs/devfs.rs](kernel/src/vfs/devfs.rs)) at `/dev`.
-
-#### Supported Device Files in `/dev`
-1. `/dev/null`: Discards all inputs; returns EOF on read requests.
-2. `/dev/zero`: Provides infinite null bytes (`0`) on read; discards writes.
-3. `/dev/console`: Routes read and write operations to the native JTAG UART hardware console.
-
----
-
-### Task Scheduler
-Located in [scheduler/mod.rs](kernel/src/scheduler/mod.rs), the scheduler performs task scheduling for multitasking in the kernel.
-
-- **Task Execution**: Cooperative context switching via `yield_now()` is verified working on hardware; a preemptive path driven by the SYSTIMER interrupt is present and being hardened (see the [roadmap](#project-status-and-development-roadmap)).
-- **Quantum**: The running task's time slice is set to **5 ticks**. At a tick rate of `TICK_HZ = 100`, this corresponds to **~50 ms**.
-- **Task Lifecycle**: Managed inside [scheduler/task.rs](kernel/src/scheduler/task.rs) through four canonical states:
-  - `Ready`: In the scheduler's run queue, waiting to be allocated execution time.
-  - `Running`: The thread currently holding the CPU context.
-  - `Blocked`: Paused thread waiting for an event (timers, I/O lock).
-  - `Zombie`: Terminated task awaiting resource collection by the parent.
-
----
-
-### Syscall Mechanism (System Calls)
-The boundary between userland tasks and kernel operations is managed by a strict register-based ABI ([syscall/mod.rs](kernel/src/syscall/mod.rs)).
-
-Syscalls are dispatched by loading the identifier index into register `a2`, storing inputs in registers `a3` through `a7`, and calling a software trap instruction. If a syscall fails, the kernel returns negative errno values (e.g. `-12` for `ENOMEM`, `-2` for `ENOENT`), translated via the [KError](kernel/src/prelude.rs#L13-L50) enum.
-
-#### Syscall ABI Table (Phase 0 / Phase 6+)
-
-| ID (`a2`) | Syscall Name | POSIX Signature | Description |
-| :---: | :--- | :--- | :--- |
-| **0** | `Read` | `read(fd, buf_ptr, len) -> bytes` | Reads data from a file descriptor. |
-| **1** | `Write` | `write(fd, buf_ptr, len) -> bytes` | Writes data to a file descriptor. |
-| **2** | `Open` | `open(path_ptr, path_len, flags) -> fd` | Opens or creates a file at path. |
-| **3** | `Close` | `close(fd) -> 0` | Closes and releases file descriptor. |
-| **4** | `Ioctl` | `ioctl(fd, cmd, arg)` | Configures device properties. |
-| **5** | `Exit` | `exit(code)` | Terminates current thread. |
-| **6** | `Spawn` | `spawn(name, entry, arg, stack, prio) -> tid` | Spawns a new task. |
-| **7** | `Wait` | `wait(tid)` | Waits for task completion (reserved). |
-| **8** | `Seek` | `seek(fd, offset, whence) -> pos` | Offsets open file cursor. |
-| **9** | `Mkdir` | `mkdir(path_ptr) -> 0` | Creates a new folder. |
-| **10** | `Unlink` | `unlink(path_ptr) -> 0` | Deletes a file or directory. |
-| **11** | `Readdir`| `readdir(fd, entry_ptr) -> bytes` | Lists open directory folders. |
-| **12** | `UptimeMs`| `uptime_ms() -> ms` | Milliseconds elapsed since boot. |
-| **13** | `Sbrk` | `sbrk(incr) -> heap_size` | Modifies memory heap size allocation. |
-| **14** | `Yield` | `yield() -> 0` | Voluntarily yields execution time. |
-
----
-
-### A/B Update Scheme (OTA)
-EspressoOS features boot and upgrade structures matching the Espressif dual `otadata` sector format.
-
-The `otadata` partition is split into **2 sectors** of **4 KB** each. Every sector stores an `esp_ota_select_entry_t` entry containing an incremental sequence counter (`ota_seq`) and a CRC-32 checksum. During the boot sequence:
-1. The bootloader reads both sectors and verifies signatures and CRC-32 integrity.
-2. It identifies the valid sector with the highest sequence number `ota_seq`.
-3. It selects the boot slot index using:
-   $$\text{Slot Index} = (\text{ota\_seq} - 1) \pmod 2$$
-   - `0` selects the `factory` slot (Slot A).
-   - `1` selects the `ota_0` slot (Slot B).
-4. If no valid sector header is present, it defaults to booting the `factory` partition as a safe fallback.
-
----
-
-### Peripheral Device Drivers
-- **UART JTAG Serial** ([drivers/uart.rs](kernel/src/drivers/uart.rs)): Console reader and writer. Operates asynchronously over native USB JTAG hardware channels.
-- **GPIO** ([drivers/gpio.rs](kernel/src/drivers/gpio.rs)): Pin input, output, pull-up, and pull-down configurations.
-- **Flash SPI** ([drivers/flash.rs](kernel/src/drivers/flash.rs)): SPI helper routines interacting directly with the chip's internal boot ROM functions to write/erase memory blocks.
-
-### Networking (WiFi + TCP/IP)
-The network stack ([drivers/wifi.rs](kernel/src/drivers/wifi.rs)) runs as a single cooperative kernel task (`net_task`) that owns the radio and the TCP/IP engine and yields the CPU on every poll, so it coexists with the shell and heartbeat tasks.
-
-- **Radio**: 802.11 b/g/n **station (STA)** mode via `esp-wifi` 0.12, associating to the SSID/password from `wifi_credentials.rs` (git-ignored; see the [`.example`](kernel/src/wifi_credentials.rs.example) template). esp-wifi runs its own firmware scheduler on `TIMG0` while the kernel scheduler uses `SYSTIMER` — the two coexist without conflict.
-- **TCP/IP**: the `smoltcp` 0.12 stack, fed by esp-wifi's `WifiDevice`, with a **DHCPv4** client that prints the assigned IP (`[net] IP = …`).
-- **Sockets**: a TCP **echo** server on port **2323** (a simple end-to-end reachability check) and the **SSH** server on port **22**, both driven from the same non-blocking poll loop.
-- **Memory**: esp-wifi's buffers are served from the kernel heap; the 8 MB PSRAM is registered as a heap region so the stack has room (internal SRAM is registered first so DMA-capable allocations stay in SRAM).
-
-### SSH Server (Working)
-A minimal, from-scratch **SSH-2.0 server** ([drivers/ssh](kernel/src/drivers/ssh)) that serves the interactive REPL shell over TCP port 22. The full handshake is **verified end-to-end against OpenSSH 9.5** on real hardware. All cryptographic primitives are delegated to audited `no_std` crates (RustCrypto / dalek) — the kernel implements the SSH **protocol**, never the crypto itself.
-
-- **Transport (`proto.rs`, `crypt.rs`)**: RFC 4251 base types (uint32, string, name-list, mpint) and the SSH Binary Packet Protocol (RFC 4253 §6), verified by a host-side Python suite ([ssh_proto_tests.py](tools/tests/ssh_proto_tests.py)). Session AEAD uses the **`chacha20-poly1305@openssh.com`** construction (`chacha20` + `poly1305`, standard/unpadded Poly1305 tag, per-direction 512-bit keys, sequence-number nonce).
-- **Key Exchange (`kex.rs`)**: `curve25519-sha256` ECDH (`x25519-dalek`) with the exchange hash `H` signed by an **`ssh-ed25519`** host key (`ed25519-dalek`); session keys derived per RFC 4253 §7.2 (`sha2`). Ephemeral keys are seeded from the ESP32-S3 **hardware TRNG** ([crypto_rng.rs](kernel/src/drivers/ssh/crypto_rng.rs)).
-- **Authentication (`auth.rs`)**: `password` (constant-time compare via `subtle`) and `publickey` (`ssh-ed25519`, `verify_strict`). Credentials in [config.rs](kernel/src/drivers/ssh/config.rs).
-- **Connection (`mod.rs`)**: a non-blocking state machine (VersionExchange → KexInit → Kex → NewKeys → UserAuth → Session) pumped from the network task; `session` channel + `pty-req` + `shell`.
-- **Shell Bridge (`shell::remote`)**: a unified `ShellIo` abstraction so the **same** REPL runs on the local console (`ConsoleIo`) and over an SSH channel (`SshChannelIo`).
-- **Host key stability**: derived from a fixed dev seed (`HOST_KEY_SEED`) so the fingerprint is constant across reboots (persistent, TRNG-generated keys arrive with LittleFS).
-
----
-
-## Interactive REPL Shell
-
-EspressoOS starts a CLI shell as a scheduler task on boot. The **same** REPL ([shell/mod.rs](kernel/src/shell/mod.rs), generic over the `ShellIo` trait in [shell/remote.rs](kernel/src/shell/remote.rs)) serves both the local serial console and **remote SSH sessions** — over SSH it is the shell you land in after `ssh <user>@<ip>`.
-
-- **Terminal Control**: Includes support for character deleting (Backspace), execution interruption (`Ctrl-C`), and limits input strings to **256 characters** to prevent stack overflow.
-- **Output Redirection**: The parser ([shell/parser.rs](kernel/src/shell/parser.rs)) supports writing redirection `>` (overwrite) and `>>` (append), setting up descriptors on the targeted VFS nodes before calling commands.
-- **Pipes**: Pipe operators `|` are parsed by the shell syntax parser, but their inter-process communication logic will be completed during the userland multi-tasking phase.
-
-### Shell Commands Tree
-
-```
-EspressoOS CLI Commands
-├── System Info
-│   ├── help              # Lists all commands and usage guidelines
-│   ├── clear             # Clears the screen using ANSI escape codes
-│   ├── uptime            # Prints milliseconds elapsed since boot
-│   ├── free              # Displays memory usage status of the kernel heap
-│   ├── ps                # Lists all active tasks and execution states
-│   └── reboot            # Restarts the CPU via software reset
-├── Filesystem / VFS
-│   ├── pwd               # Prints the current working directory
-│   ├── cd [path]         # Changes the working directory (defaults to `/`)
-│   ├── ls [path]         # Lists a directory (defaults to the current directory)
-│   ├── cat <file>        # Prints file content
-│   ├── mkdir <dir>       # Creates a directory
-│   ├── touch <file>      # Creates an empty file
-│   ├── rm <file>         # Deletes a file or an empty directory
-│   └── write <file> <tx> # Writes string data into a file (truncates)
-└── Text
-    └── echo [-n] <text>  # Prints a line of text (use `-n` to omit newline)
-```
-
-The shell maintains a **working directory (CWD)** shown in the prompt (`user@EspressoOS:cwd$ `, with the root `/` displayed as `~`, e.g. `youareme@EspressoOS:/tmp$ `). Filesystem commands accept **relative paths**, which are resolved against the CWD before hitting the VFS (the VFS itself only accepts absolute, normalized paths). Command errors are routed to the active session — including the remote SSH channel — so you see them wherever you're connected.
-
-Example over SSH:
-```
-youareme@EspressoOS:~$ mkdir demo
-youareme@EspressoOS:~$ cd demo
-youareme@EspressoOS:/demo$ write hello.txt hola mundo
-youareme@EspressoOS:/demo$ cat hello.txt
-hola mundo
-youareme@EspressoOS:/demo$ ls
-hello.txt
-youareme@EspressoOS:/demo$ cd ..
-youareme@EspressoOS:~$ ls /dev
-console@
-null@
-zero@
-```
-
----
-
-## Verification and Mock Testing
-
-As a bare-metal OS running on target silicon, compiling and running tests directly on the development environment is difficult. To address this, EspressoOS includes **Python validation harnesses** located in [tools/tests](tools/tests).
-
-These harnesses contain offline verification logic for the kernel's pure modules:
-
-### Simulated Algorithms and Checked Tests
-1. **Shell Parser & Tokenizer** ([logic_tests.py](tools/tests/logic_tests.py)): Tests parsing of single/double quotes, escape slashes `\`, redirection parsing, and pipe parsing.
-2. **VFS Path Normalization** ([logic_tests.py](tools/tests/logic_tests.py)): Validates resolution of relative paths, absolute paths, directory symbols `.`, and folder parent elements `..`.
-3. **OTA Selection Logic** ([logic_tests.py](tools/tests/logic_tests.py)): Tests CRC-32 parsing and selection calculations to verify bootloader decisions during power failures.
-4. **RamFs File System Semantics** ([logic_tests.py](tools/tests/logic_tests.py)): Simulates reading, writing, and offsets of virtual VFS nodes.
-5. **SSH Binary Packet Protocol & Codecs** ([ssh_proto_tests.py](tools/tests/ssh_proto_tests.py)): Verifies RFC 4251 data representations (uint32, string, name-list, mpint) and framing rules (padding, block alignment, lengths) for SSH packets.
-
-### Running Logical Tests
-
-You can run the unified test runner to execute all harnesses:
-```bash
-python tools/tests/run_all.py
-```
-
-Alternatively, run specific suites using:
-```bash
-# Run shell, VFS, RamFs and OTA tests
-python tools/tests/logic_tests.py
-
-# Run SSH protocol codec and framing tests
-python tools/tests/ssh_proto_tests.py
-```
+**Next steps:** fix `EspFs` persistence on device; wire launching `/bin/*` userland binaries from the kernel shell (with stdout routing); full N-stage pipelines; verify OTA boot-switch against the stock bootloader.
 
 ---
 

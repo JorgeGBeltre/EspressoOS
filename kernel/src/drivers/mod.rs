@@ -9,3 +9,4 @@ pub mod spi;
 pub mod ssh;
 pub mod uart;
 pub mod wifi;
+pub mod wifi_store;

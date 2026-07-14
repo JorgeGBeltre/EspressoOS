@@ -209,6 +209,125 @@ fn now_smoltcp() -> Instant {
     Instant::from_micros(us as i64)
 }
 
+/// Procesa un comando de gestión WiFi usando SÓLO el `WifiController` (nada de
+/// smoltcp): así es seguro llamarlo TANTO en la fase de espera de asociación
+/// (antes de montar la interfaz) como dentro del loop de servicio. Devuelve `true`
+/// si hubo un (re)connect/disconnect que exige refrescar el DHCP (el llamador que
+/// ya tenga smoltcp debe resetear el socket DHCP + `have_ip`).
+fn process_wifi_cmd(controller: &mut WifiController<'static>, wc: WifiCmd) -> bool {
+    match wc {
+        WifiCmd::Scan => {
+            // Para escanear, el radio NO puede estar asociado NI con un `connect()`
+            // pendiente (da `EspErrWifiState`). Desconectamos SIEMPRE (aborta el
+            // connect en curso y deja el STA en estado escaneable), escaneamos, y
+            // reanudamos la conexión. `scan_n` se reintenta un par de veces por si
+            // el `disconnect` aún no ha asentado el estado.
+            *SCAN_DIAG.lock() = String::from("started");
+            println!("[net] scan: starting...");
+            let _ = controller.disconnect();
+            *CURRENT_IP.lock() = None;
+            let t0 = uptime_ms();
+            let mut attempt = 0;
+            let scan = loop {
+                attempt += 1;
+                match controller.scan_n::<24>() {
+                    Ok(v) => break Ok(v),
+                    Err(e) if attempt < 3 => {
+                        // Estado no listo aún (p.ej. el disconnect no ha asentado):
+                        // espera ~50ms cediendo la CPU y reintenta.
+                        let _ = e;
+                        let until = uptime_ms().saturating_add(50);
+                        while uptime_ms() < until {
+                            scheduler::yield_now();
+                        }
+                    }
+                    Err(e) => break Err(e),
+                }
+            };
+            match scan {
+                Ok((aps, n)) => {
+                    let ms = uptime_ms().saturating_sub(t0);
+                    println!("[net] scan: {} APs in {} ms", n, ms);
+                    let mut out = Vec::new();
+                    for ap in aps.iter() {
+                        out.push(ApInfo {
+                            ssid: String::from(ap.ssid.as_str()),
+                            rssi: ap.signal_strength,
+                            channel: ap.channel,
+                            secured: !matches!(ap.auth_method, None | Some(AuthMethod::None)),
+                        });
+                    }
+                    let found = out.len();
+                    *SCAN_RESULTS.lock() = out;
+                    *SCAN_DIAG.lock() = alloc::format!("{} APs in {} ms", found, ms);
+                    SCAN_STATE.store(SCAN_DONE, Ordering::Release);
+                }
+                Err(e) => {
+                    let ms = uptime_ms().saturating_sub(t0);
+                    println!("[net] scan: error {:?} after {} ms", e, ms);
+                    *SCAN_DIAG.lock() = alloc::format!("error {:?} after {} ms", e, ms);
+                    SCAN_STATE.store(SCAN_ERROR, Ordering::Release);
+                }
+            }
+            println!("[net] scan: reconnecting...");
+            let _ = controller.connect();
+            true
+        }
+        WifiCmd::Connect { ssid, password } => {
+            let ssid_h = match ssid.as_str().try_into() {
+                Ok(s) => s,
+                Err(_) => {
+                    println!("[net] ERROR: SSID too long (>32)");
+                    return false;
+                }
+            };
+            let pass_h = match password.as_str().try_into() {
+                Ok(p) => p,
+                Err(_) => {
+                    println!("[net] ERROR: password too long (>64)");
+                    return false;
+                }
+            };
+            let cfg = ClientConfiguration {
+                ssid: ssid_h,
+                password: pass_h,
+                auth_method: if password.is_empty() {
+                    AuthMethod::None
+                } else {
+                    AuthMethod::WPA2Personal
+                },
+                ..Default::default()
+            };
+            let _ = controller.disconnect();
+            if let Err(e) = controller.set_configuration(&Configuration::Client(cfg)) {
+                println!("[net] ERROR set_configuration: {:?}", e);
+                return false;
+            }
+            // Persistir en flash para que sobreviva a reinicios.
+            match crate::drivers::wifi_store::save(&ssid, &password) {
+                Ok(()) => println!("[net] saved Wi-Fi credentials to flash"),
+                Err(e) => println!("[net] warning: could not save credentials: {:?}", e),
+            }
+            *CURRENT_SSID.lock() = Some(ssid.clone());
+            *CURRENT_IP.lock() = None;
+            set_status(WifiStatus::Connecting);
+            println!("[net] switching to SSID '{}'...", ssid);
+            match controller.connect() {
+                Ok(()) => println!("[net] connect() issued for '{}'", ssid),
+                Err(e) => println!("[net] connect() error: {:?}", e),
+            }
+            true
+        }
+        WifiCmd::Disconnect => {
+            let _ = controller.disconnect();
+            *CURRENT_IP.lock() = None;
+            set_status(WifiStatus::Down);
+            println!("[net] disconnected by user");
+            true
+        }
+    }
+}
+
 pub fn net_task(_arg: usize) {
     set_status(WifiStatus::Down);
 
@@ -250,7 +369,20 @@ pub fn net_task(_arg: usize) {
         }
     };
 
-    let ssid_h = match WIFI_SSID.try_into() {
+    // Preferir credenciales GUARDADAS en flash (de un `wifi connect` anterior);
+    // si no hay ninguna, usar las de compilación (wifi_credentials.rs).
+    let (boot_ssid, boot_pass) = match crate::drivers::wifi_store::load() {
+        Some((s, p)) => {
+            println!("[net] using saved Wi-Fi credentials for '{}'", s);
+            (s, p)
+        }
+        None => {
+            println!("[net] no saved Wi-Fi credentials; using compiled defaults");
+            (String::from(WIFI_SSID), String::from(WIFI_PASSWORD))
+        }
+    };
+
+    let ssid_h = match boot_ssid.as_str().try_into() {
         Ok(s) => s,
         Err(_) => {
             println!("[net] ERROR: SSID too long (>32)");
@@ -258,7 +390,7 @@ pub fn net_task(_arg: usize) {
             return;
         }
     };
-    let pass_h = match WIFI_PASSWORD.try_into() {
+    let pass_h = match boot_pass.as_str().try_into() {
         Ok(p) => p,
         Err(_) => {
             println!("[net] ERROR: password too long (>64)");
@@ -269,7 +401,7 @@ pub fn net_task(_arg: usize) {
     let client = ClientConfiguration {
         ssid: ssid_h,
         password: pass_h,
-        auth_method: if WIFI_PASSWORD.is_empty() {
+        auth_method: if boot_pass.is_empty() {
             AuthMethod::None
         } else {
             AuthMethod::WPA2Personal
@@ -288,17 +420,49 @@ pub fn net_task(_arg: usize) {
         return;
     }
     set_status(WifiStatus::Connecting);
-    *CURRENT_SSID.lock() = Some(String::from(WIFI_SSID));
-    println!("[net] connecting to SSID '{}'...", WIFI_SSID);
+    *CURRENT_SSID.lock() = Some(boot_ssid.clone());
+    println!("[net] connecting to SSID '{}'...", boot_ssid);
     let _ = controller.connect();
 
-    // NO bloqueamos esperando la asociación: entramos directo al loop de servicio,
-    // que monta la interfaz, procesa los comandos WiFi de la shell y reintenta la
-    // conexión periódicamente. Así, si las credenciales de arranque fallan (red
-    // ausente o placeholder como "Your-ssid"), el usuario todavía puede escanear y
-    // conectarse en runtime con `wifi connect`. El DHCP arranca al detectar el
-    // enlace arriba (transición en el link-check).
-    println!("[net] entering service loop; DHCP runs once associated...");
+    // Esperar la asociación con las credenciales de arranque ANTES de montar la
+    // interfaz smoltcp. (Montar `Interface::new`/`iface.poll` sobre el dispositivo
+    // esp-wifi sin asociación cuelga el driver.) Requiere credenciales válidas en
+    // `wifi_credentials.rs`; para CAMBIAR de red en caliente, usa `wifi connect`
+    // una vez asociado.
+    // Fase de espera de asociación — SIN smoltcp montado (montar `Interface::new`/
+    // `iface.poll` sobre el driver esp-wifi NO asociado lo cuelga). Reintenta
+    // conectar y PROCESA los comandos `wifi` de la shell (connect/scan/disconnect)
+    // hasta asociarse. Así el sistema ARRANCA aunque las credenciales de arranque
+    // fallen o la red no esté; el usuario se conecta con `wifi connect`.
+    let mut next_retry = uptime_ms().saturating_add(3_000);
+    // Aviso UNA sola vez si no asocia en ~5s (en un arranque normal, que asocia
+    // antes, no se imprime nada — sin inundar la consola).
+    let warn_at = uptime_ms().saturating_add(5_000);
+    let mut warned = false;
+    loop {
+        let mut wcmds = Vec::new();
+        {
+            let mut q = WIFI_CMD_QUEUE.lock();
+            wcmds.extend(q.drain(..));
+        }
+        for wc in wcmds {
+            let _ = process_wifi_cmd(&mut controller, wc);
+        }
+
+        if matches!(controller.is_connected(), Ok(true)) {
+            break;
+        }
+        if uptime_ms() >= next_retry {
+            next_retry = uptime_ms().saturating_add(3_000);
+            let _ = controller.connect();
+        }
+        if !warned && uptime_ms() >= warn_at {
+            warned = true;
+            println!("[net] no Wi-Fi yet; system is up. Join with: wifi connect \"SSID\" \"password\"");
+        }
+        scheduler::yield_now();
+    }
+    println!("[net] associated with AP; negotiating DHCP...");
 
     let mac = device.mac_address();
     let mut if_cfg = IfaceConfig::new(HardwareAddress::Ethernet(EthernetAddress::from_bytes(&mac)));
@@ -342,12 +506,12 @@ pub fn net_task(_arg: usize) {
     let mut ssh_active = false;
 
     let mut have_ip = false;
-    // Estado de asociación rastreado entre iteraciones: al pasar de desasociado a
-    // asociado (arranque o reconexión) pedimos un DHCP fresco.
-    let mut associated = false;
+    // Estado de asociación rastreado entre iteraciones: entramos aquí ya asociados
+    // (el bucle de arriba esperó la conexión). Al pasar de desasociado a asociado
+    // (p.ej. tras un scan o una reconexión) se pide un DHCP fresco.
+    let mut associated = true;
     let mut dhcp_reset_pending = false;
     let mut next_link_check = uptime_ms().saturating_add(1_000);
-    let mut next_status_log = uptime_ms().saturating_add(5_000);
     let mut buf = [0u8; ECHO_CHUNK];
 
     *NET_SOCKETS.lock() = Some(sockets_set);
@@ -364,117 +528,13 @@ pub fn net_task(_arg: usize) {
                     wcmds.extend(q.drain(..));
                 }
                 for wc in wcmds {
-                    match wc {
-                        WifiCmd::Scan => {
-                            // Escanear estando ASOCIADO se cuelga/bloquea en
-                            // esp-wifi: nos desconectamos, escaneamos (fiable sin
-                            // asociación) y reconectamos a la red guardada. Esto
-                            // tira brevemente el enlace (y una sesión SSH sobre él).
-                            let was_connected = matches!(controller.is_connected(), Ok(true));
-                            *SCAN_DIAG.lock() = String::from("started");
-                            println!("[net] scan: starting (was_connected={})...", was_connected);
-                            if was_connected {
-                                let _ = controller.disconnect();
-                                *CURRENT_IP.lock() = None;
-                                have_ip = false;
-                            }
-                            let t0 = uptime_ms();
-                            match controller.scan_n::<24>() {
-                                Ok((aps, n)) => {
-                                    let ms = uptime_ms().saturating_sub(t0);
-                                    println!("[net] scan: {} APs in {} ms", n, ms);
-                                    let mut out = Vec::new();
-                                    for ap in aps.iter() {
-                                        out.push(ApInfo {
-                                            ssid: String::from(ap.ssid.as_str()),
-                                            rssi: ap.signal_strength,
-                                            channel: ap.channel,
-                                            secured: !matches!(
-                                                ap.auth_method,
-                                                None | Some(AuthMethod::None)
-                                            ),
-                                        });
-                                    }
-                                    let found = out.len();
-                                    *SCAN_RESULTS.lock() = out;
-                                    *SCAN_DIAG.lock() =
-                                        alloc::format!("{} APs in {} ms", found, ms);
-                                    SCAN_STATE.store(SCAN_DONE, Ordering::Release);
-                                }
-                                Err(e) => {
-                                    let ms = uptime_ms().saturating_sub(t0);
-                                    println!("[net] scan: error {:?} after {} ms", e, ms);
-                                    *SCAN_DIAG.lock() =
-                                        alloc::format!("error {:?} after {} ms", e, ms);
-                                    SCAN_STATE.store(SCAN_ERROR, Ordering::Release);
-                                }
-                            }
-                            if was_connected {
-                                println!("[net] scan: reconnecting...");
-                                let _ = controller.connect();
-                                reconnect_dhcp = true;
-                            }
-                        }
-                        WifiCmd::Connect { ssid, password } => {
-                            let ssid_h = match ssid.as_str().try_into() {
-                                Ok(s) => s,
-                                Err(_) => {
-                                    println!("[net] ERROR: SSID too long (>32)");
-                                    continue;
-                                }
-                            };
-                            let pass_h = match password.as_str().try_into() {
-                                Ok(p) => p,
-                                Err(_) => {
-                                    println!("[net] ERROR: password too long (>64)");
-                                    continue;
-                                }
-                            };
-                            let cfg = ClientConfiguration {
-                                ssid: ssid_h,
-                                password: pass_h,
-                                auth_method: if password.is_empty() {
-                                    AuthMethod::None
-                                } else {
-                                    AuthMethod::WPA2Personal
-                                },
-                                ..Default::default()
-                            };
-                            let _ = controller.disconnect();
-                            if let Err(e) =
-                                controller.set_configuration(&Configuration::Client(cfg))
-                            {
-                                println!("[net] ERROR set_configuration: {:?}", e);
-                                continue;
-                            }
-                            *CURRENT_SSID.lock() = Some(ssid.clone());
-                            *CURRENT_IP.lock() = None;
-                            have_ip = false;
-                            reconnect_dhcp = true;
-                            set_status(WifiStatus::Connecting);
-                            println!("[net] switching to SSID '{}'...", ssid);
-                            match controller.connect() {
-                                Ok(()) => println!("[net] connect() issued for '{}'", ssid),
-                                Err(e) => println!("[net] connect() error: {:?}", e),
-                            }
-                        }
-                        WifiCmd::Disconnect => {
-                            let _ = controller.disconnect();
-                            *CURRENT_IP.lock() = None;
-                            have_ip = false;
-                            reconnect_dhcp = true;
-                            set_status(WifiStatus::Down);
-                            println!("[net] disconnected by user");
-                        }
+                    // El helper toca sólo el controller; si hubo (re)connect/
+                    // disconnect, refrescamos el DHCP y el estado de IP local.
+                    if process_wifi_cmd(&mut controller, wc) {
+                        reconnect_dhcp = true;
+                        have_ip = false;
                     }
                 }
-            }
-
-            // Señal de vida mientras no hay enlace (net_task sigue vivo y aceptando
-            // comandos `wifi connect`).
-            if !associated && uptime_ms() >= next_status_log {
-                next_status_log = uptime_ms().saturating_add(5_000);
-                println!("[net] waiting for association (use 'wifi connect' to join)...");
             }
 
             let mut cmds = Vec::new();

@@ -293,8 +293,20 @@ fn cmd_wifi(args: &[&str]) -> i32 {
             emit_line("Disconnecting...");
             0
         }
+        ["forget"] => match crate::drivers::wifi_store::clear() {
+            Ok(()) => {
+                emit_line("Saved Wi-Fi credentials cleared (reboot uses compiled defaults).");
+                0
+            }
+            Err(e) => {
+                eprint_line(&format!("wifi: could not clear credentials: {:?}", e));
+                1
+            }
+        },
         _ => {
-            emit_line("usage: wifi status | scan | connect \"SSID\" [PASSWORD] | disconnect");
+            emit_line(
+                "usage: wifi status | scan | connect \"SSID\" [PASSWORD] | disconnect | forget",
+            );
             1
         }
     }

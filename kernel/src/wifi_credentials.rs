@@ -1,2 +1,2 @@
-pub const WIFI_SSID: &str = "WCD - IN";
-pub const WIFI_PASSWORD: &str = "WillyCD2026#";
+pub const WIFI_SSID: &str = "ssid";
+pub const WIFI_PASSWORD: &str = "password";

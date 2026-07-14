@@ -86,7 +86,7 @@ mod imp {
             w.core_x_iram0_pms_constrain_sram_world_1_pms_3().bits(0)
         });
         
-        println!("[pms] monitor DRAM0 + enforcement World-1 (DRAM/IRAM) activos (kernel = World-0)");
+        println!("[pms] DRAM0 monitor + World-1 enforcement (DRAM/IRAM) active (kernel = World-0)");
     }
 
     pub fn report() -> String {
@@ -99,7 +99,7 @@ mod imp {
         let addr = m2.core_0_dram0_pms_monitor_violate_status_addr().bits();
         let constrain1 = s.core_x_dram0_pms_constrain_1().read().bits();
         alloc::format!(
-            "PMS DRAM0: monitor_en={} violacion={} world={} addr_field={:#08x} constrain_1={:#010x}",
+            "PMS DRAM0: monitor_en={} violation={} world={} addr_field={:#08x} constrain_1={:#010x}",
             en, intr, world, addr, constrain1
         )
     }
@@ -113,8 +113,8 @@ mod imp {
             w.core_x_dram0_pms_constrain_sram_world_1_pms_3().bits(0)
         });
         let constrain1 = s.core_x_dram0_pms_constrain_1().read().bits();
-        println!("[pms] World-1 SRAM bloqueada");
-        alloc::format!("World-1 SRAM -> sin acceso; constrain_1={:#010x}", constrain1)
+        println!("[pms] World-1 SRAM locked");
+        alloc::format!("World-1 SRAM -> no access; constrain_1={:#010x}", constrain1)
     }
 
     pub fn protect_world1_wx() -> String {
@@ -135,7 +135,7 @@ mod imp {
         });
         let dram_val = s.core_x_dram0_pms_constrain_1().read().bits();
         let iram_val = s.core_x_iram0_pms_constrain_1().read().bits();
-        println!("[pms] World-1 W^X activado: DRAM0 (R+W), IRAM0 (R+X)");
+        println!("[pms] World-1 W^X enabled: DRAM0 (R+W), IRAM0 (R+X)");
         alloc::format!("DRAM0 R+W={:#x}, IRAM0 R+X={:#x}", dram_val, iram_val)
     }
 

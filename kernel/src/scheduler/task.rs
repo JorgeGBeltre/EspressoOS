@@ -49,6 +49,7 @@ impl Task {
         arg: usize,
         stack_size: usize,
         priority: u8,
+        is_user: bool,
     ) -> KResult<Box<Task>> {
 
         let requested = if stack_size == 0 {
@@ -67,7 +68,7 @@ impl Task {
 
         let stack_top = unsafe { base.add(size) };
 
-        let context = context::init_task_stack(stack_top, super::task_trampoline, tid as usize);
+        let context = context::init_task_stack(stack_top, super::task_trampoline, tid as usize, is_user);
 
         Ok(Box::new(Task {
             tid,
@@ -78,7 +79,7 @@ impl Task {
             stack_base: base,
             stack_size: size,
             exit_code: 0,
-            is_user: false,
+            is_user,
             affinity: None,
             start_entry: entry,
             start_arg: arg,

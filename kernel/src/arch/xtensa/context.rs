@@ -4,9 +4,12 @@ use core::arch::asm;
 use esp_hal::xtensa_lx_rt::exception::Context as ExceptionContext;
 
 #[repr(C)]
-#[derive(Clone, Copy, Default, Debug)]
+#[derive(Clone, Copy, Default)]
 pub struct Context {
-    pub sp: u32,
+    /// Estado completo de CPU de la tarea. ES el frame que el vector de
+    /// excepción/interrupción restaura; conmutar de tarea = copiar este frame
+    /// dentro de `*save_frame` (el mecanismo de esp-wifi/esp-hal).
+    pub frame: ExceptionContext,
 }
 
 const STACK_ALIGN_MASK: usize = 0xF;
@@ -17,30 +20,23 @@ const PS_WOE: u32 = 1 << 18;     // Window Overflow Enable
 const PS_CALLINC1: u32 = 1 << 16; // Call Increment 1
 
 #[inline(never)]
-pub fn init_task_stack(stack_top: *mut u8, entry: fn(usize), arg: usize) -> Context {
-    let top = (stack_top as usize) & !STACK_ALIGN_MASK;
-    
-    // Reservar espacio para la estructura ExceptionContext completa
-    let frame_base = top - core::mem::size_of::<ExceptionContext>();
-    let frame_base = frame_base & !STACK_ALIGN_MASK;
-    
-    let frame_ptr = frame_base as *mut ExceptionContext;
-    
-    unsafe {
-        // Inicializar a cero
-        core::ptr::write_bytes(frame_ptr, 0, 1);
-        
-        let frame = &mut *frame_ptr;
-        frame.PC = entry as usize as u32;
-        frame.PS = PS_UM | PS_WOE | PS_CALLINC1;
-        frame.A0 = 0; // Dirección de retorno (llamará a la salida de la tarea si retorna)
-        frame.A1 = top as u32; // Stack pointer de la tarea (cuando se retire el ExceptionContext)
-        frame.A6 = arg as u32; // Argumento a pasar a la tarea (convenio call4)
-    }
+pub fn init_task_stack(stack_top: *mut u8, entry: fn(usize), arg: usize, is_user: bool) -> Context {
+    // Frame inicial POR VALOR (no carvado en la pila). Se copia a *save_frame en
+    // la primera conmutación (o se inyecta vía resume_task en el arranque).
+    let top = ((stack_top as usize) & !STACK_ALIGN_MASK) as u32;
 
-    Context {
-        sp: frame_base as u32,
-    }
+    let mut frame = ExceptionContext::default();
+    frame.PC = entry as usize as u32;
+    frame.PS = if is_user {
+        PS_UM | PS_WOE | PS_CALLINC1
+    } else {
+        PS_WOE | PS_CALLINC1 // modo privilegiado (kernel)
+    };
+    frame.A0 = 0; // dir. de retorno (si la tarea retorna, faultea; lo maneja exit())
+    frame.A1 = top; // stack pointer real de la tarea
+    frame.A6 = arg as u32; // convenio call4: con PS.CALLINC=1, `entry` rota A6 -> A2
+
+    Context { frame }
 }
 
 #[inline(always)]

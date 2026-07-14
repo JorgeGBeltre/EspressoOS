@@ -17,7 +17,9 @@ extern "Rust" {
 #[unsafe(naked)]
 pub unsafe extern "C" fn _start() -> ! {
     core::arch::naked_asm!(
-        "movi a1, 0", // a1 ya está apuntando al tope de la pila por el kernel
+        // a1 (stack pointer) ya lo deja el kernel en el tope de la pila de la
+        // tarea (init_task_stack -> A1). NO tocarlo: `movi a1,0` lo pondría a 0
+        // y `main` petaría al primer uso de pila.
         "call4 main",
         "mov a2, a6", // Código de retorno de main en la ventana rotada
         "call4 exit",
@@ -107,6 +109,15 @@ pub fn readdir(path: &str, buf: &mut [u8]) -> isize {
 
 pub fn uptime_ms() -> usize {
     unsafe { syscall(12, 0, 0, 0, 0, 0, 0) as usize }
+}
+
+/// Crea una tubería. `fds[0]` = extremo de lectura, `fds[1]` = escritura.
+pub fn pipe(fds: &mut [i32; 2]) -> isize {
+    unsafe { syscall(26, fds.as_mut_ptr() as usize, 0, 0, 0, 0, 0) }
+}
+
+pub fn dup2(oldfd: i32, newfd: i32) -> isize {
+    unsafe { syscall(27, oldfd as usize, newfd as usize, 0, 0, 0, 0) }
 }
 
 pub fn sbrk(size: usize) -> isize {

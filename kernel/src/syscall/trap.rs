@@ -40,33 +40,25 @@ unsafe extern "C" fn __exception(cause: ExceptionCause, save_frame: &mut Context
             save_frame.A8 as usize,
         ];
         let ret = crate::syscall::dispatch(num, &args, save_frame as *mut Context);
-        save_frame.A2 = ret as u32;
-        // Avanzar EPC más allá de `syscall` para no re-ejecutarla al volver.
-        save_frame.PC = save_frame.PC.wrapping_add(SYSCALL_INSN_LEN);
+        // Un syscall bloqueante (p.ej. `wait` sin hijo zombie) pide reiniciarse: en
+        // ese caso NO tocamos A2 ni PC, dejando la instrucción `syscall` intacta
+        // para re-ejecutarla cuando la tarea sea replanificada (A2 conserva el
+        // número de syscall que puso el llamante). En el caso normal, escribimos el
+        // retorno en A2 y avanzamos el PC más allá de `syscall`.
+        if !crate::scheduler::take_restart_syscall() {
+            save_frame.A2 = ret as u32;
+            save_frame.PC = save_frame.PC.wrapping_add(SYSCALL_INSN_LEN);
+        }
 
-        let mut next_sp: Option<u32> = None;
+        // Conmutación de tarea: preempt_switch MUTA *save_frame en sitio (copia el
+        // contexto de la siguiente tarea). Al retornar, el vector de xtensa-lx-rt
+        // restaura *save_frame -> siguiente tarea. Sin trucos de registros.
         if crate::scheduler::need_resched() {
-            next_sp = crate::scheduler::preempt_switch(save_frame);
+            crate::scheduler::preempt_switch(save_frame);
         }
-
-        if let Some(sp) = next_sp {
-            let next_frame = &mut *(sp as *mut Context);
-            let _ = crate::scheduler::process::check_signals(next_frame);
-            core::arch::asm!(
-                "mov a5, {0}",
-                "movi a4, 1",
-                "rsr.windowbase a6",
-                "ssl a6",
-                "sll a4, a4",
-                "wsr.windowstart a4",
-                "rsync",
-                in(reg) sp,
-                out("a6") _,
-                out("a4") _
-            );
-        } else {
-            let _ = crate::scheduler::process::check_signals(save_frame);
-        }
+        // check_signals aplica sobre el frame que se va a restaurar (ya sea el
+        // mismo o el de la tarea entrante).
+        let _ = crate::scheduler::process::check_signals(save_frame);
         return;
     }
     // Cualquier otra causa: diagnóstico de esp-backtrace intacto.

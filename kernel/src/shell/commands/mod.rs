@@ -185,9 +185,13 @@ pub fn dispatch(name: &str, args: &[&str]) -> i32 {
         "power" => cmd_power(args),
         "sha256" => cmd_sha256(args),
         "ble" => cmd_ble(args),
+        "wifi" => cmd_wifi(args),
+        "ip" => cmd_ip(args),
+        "nmcli" => cmd_nmcli(args),
+        "sudo" => cmd_sudo(args),
         "" => 0,
         other => {
-            eprint_line(&format!("shell: comando no encontrado: {}", other));
+            eprint_line(&format!("shell: command not found: {}", other));
             127
         }
     }
@@ -218,34 +222,184 @@ fn cmd_echo(args: &[&str]) -> i32 {
     0
 }
 
+fn cmd_wifi(args: &[&str]) -> i32 {
+    use crate::drivers::wifi;
+    match args {
+        [] | ["status"] => {
+            emit_line(&format!("state:  {:?}", wifi::status()));
+            emit_line(&format!(
+                "ssid:   {}",
+                wifi::current_ssid().unwrap_or_else(|| String::from("(none)"))
+            ));
+            match wifi::current_ip() {
+                Some(ip) => {
+                    emit_line(&format!("ip:     {}.{}.{}.{}", ip[0], ip[1], ip[2], ip[3]))
+                }
+                None => emit_line("ip:     (none)"),
+            }
+            0
+        }
+        ["scan"] | ["list"] => {
+            emit_line("Scanning for networks...");
+            wifi::request_scan();
+            let start = timer::uptime_ms();
+            while wifi::scan_state() == wifi::SCAN_RUNNING {
+                if timer::uptime_ms().saturating_sub(start) > 12_000 {
+                    eprint_line("wifi: scan timed out");
+                    return 1;
+                }
+                scheduler::yield_now();
+            }
+            if wifi::scan_state() == wifi::SCAN_ERROR {
+                eprint_line("wifi: scan failed");
+                return 1;
+            }
+            let mut aps = wifi::scan_results();
+            aps.sort_by(|a, b| b.rssi.cmp(&a.rssi));
+            emit_line(&format!("{:<32} {:>5}  {:>3}  {}", "SSID", "RSSI", "CH", "SEC"));
+            for ap in aps.iter() {
+                let name = if ap.ssid.is_empty() {
+                    "(hidden)"
+                } else {
+                    ap.ssid.as_str()
+                };
+                emit_line(&format!(
+                    "{:<32} {:>5}  {:>3}  {}",
+                    name,
+                    ap.rssi,
+                    ap.channel,
+                    if ap.secured { "WPA" } else { "open" }
+                ));
+            }
+            if aps.is_empty() {
+                emit_line("(no networks found)");
+            }
+            0
+        }
+        ["connect", ssid] => {
+            emit_line(&format!("Connecting to '{}' (open network)...", ssid));
+            wifi::request_connect(String::from(*ssid), String::new());
+            emit_line("(use 'wifi status' to check the result)");
+            0
+        }
+        ["connect", ssid, password] => {
+            emit_line(&format!("Connecting to '{}'...", ssid));
+            wifi::request_connect(String::from(*ssid), String::from(*password));
+            emit_line("(use 'wifi status' to check the result)");
+            0
+        }
+        ["disconnect"] => {
+            wifi::request_disconnect();
+            emit_line("Disconnecting...");
+            0
+        }
+        _ => {
+            emit_line("usage: wifi status | scan | connect \"SSID\" [PASSWORD] | disconnect");
+            1
+        }
+    }
+}
+
+fn cmd_ip(_args: &[&str]) -> i32 {
+    use crate::drivers::wifi;
+    // `ip`, `ip a`, `ip addr`: muestra la dirección de wlan0.
+    match wifi::current_ip() {
+        Some(ip) => emit_line(&format!(
+            "wlan0: {}.{}.{}.{}  ssid \"{}\"  state {:?}",
+            ip[0],
+            ip[1],
+            ip[2],
+            ip[3],
+            wifi::current_ssid().unwrap_or_else(|| String::from("(none)")),
+            wifi::status()
+        )),
+        None => emit_line(&format!("wlan0: <no address>  state {:?}", wifi::status())),
+    }
+    0
+}
+
+fn cmd_sudo(args: &[&str]) -> i32 {
+    // EspressoOS no separa privilegios: `sudo CMD ...` simplemente ejecuta CMD.
+    if args.is_empty() {
+        eprint_line("sudo: usage: sudo COMMAND [ARGS...]");
+        return 1;
+    }
+    dispatch(args[0], &args[1..])
+}
+
+fn cmd_nmcli(args: &[&str]) -> i32 {
+    // Shim de compatibilidad con nmcli para las operaciones WiFi habituales.
+    match args {
+        ["device", "status"] | ["dev", "status"] | ["general", "status"] | ["g", "status"] => {
+            cmd_wifi(&["status"])
+        }
+        ["radio", ..] => {
+            emit_line("wifi radio is always on");
+            0
+        }
+        ["device", "wifi", "list"]
+        | ["dev", "wifi", "list"]
+        | ["device", "wifi"]
+        | ["dev", "wifi"] => cmd_wifi(&["scan"]),
+        ["device", "wifi", "connect", rest @ ..] | ["dev", "wifi", "connect", rest @ ..] => {
+            let ssid = match rest.first() {
+                Some(s) => *s,
+                None => {
+                    eprint_line("nmcli: missing SSID");
+                    return 1;
+                }
+            };
+            let pass = match rest {
+                [_, "password", p, ..] => *p,
+                _ => "",
+            };
+            if pass.is_empty() {
+                cmd_wifi(&["connect", ssid])
+            } else {
+                cmd_wifi(&["connect", ssid, pass])
+            }
+        }
+        _ => {
+            emit_line("nmcli (EspressoOS shim). Supported:");
+            emit_line("  nmcli device status");
+            emit_line("  nmcli device wifi list");
+            emit_line("  nmcli device wifi connect \"SSID\" password \"PASS\"");
+            emit_line("(native equivalent: the 'wifi' command)");
+            0
+        }
+    }
+}
+
 fn cmd_help(_args: &[&str]) -> i32 {
-    emit_line("Comandos disponibles:");
-    emit_line("  echo [-n] TEXTO...    imprime texto");
-    emit_line("  help                  muestra esta ayuda");
-    emit_line("  clear                 limpia la pantalla");
-    emit_line("  uptime                tiempo desde el arranque");
-    emit_line("  free                  uso del heap del kernel");
-    emit_line("  ps                    tareas (tarea actual)");
-    emit_line("  reboot                reinicia el sistema");
-    emit_line("  ls [RUTA]             lista un directorio");
-    emit_line("  cd [RUTA]             cambia de directorio (por defecto /)");
-    emit_line("  pwd                   muestra el directorio actual");
-    emit_line("  cat ARCHIVO...        muestra el contenido de archivos");
-    emit_line("  mkdir DIR...          crea directorios");
-    emit_line("  touch ARCHIVO...      crea archivos vacíos");
-    emit_line("  rm ARCHIVO...         borra archivos");
-    emit_line("  write ARCHIVO TEXTO   escribe TEXTO en ARCHIVO (trunca)");
-    emit_line("  i2c scan|read|write   bus I2C (/dev/i2c0)");
-    emit_line("  spi transfer B0...    bus SPI (/dev/spi0)");
-    emit_line("  ota status|set|rx|apply  actualización A/B (otadata + OTA:3300)");
-    emit_line("  syscalltest           ejercita la ABI de syscalls");
-    emit_line("  smp                   estado del multinúcleo (SMP)");
-    emit_line("  pms [world1]          protección de memoria (PMS)");
-    emit_line("  power sleep|deep-sleep [segundos]  gestión de energía");
-    emit_line("  sha256 [texto]        hashing SHA-256 por hardware");
-    emit_line("  ble status|advertise  gestión y publicidad Bluetooth LE");
+    emit_line("Available commands:");
+    emit_line("  echo [-n] TEXT...     print text");
+    emit_line("  help                  show this help");
+    emit_line("  clear                 clear the screen");
+    emit_line("  uptime                time since boot");
+    emit_line("  free                  kernel heap usage");
+    emit_line("  ps                    tasks (current task)");
+    emit_line("  reboot                reboot the system");
+    emit_line("  ls [PATH]             list a directory");
+    emit_line("  cd [PATH]             change directory (default /)");
+    emit_line("  pwd                   show the current directory");
+    emit_line("  cat FILE...           show the contents of files");
+    emit_line("  mkdir DIR...          create directories");
+    emit_line("  touch FILE...         create empty files");
+    emit_line("  rm FILE...            remove files");
+    emit_line("  write FILE TEXT       write TEXT to FILE (truncate)");
+    emit_line("  i2c scan|read|write   I2C bus (/dev/i2c0)");
+    emit_line("  spi transfer B0...    SPI bus (/dev/spi0)");
+    emit_line("  ota status|set|rx|apply  A/B update (otadata + OTA:3300)");
+    emit_line("  syscalltest           exercise the syscall ABI");
+    emit_line("  smp                   multicore status (SMP)");
+    emit_line("  pms [world1]          memory protection (PMS)");
+    emit_line("  power sleep|deep-sleep [seconds]  power management");
+    emit_line("  sha256 [text]         hardware SHA-256 hashing");
+    emit_line("  ble status|advertise  Bluetooth LE management and advertising");
+    emit_line("  wifi status|scan|connect \"SSID\" [PASS]|disconnect   Wi-Fi management");
+    emit_line("  ip                    show the wlan0 address");
     emit_line("");
-    emit_line("Redirección: '> archivo' (trunca) y '>> archivo' (añade).");
+    emit_line("Redirection: '> file' (truncate) and '>> file' (append).");
     0
 }
 
@@ -263,7 +417,7 @@ fn cmd_uptime() -> i32 {
     let mins = (total_s % 3_600) / 60;
     let secs = total_s % 60;
     emit_line(&format!(
-        "activo {}d {:02}:{:02}:{:02} ({} ms)",
+        "up {}d {:02}:{:02}:{:02} ({} ms)",
         days, hours, mins, secs, ms
     ));
     0
@@ -271,7 +425,7 @@ fn cmd_uptime() -> i32 {
 
 fn cmd_free() -> i32 {
     let s = mm::stats();
-    emit_line("            total        usado        libre");
+    emit_line("            total         used         free");
     emit_line(&format!(
         "heap  {:>11}  {:>11}  {:>11}",
         s.total, s.used, s.free
@@ -281,13 +435,13 @@ fn cmd_free() -> i32 {
 
 fn cmd_ps() -> i32 {
     let tid = scheduler::current();
-    emit_line("  TID  ESTADO    NOMBRE");
-    emit_line(&format!("{:>5}  Running   (actual)", tid));
+    emit_line("  TID  STATE     NAME");
+    emit_line(&format!("{:>5}  Running   (current)", tid));
     0
 }
 
 fn cmd_reboot() -> i32 {
-    eprint_line("Reiniciando el sistema...");
+    eprint_line("Rebooting the system...");
 
     esp_hal::reset::software_reset();
 
@@ -348,7 +502,7 @@ fn format_entry(e: &DirEntry) -> String {
 
 fn cmd_cat(args: &[&str]) -> i32 {
     if args.is_empty() {
-        eprint_line("uso: cat ARCHIVO...");
+        eprint_line("usage: cat FILE...");
         return 2;
     }
     let mut status = 0;
@@ -384,7 +538,7 @@ fn cat_one(path: &str) -> KResult<()> {
 
 fn cmd_mkdir(args: &[&str]) -> i32 {
     if args.is_empty() {
-        eprint_line("uso: mkdir DIRECTORIO...");
+        eprint_line("usage: mkdir DIRECTORY...");
         return 2;
     }
     let mut status = 0;
@@ -399,7 +553,7 @@ fn cmd_mkdir(args: &[&str]) -> i32 {
 
 fn cmd_touch(args: &[&str]) -> i32 {
     if args.is_empty() {
-        eprint_line("uso: touch ARCHIVO...");
+        eprint_line("usage: touch FILE...");
         return 2;
     }
     let mut status = 0;
@@ -420,7 +574,7 @@ fn cmd_touch(args: &[&str]) -> i32 {
 
 fn cmd_rm(args: &[&str]) -> i32 {
     if args.is_empty() {
-        eprint_line("uso: rm ARCHIVO...");
+        eprint_line("usage: rm FILE...");
         return 2;
     }
     let mut status = 0;
@@ -437,7 +591,7 @@ fn cmd_write(args: &[&str]) -> i32 {
     let path = match args.first() {
         Some(p) => *p,
         None => {
-            eprint_line("uso: write ARCHIVO TEXTO...");
+            eprint_line("usage: write FILE TEXT...");
             return 2;
         }
     };
@@ -503,18 +657,18 @@ fn cmd_i2c(args: &[&str]) -> i32 {
     match args.first().copied() {
         Some("scan") => {
             if !i2c::is_ready() {
-                eprint_line("i2c: bus no inicializado");
+                eprint_line("i2c: bus not initialized");
                 return 1;
             }
-            emit_line("Escaneando bus I2C (0x08..0x77)...");
+            emit_line("Scanning I2C bus (0x08..0x77)...");
             let mut found = 0u32;
             for addr in i2c::SCAN_FIRST..=i2c::SCAN_LAST {
                 if i2c::probe(addr) {
-                    emit_line(&format!("  dispositivo en 0x{:02x}", addr));
+                    emit_line(&format!("  device at 0x{:02x}", addr));
                     found += 1;
                 }
             }
-            emit_line(&format!("{} dispositivo(s) encontrado(s)", found));
+            emit_line(&format!("{} device(s) found", found));
             0
         }
         Some("read") => {
@@ -535,7 +689,7 @@ fn cmd_i2c(args: &[&str]) -> i32 {
                     }
                 }
                 _ => {
-                    eprint_line("uso: i2c read ADDR_HEX LEN(1..64)");
+                    eprint_line("usage: i2c read ADDR_HEX LEN(1..64)");
                     2
                 }
             }
@@ -549,7 +703,7 @@ fn cmd_i2c(args: &[&str]) -> i32 {
                         match parse_u8_hex(s) {
                             Some(b) => data.push(b),
                             None => {
-                                eprint_line(&format!("i2c write: byte inválido: {}", s));
+                                eprint_line(&format!("i2c write: invalid byte: {}", s));
                                 return 2;
                             }
                         }
@@ -563,13 +717,13 @@ fn cmd_i2c(args: &[&str]) -> i32 {
                     }
                 }
                 _ => {
-                    eprint_line("uso: i2c write ADDR_HEX B0 [B1 ...]");
+                    eprint_line("usage: i2c write ADDR_HEX B0 [B1 ...]");
                     2
                 }
             }
         }
         _ => {
-            eprint_line("uso: i2c scan | i2c read ADDR LEN | i2c write ADDR B0 ...");
+            eprint_line("usage: i2c scan | i2c read ADDR LEN | i2c write ADDR B0 ...");
             2
         }
     }
@@ -580,7 +734,7 @@ fn cmd_spi(args: &[&str]) -> i32 {
     match args.first().copied() {
         Some("transfer") => {
             if args.len() < 2 {
-                eprint_line("uso: spi transfer B0 [B1 ...]");
+                eprint_line("usage: spi transfer B0 [B1 ...]");
                 return 2;
             }
             let mut tx = Vec::new();
@@ -588,7 +742,7 @@ fn cmd_spi(args: &[&str]) -> i32 {
                 match parse_u8_hex(s) {
                     Some(b) => tx.push(b),
                     None => {
-                        eprint_line(&format!("spi transfer: byte inválido: {}", s));
+                        eprint_line(&format!("spi transfer: invalid byte: {}", s));
                         return 2;
                     }
                 }
@@ -606,7 +760,7 @@ fn cmd_spi(args: &[&str]) -> i32 {
             }
         }
         _ => {
-            eprint_line("uso: spi transfer B0 [B1 ...]");
+            eprint_line("usage: spi transfer B0 [B1 ...]");
             2
         }
     }
@@ -647,12 +801,12 @@ fn cmd_ota(args: &[&str]) -> i32 {
     use crate::ota;
     match args.first().copied() {
         Some("status") => {
-            emit_line(&format!("slot activo: {}", slot_name(ota::active_slot())));
+            emit_line(&format!("active slot: {}", slot_name(ota::active_slot())));
             match ota::otadata_entries() {
                 Ok(entries) => {
                     for (i, e) in entries.iter().enumerate() {
                         let seq = if e.ota_seq == 0xFFFF_FFFF {
-                            String::from("(vacío)")
+                            String::from("(empty)")
                         } else {
                             format!("{}", e.ota_seq)
                         };
@@ -661,7 +815,7 @@ fn cmd_ota(args: &[&str]) -> i32 {
                             i,
                             seq,
                             ota_state_str(e.ota_state),
-                            if e.is_valid() { "válido" } else { "inválido/vacío" }
+                            if e.is_valid() { "valid" } else { "invalid/empty" }
                         ));
                     }
                     0
@@ -675,9 +829,9 @@ fn cmd_ota(args: &[&str]) -> i32 {
         Some("set") => match args.get(1).copied().and_then(parse_slot) {
             Some(slot) => match ota::set_boot_slot(slot) {
                 Ok(()) => {
-                    emit_line(&format!("marcado para arrancar: {}", slot_name(slot)));
-                    emit_line("nota: el switch real en boot requiere un bootloader que");
-                    emit_line("honre otadata; ver la sección OTA del README.");
+                    emit_line(&format!("marked for boot: {}", slot_name(slot)));
+                    emit_line("note: the actual switch at boot requires a bootloader that");
+                    emit_line("honors otadata; see the OTA section of the README.");
                     0
                 }
                 Err(e) => {
@@ -686,26 +840,26 @@ fn cmd_ota(args: &[&str]) -> i32 {
                 }
             },
             None => {
-                eprint_line("uso: ota set factory|ota0");
+                eprint_line("usage: ota set factory|ota0");
                 2
             }
         },
         Some("rx") => {
             let n = ota::rx_len();
             if n == 0 {
-                emit_line("sin imagen en buffer (envíala: nc <ip> 3300 < firmware.bin)");
+                emit_line("no image in buffer (send it: nc <ip> 3300 < firmware.bin)");
             } else {
-                emit_line(&format!("imagen en buffer: {} bytes (usa 'ota apply')", n));
+                emit_line(&format!("image in buffer: {} bytes (use 'ota apply')", n));
             }
             0
         }
         Some("apply") => {
-            emit_line("Flasheando imagen recibida en el slot inactivo...");
-            emit_line("(escribe varios MB; con WiFi activo puede cortar la radio)");
+            emit_line("Flashing received image to the inactive slot...");
+            emit_line("(writes several MB; with WiFi active it may cut the radio)");
             match ota::apply_buffered() {
                 Ok(slot) => {
-                    emit_line(&format!("OK: imagen escrita en {} y marcada para arrancar", slot_name(slot)));
-                    emit_line("(efectivo sólo con un bootloader que honre otadata)");
+                    emit_line(&format!("OK: image written to {} and marked for boot", slot_name(slot)));
+                    emit_line("(effective only with a bootloader that honors otadata)");
                     0
                 }
                 Err(e) => {
@@ -715,7 +869,7 @@ fn cmd_ota(args: &[&str]) -> i32 {
             }
         }
         _ => {
-            eprint_line("uso: ota status | set factory|ota0 | rx | apply");
+            eprint_line("usage: ota status | set factory|ota0 | rx | apply");
             2
         }
     }
@@ -732,7 +886,7 @@ fn cmd_syscalltest() -> i32 {
     emit_line(&format!("SYS_UptimeMs -> {} ms", up));
 
     let free = invoke(Syscall::Sbrk.number(), [0; 6]);
-    emit_line(&format!("SYS_Sbrk(libre) -> {} bytes", free));
+    emit_line(&format!("SYS_Sbrk(free) -> {} bytes", free));
 
     // Open/Write/Close sobre /dev/console vía la ABI.
     let path = "/dev/console";
@@ -742,14 +896,14 @@ fn cmd_syscalltest() -> i32 {
         [path.as_ptr() as usize, path.len(), flags, 0, 0, 0],
     );
     if fd >= 0 {
-        let msg = b"  <- linea escrita por SYS_Write a /dev/console\r\n";
+        let msg = b"  <- line written by SYS_Write to /dev/console\r\n";
         let n = invoke(
             Syscall::Write.number(),
             [fd as usize, msg.as_ptr() as usize, msg.len(), 0, 0, 0],
         );
         let _ = invoke(Syscall::Close.number(), [fd as usize, 0, 0, 0, 0, 0]);
         emit_line(&format!(
-            "SYS_Open/Write/Close /dev/console -> fd={} escritos={}",
+            "SYS_Open/Write/Close /dev/console -> fd={} written={}",
             fd, n
         ));
     } else {
@@ -760,9 +914,9 @@ fn cmd_syscalltest() -> i32 {
     emit_line(&format!("SYS_Yield -> {}", y));
 
     if cfg!(feature = "syscall-trap") {
-        emit_line("(vía instrucción `syscall` real / trap de CPU)");
+        emit_line("(via real `syscall` instruction / CPU trap)");
     } else {
-        emit_line("(vía puerta software; --features syscall-trap para el trap real)");
+        emit_line("(via software gate; --features syscall-trap for the real trap)");
     }
     0
 }
@@ -773,18 +927,18 @@ fn cmd_syscalltest() -> i32 {
 
 fn cmd_smp() -> i32 {
     use crate::scheduler::core_sync;
-    emit_line(&format!("núcleo que atiende la shell: core {}", core_sync::current_core_id()));
+    emit_line(&format!("core serving the shell: core {}", core_sync::current_core_id()));
     if cfg!(feature = "smp") {
         if core_sync::is_running() {
             emit_line(&format!(
-                "SMP: APP_CPU (core 1) activo — ticks core1 = {}",
+                "SMP: APP_CPU (core 1) active — ticks core1 = {}",
                 core_sync::core1_ticks()
             ));
         } else {
-            emit_line("SMP: compilado pero el APP_CPU no arrancó");
+            emit_line("SMP: compiled but the APP_CPU didn't start");
         }
     } else {
-        emit_line("SMP: no compilado (usa: cargo build --release --features smp)");
+        emit_line("SMP: not compiled (use: cargo build --release --features smp)");
     }
     0
 }
@@ -795,19 +949,19 @@ fn cmd_smp() -> i32 {
 
 fn cmd_pms(args: &[&str]) -> i32 {
     if !cfg!(feature = "pms") {
-        eprint_line("pms: no compilado (usa: cargo build --release --features pms)");
+        eprint_line("pms: not compiled (use: cargo build --release --features pms)");
         return 1;
     }
     match args.first().copied() {
         Some("world1") => {
-            emit_line("PMS: aplicando restricción de World-1 (experimental)...");
+            emit_line("PMS: applying World-1 restriction (experimental)...");
             match crate::mm::mpu::protect_world1_wx() {
                 Some(s) => {
                     emit_line(&s);
                     0
                 }
                 None => {
-                    eprint_line("pms: no disponible");
+                    eprint_line("pms: not available");
                     1
                 }
             }
@@ -818,7 +972,7 @@ fn cmd_pms(args: &[&str]) -> i32 {
                 0
             }
             None => {
-                eprint_line("pms: no disponible");
+                eprint_line("pms: not available");
                 1
             }
         },
@@ -838,7 +992,7 @@ fn cmd_power(args: &[&str]) -> i32 {
             crate::drivers::power::enter_deep_sleep(secs);
         }
         _ => {
-            eprint_line("uso: power sleep [segundos] | power deep-sleep [segundos]");
+            eprint_line("usage: power sleep [seconds] | power deep-sleep [seconds]");
             1
         }
     }
@@ -860,9 +1014,9 @@ fn cmd_ble(args: &[&str]) -> i32 {
     match sub {
         Some("status") => {
             if crate::drivers::ble::is_advertising() {
-                emit_line("BLE: Publicitando activamente como 'EspressoOS'");
+                emit_line("BLE: Actively advertising as 'EspressoOS'");
             } else {
-                emit_line("BLE: Inactivo (no publicitando)");
+                emit_line("BLE: Inactive (not advertising)");
             }
             0
         }
@@ -871,7 +1025,7 @@ fn cmd_ble(args: &[&str]) -> i32 {
             0
         }
         _ => {
-            eprint_line("uso: ble status | ble advertise");
+            eprint_line("usage: ble status | ble advertise");
             1
         }
     }
@@ -879,23 +1033,23 @@ fn cmd_ble(args: &[&str]) -> i32 {
 
 fn err_str(e: KError) -> &'static str {
     match e {
-        KError::NoMem => "sin memoria",
-        KError::NotFound => "no encontrado",
-        KError::AlreadyExists => "ya existe",
-        KError::NotADirectory => "no es un directorio",
-        KError::IsADirectory => "es un directorio",
-        KError::InvalidArgument => "argumento inválido",
-        KError::PermissionDenied => "permiso denegado",
-        KError::NotSupported => "no soportado",
-        KError::WouldBlock => "bloquearía",
-        KError::Busy => "ocupado",
-        KError::IoError => "error de E/S",
-        KError::BadFd => "descriptor inválido",
-        KError::NameTooLong => "nombre demasiado largo",
-        KError::NoSpace => "sin espacio",
-        KError::Corrupt => "datos corruptos",
-        KError::Timeout => "tiempo de espera agotado",
-        KError::Fault => "dirección inválida",
-        KError::TableFull => "tabla llena",
+        KError::NoMem => "out of memory",
+        KError::NotFound => "not found",
+        KError::AlreadyExists => "already exists",
+        KError::NotADirectory => "not a directory",
+        KError::IsADirectory => "is a directory",
+        KError::InvalidArgument => "invalid argument",
+        KError::PermissionDenied => "permission denied",
+        KError::NotSupported => "not supported",
+        KError::WouldBlock => "would block",
+        KError::Busy => "busy",
+        KError::IoError => "I/O error",
+        KError::BadFd => "invalid descriptor",
+        KError::NameTooLong => "name too long",
+        KError::NoSpace => "out of space",
+        KError::Corrupt => "corrupt data",
+        KError::Timeout => "timed out",
+        KError::Fault => "invalid address",
+        KError::TableFull => "table full",
     }
 }

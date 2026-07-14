@@ -40,6 +40,10 @@ struct Bridge {
     from_shell: VecDeque<u8>,
 
     open: bool,
+
+    // El shell pidió salir (`exit`). El transporte SSH, tras drenar la salida
+    // pendiente, envía CHANNEL_EOF/CLOSE al cliente y cierra la sesión.
+    exit_requested: bool,
 }
 
 static BRIDGE: Mutex<Option<Bridge>> = Mutex::new(None);
@@ -52,6 +56,7 @@ pub fn bridge_open() {
         to_shell: VecDeque::new(),
         from_shell: VecDeque::new(),
         open: true,
+        exit_requested: false,
     });
 }
 
@@ -59,6 +64,29 @@ pub fn bridge_close() {
     let mut g = BRIDGE.lock();
     if let Some(b) = g.as_mut() {
         b.open = false;
+    }
+}
+
+/// El shell solicita salir (`exit`). Marca la bandera y cierra el bridge para
+/// que `run_with_io`/`ssh_shell_entry` no reinicien el shell; la salida ya
+/// encolada (p.ej. "logout") sigue drenándose porque `bridge_take_output` no
+/// mira `open`. El transporte SSH consulta `bridge_exit_requested()` para
+/// enviar el CHANNEL_CLOSE al cliente una vez drenada.
+pub fn bridge_request_exit() {
+    let mut g = BRIDGE.lock();
+    if let Some(b) = g.as_mut() {
+        b.exit_requested = true;
+        b.open = false;
+    }
+}
+
+pub fn bridge_exit_requested() -> bool {
+    BRIDGE.lock().as_ref().map(|b| b.exit_requested).unwrap_or(false)
+}
+
+pub fn bridge_clear_exit() {
+    if let Some(b) = BRIDGE.lock().as_mut() {
+        b.exit_requested = false;
     }
 }
 
@@ -162,7 +190,15 @@ pub fn run_with_io(io: &mut dyn ShellIo) {
             break;
         }
 
-        let prompt = alloc::format!("esp32s3-os:{}> ", crate::shell::commands::cwd_get());
+        // Prompt estilo Unix: usuario@host:cwd$ . El directorio raíz se muestra
+        // como `~` (home), igual que bash.
+        let cwd = crate::shell::commands::cwd_get();
+        let display_cwd = if cwd == "/" { "~" } else { cwd.as_str() };
+        let prompt = alloc::format!(
+            "{}@EspressoOS:{}$ ",
+            crate::drivers::ssh::config::DEV_USER,
+            display_cwd,
+        );
         io.write(prompt.as_bytes());
         line.clear();
         if !read_line_io(io, &mut line) {
@@ -171,6 +207,16 @@ pub fn run_with_io(io: &mut dyn ShellIo) {
         let trimmed = line.trim();
         if trimmed.is_empty() {
             continue;
+        }
+
+        if trimmed == "exit" || trimmed == "quit" || trimmed == "logout" {
+            io.write(b"logout\r\n");
+            if io.is_ssh() {
+                // Cierra la sesión SSH: el transporte drena esta última salida y
+                // envía CHANNEL_EOF/CLOSE al cliente.
+                bridge_request_exit();
+            }
+            break;
         }
 
         super::execute_line(trimmed);

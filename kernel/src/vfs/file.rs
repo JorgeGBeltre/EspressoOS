@@ -36,6 +36,7 @@ pub enum SeekFrom {
     End(i64),
 }
 
+#[derive(Clone)]
 pub struct OpenFile {
 
     pub inode: Arc<dyn Inode>,

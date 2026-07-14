@@ -79,6 +79,7 @@ impl Channel {
                 self.local_id as usize,
                 SSH_SHELL_STACK,
                 1,
+                false,
             ) {
                 Ok(_) => {}
                 Err(_) => {

@@ -9,7 +9,7 @@ use crate::prelude::*;
 use crate::scheduler;
 use alloc::format;
 
-const PROMPT: &str = "esp32s3-os> ";
+const PROMPT: &str = "EspressoOS> ";
 
 const MAX_LINE: usize = 256;
 
@@ -18,7 +18,7 @@ pub fn run() {
 }
 
 pub(crate) fn banner_bytes() -> &'static [u8] {
-    b"\r\nesp32s3-os shell. Escribe 'help' para ver los comandos.\r\n"
+    b"\r\nEspressoOS shell. Type 'help' to see the commands.\r\n"
 }
 
 
@@ -34,7 +34,7 @@ pub(crate) fn execute_line(line: &str) {
 
 fn banner() {
     console_write(b"\r\n");
-    console_write(b"esp32s3-os shell. Escribe 'help' para ver los comandos.\r\n");
+    console_write(b"EspressoOS shell. Type 'help' to see the commands.\r\n");
 }
 
 fn read_line(buf: &mut String) {
@@ -87,7 +87,7 @@ fn execute(line: &str) {
             if pipeline.len() > 1 {
 
                 eprintln_console(
-                    "shell: tuberías aún no soportadas; ejecutando la primera etapa",
+                    "shell: pipelines not yet supported; running the first stage",
                 );
             }
             if let Some(cmd) = pipeline.into_iter().next() {
@@ -95,7 +95,7 @@ fn execute(line: &str) {
             }
         }
         Err(e) => {
-            eprintln_console(&format!("shell: error de sintaxis ({:?})", e));
+            eprintln_console(&format!("shell: syntax error ({:?})", e));
         }
     }
 }
@@ -104,7 +104,7 @@ fn run_command(cmd: &parser::Command) {
 
     if let Err(e) = commands::begin_redirect(&cmd.redirect) {
         eprintln_console(&format!(
-            "shell: no se pudo abrir el destino de redirección ({:?})",
+            "shell: could not open redirection target ({:?})",
             e
         ));
         return;

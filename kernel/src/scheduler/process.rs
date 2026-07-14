@@ -98,6 +98,8 @@ pub fn register_process(
         if let Some(parent_proc) = pt.table.get_mut(&p) {
             parent_proc.children.push(pid);
         }
+        // Clona la tabla de FDs del padre al hijo para soportar redirección por pipes
+        crate::vfs::clone_fd_table(p, pid);
     }
     
     if is_user {

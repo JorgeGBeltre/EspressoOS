@@ -4,7 +4,7 @@
 # y espflash empaqueta la imagen del kernel. Este crate queda fuera del
 # workspace hasta que se aborde el arranque propio.
 [package]
-name = "esp32s3-os-bootloader"
+name = "espressoos-bootloader"
 version = "0.1.0"
 edition = "2021"
 

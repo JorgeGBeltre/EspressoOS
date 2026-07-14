@@ -8,7 +8,7 @@ pub extern "C" fn main() -> i32 {
     let mut buf = [0u8; 1024];
     let n = readdir("/", &mut buf);
     if n < 0 {
-        println!("ls: error al leer directorio");
+        println!("ls: error reading directory");
         return 1;
     }
     

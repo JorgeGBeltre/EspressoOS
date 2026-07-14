@@ -24,7 +24,7 @@ pub fn start_advertising() {
     let conn = match conn_guard.as_mut() {
         Some(c) => c,
         None => {
-            esp_println::println!("[ble] ERROR: controlador BLE no inicializado");
+            esp_println::println!("[ble] ERROR: BLE controller not initialized");
             return;
         }
     };
@@ -77,7 +77,7 @@ pub fn start_advertising() {
     let _ = conn.write(&enable);
     
     *adv = true;
-    esp_println::println!("[ble] Publicidad BLE iniciada como 'EspressoOS'");
+    esp_println::println!("[ble] BLE advertising started as 'EspressoOS'");
 }
 
 pub fn is_advertising() -> bool {

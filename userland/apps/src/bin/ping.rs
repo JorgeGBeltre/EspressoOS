@@ -52,16 +52,16 @@ pub fn main() -> i32 {
     let ip = match parse_ip(ip_str) {
         Some(addr) => addr,
         None => {
-            println!("ping: IP invalida");
+            println!("ping: invalid IP");
             return 1;
         }
     };
     
-    println!("PING {} puerto 80 (TCP)...", ip_str);
+    println!("PING {} port 80 (TCP)...", ip_str);
     
     let fd = socket(2, 1, 0); // AF_INET, SOCK_STREAM
     if fd < 0 {
-        println!("ping: no se pudo crear el socket");
+        println!("ping: could not create socket");
         return 1;
     }
     
@@ -83,9 +83,9 @@ pub fn main() -> i32 {
     let end = uptime_ms();
     
     if ret == 0 {
-        println!("Conexion exitosa con {}, RTT = {} ms", ip_str, end - start);
+        println!("Connection successful to {}, RTT = {} ms", ip_str, end - start);
     } else {
-        println!("Fallo al conectar con {} (codigo {})", ip_str, ret);
+        println!("Failed to connect to {} (code {})", ip_str, ret);
     }
     
     close(fd as i32);

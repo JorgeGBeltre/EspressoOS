@@ -63,9 +63,9 @@ mod imp {
                 // El guard aparca el núcleo al soltarse: lo mantenemos vivo.
                 core::mem::forget(guard);
                 SMP_RUNNING.store(true, Ordering::Release);
-                println!("[smp] APP_CPU (core 1) arrancado");
+                println!("[smp] APP_CPU (core 1) started");
             }
-            Err(_) => println!("[smp] ERROR: no se pudo arrancar el APP_CPU"),
+            Err(_) => println!("[smp] ERROR: failed to start the APP_CPU"),
         }
     }
 
@@ -89,7 +89,7 @@ pub fn worker_entry(_arg: usize) {
             last = now;
             let t = CORE1_TICKS.fetch_add(1, Ordering::AcqRel) + 1;
             println!(
-                "[smp] tarea worker en core{} tick={} uptime={}ms",
+                "[smp] worker task on core{} tick={} uptime={}ms",
                 current_core_id(),
                 t,
                 now

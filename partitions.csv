@@ -1,4 +1,4 @@
-# Tabla de particiones de esp32s3-os  (flash 16 MB = 0x1000000)
+# Tabla de particiones de EspressoOS  (flash 16 MB = 0x1000000)
 #
 # Se ubica en la flash en el offset 0x8000 (tamaño 0xC00).
 # Genera el binario con: python tools/partition-gen/partition_gen.py

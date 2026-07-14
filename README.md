@@ -292,7 +292,7 @@ cargo run --release
 ```
 [kernel] PSRAM added to heap: 8388608 bytes @ 0x3c000000
 ========================================
-   esp32s3-os   ·   kernel
+   EspressoOS   ·   kernel
 ========================================
 [kernel] task 'shell' created (tid=1)
 [kernel] task 'heartbeat' created (tid=2)
@@ -482,19 +482,19 @@ EspressoOS CLI Commands
     └── echo [-n] <text>  # Prints a line of text (use `-n` to omit newline)
 ```
 
-The shell maintains a **working directory (CWD)** shown in the prompt (e.g. `esp32s3-os:/tmp> `). Filesystem commands accept **relative paths**, which are resolved against the CWD before hitting the VFS (the VFS itself only accepts absolute, normalized paths). Command errors are routed to the active session — including the remote SSH channel — so you see them wherever you're connected.
+The shell maintains a **working directory (CWD)** shown in the prompt (`user@EspressoOS:cwd$ `, with the root `/` displayed as `~`, e.g. `youareme@EspressoOS:/tmp$ `). Filesystem commands accept **relative paths**, which are resolved against the CWD before hitting the VFS (the VFS itself only accepts absolute, normalized paths). Command errors are routed to the active session — including the remote SSH channel — so you see them wherever you're connected.
 
 Example over SSH:
 ```
-esp32s3-os:/> mkdir demo
-esp32s3-os:/> cd demo
-esp32s3-os:/demo> write hello.txt hola mundo
-esp32s3-os:/demo> cat hello.txt
+youareme@EspressoOS:~$ mkdir demo
+youareme@EspressoOS:~$ cd demo
+youareme@EspressoOS:/demo$ write hello.txt hola mundo
+youareme@EspressoOS:/demo$ cat hello.txt
 hola mundo
-esp32s3-os:/demo> ls
+youareme@EspressoOS:/demo$ ls
 hello.txt
-esp32s3-os:/demo> cd ..
-esp32s3-os:/> ls /dev
+youareme@EspressoOS:/demo$ cd ..
+youareme@EspressoOS:~$ ls /dev
 console@
 null@
 zero@

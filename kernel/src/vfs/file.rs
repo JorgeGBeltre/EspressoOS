@@ -79,32 +79,11 @@ impl OpenFile {
         })
     }
 
-    pub fn read(&mut self, buf: &mut [u8]) -> KResult<usize> {
-        if !self.readable {
-            return Err(KError::PermissionDenied);
-        }
-        let n = self.inode.read_at(self.offset, buf)?;
-        self.offset = self
-            .offset
-            .checked_add(n as u64)
-            .ok_or(KError::InvalidArgument)?;
-        Ok(n)
-    }
-
-    pub fn write(&mut self, buf: &[u8]) -> KResult<usize> {
-        if !self.writable {
-            return Err(KError::PermissionDenied);
-        }
-        if self.append {
-            self.offset = self.inode.size();
-        }
-        let n = self.inode.write_at(self.offset, buf)?;
-        self.offset = self
-            .offset
-            .checked_add(n as u64)
-            .ok_or(KError::InvalidArgument)?;
-        Ok(n)
-    }
+    // No read/write here on purpose. Both would need a `&mut OpenFile`, which can
+    // only be obtained from the fd table while its guard is held, and that guard
+    // disables interrupts -- doing inode I/O under it wedges the kernel. The I/O
+    // paths live in vfs::read / vfs::write, which snapshot the fd and unlock
+    // first.
 
     pub fn seek(&mut self, pos: SeekFrom) -> KResult<u64> {
         let new = match pos {

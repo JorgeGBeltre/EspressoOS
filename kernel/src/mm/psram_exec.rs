@@ -28,6 +28,17 @@ pub fn is_ibus(addr: u32, size: u32) -> bool {
     addr >= USER_IBUS_BASE && addr.saturating_add(size) <= USER_IBUS_BASE + USER_REGION_SIZE
 }
 
+/// Which bus a link-time address belongs to. Only the bus matters, not whether the
+/// address is in range: a binary is linked for slot 0 and the loader moves it, so
+/// its addresses are not expected to land anywhere in particular.
+pub fn is_ibus_range(addr: u32) -> bool {
+    addr >= IBUS_MIN
+}
+
+/// Everything at or above this is instruction bus on the ESP32-S3; PSRAM data is
+/// far below at 0x3c......
+const IBUS_MIN: u32 = 0x4200_0000;
+
 extern "C" {
 
     fn Cache_Ibus_MMU_Set(

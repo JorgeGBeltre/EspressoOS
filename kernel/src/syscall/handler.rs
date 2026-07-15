@@ -226,8 +226,8 @@ fn sys_spawn(args: &[usize]) -> isize {
 
     if entry_raw == 0 {
         match crate::fs::elf::load_elf(name) {
-            Ok((entry_point, total_size, load_addr)) => {
-                let entry: fn(usize) = unsafe { core::mem::transmute(entry_point as usize) };
+            Ok(loaded) => {
+                let entry: fn(usize) = unsafe { core::mem::transmute(loaded.entry as usize) };
                 match crate::scheduler::spawn_blocked(
                     name,
                     entry,
@@ -237,18 +237,20 @@ fn sys_spawn(args: &[usize]) -> isize {
                     true,
                 ) {
                     Ok(tid) => {
+                        // The slot goes on the process: reaping it is what returns
+                        // the slot to the pool.
                         let pid = crate::scheduler::process::register_process(
-                            name, tid, true, load_addr, total_size,
+                            name,
+                            tid,
+                            true,
+                            Some(loaded.slot),
                         );
                         crate::scheduler::unblock_task(tid);
                         pid as isize
                     }
                     Err(e) => {
-                        let layout =
-                            core::alloc::Layout::from_size_align(total_size, 4096).unwrap();
-                        unsafe {
-                            alloc::alloc::dealloc(load_addr, layout);
-                        }
+                        // Nothing owns the image yet, so the slot is ours to drop.
+                        crate::mm::psram_exec::slot_free(loaded.slot);
                         e.as_errno()
                     }
                 }
@@ -266,13 +268,8 @@ fn sys_spawn(args: &[usize]) -> isize {
 
         match crate::scheduler::spawn_blocked(name, entry, entry_arg, stack_size, priority, false) {
             Ok(tid) => {
-                let pid = crate::scheduler::process::register_process(
-                    name,
-                    tid,
-                    false,
-                    core::ptr::null_mut(),
-                    0,
-                );
+                // A bare entry point, not an image: no slot to own.
+                let pid = crate::scheduler::process::register_process(name, tid, false, None);
                 crate::scheduler::unblock_task(tid);
                 pid as isize
             }
@@ -300,7 +297,7 @@ fn sys_wait(args: &[usize]) -> isize {
         None => return KError::NotFound.as_errno(),
     };
 
-    let mut reaped: Option<(u32, i32, *mut u8, usize)> = None;
+    let mut reaped: Option<(u32, i32, Option<crate::mm::psram_exec::SlotIndex>)> = None;
     {
         let mut pt = crate::scheduler::process::PROCESS_TABLE.lock();
 
@@ -334,27 +331,21 @@ fn sys_wait(args: &[usize]) -> isize {
             if let Some(current_proc_mut) = pt.table.get_mut(&current_pid) {
                 current_proc_mut.children.retain(|&x| x != child_pid);
             }
-            reaped = Some((
-                child_pid,
-                child_proc.exit_code,
-                child_proc.elf_load_addr,
-                child_proc.elf_size,
-            ));
+            reaped = Some((child_pid, child_proc.exit_code, child_proc.slot));
         }
     }
 
-    if let Some((child_pid, code, load_addr, size)) = reaped {
+    if let Some((child_pid, code, slot)) = reaped {
         if !status_ptr.is_null() {
             unsafe {
                 *status_ptr = code;
             }
         }
 
-        if !load_addr.is_null() && size > 0 && load_addr != 0x3c000000 as *mut u8 {
-            let layout = core::alloc::Layout::from_size_align(size, 4096).unwrap();
-            unsafe {
-                alloc::alloc::dealloc(load_addr, layout);
-            }
+        // The image lived in a PSRAM slot, not on the heap: hand the slot back
+        // instead of the dealloc this used to do.
+        if let Some(s) = slot {
+            crate::mm::psram_exec::slot_free(s);
         }
         crate::vfs::cleanup_process_fds(child_pid);
         return child_pid as isize;

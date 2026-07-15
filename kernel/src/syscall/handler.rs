@@ -228,12 +228,19 @@ fn sys_spawn(args: &[usize]) -> isize {
         match crate::fs::elf::load_elf(name) {
             Ok((entry_point, total_size, load_addr)) => {
                 let entry: fn(usize) = unsafe { core::mem::transmute(entry_point as usize) };
-                match crate::scheduler::spawn(name, entry, 0, layout::DEFAULT_STACK_SIZE, 10, true)
-                {
+                match crate::scheduler::spawn_blocked(
+                    name,
+                    entry,
+                    0,
+                    layout::DEFAULT_STACK_SIZE,
+                    10,
+                    true,
+                ) {
                     Ok(tid) => {
                         let pid = crate::scheduler::process::register_process(
                             name, tid, true, load_addr, total_size,
                         );
+                        crate::scheduler::unblock_task(tid);
                         pid as isize
                     }
                     Err(e) => {
@@ -257,7 +264,7 @@ fn sys_spawn(args: &[usize]) -> isize {
         }
         let priority = arg(args, 5) as u8;
 
-        match crate::scheduler::spawn(name, entry, entry_arg, stack_size, priority, false) {
+        match crate::scheduler::spawn_blocked(name, entry, entry_arg, stack_size, priority, false) {
             Ok(tid) => {
                 let pid = crate::scheduler::process::register_process(
                     name,
@@ -266,6 +273,7 @@ fn sys_spawn(args: &[usize]) -> isize {
                     core::ptr::null_mut(),
                     0,
                 );
+                crate::scheduler::unblock_task(tid);
                 pid as isize
             }
             Err(e) => e.as_errno(),

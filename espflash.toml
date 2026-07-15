@@ -10,5 +10,12 @@
 # Debe coincidir con layout::FLASH_SIZE (kernel/src/prelude.rs) y con el tamaño
 # real de la flash del módulo.
 
+# `partition_table` también es OBLIGATORIO. Sin él espflash NO usa partitions.csv:
+# genera su tabla por defecto (nvs / phy_init / factory@0x10000), que no tiene
+# otadata, ni ota_0, ni fs. El kernel usa los offsets de layout:: en crudo sin
+# consultar la tabla, así que la discrepancia no falla al arrancar: corrompe.
+# En concreto layout::OTADATA_OFFSET (0xF000) caía sobre la partición phy_init.
+partition_table = "partitions.csv"
+
 [flash]
 size = "16MB"

@@ -150,7 +150,29 @@ const EXEC_PRIO: u8 = 10;
 /// parameters. Wiring that up is its own job; this exists to answer the question
 /// that cannot be answered by reading code, which is whether a child's output
 /// reaches the session that launched it.
-fn try_exec(name: &str, _args: &[&str]) -> i32 {
+fn try_exec(name: &str, args: &[&str]) -> i32 {
+    match spawn_child(name, args, STDIN, STDOUT, &[]) {
+        Ok(pid) => wait_all(&[pid]),
+        Err(code) => code,
+    }
+}
+
+/// Loads a program and arranges its stdio, without running it.
+///
+/// `stdin`/`stdout` are fds in THIS shell's table; the child inherits a copy of the
+/// table, so the same numbers name the same files there, and they get duplicated
+/// onto 0 and 1 before it is unblocked. `close_in_child` names fds the child must
+/// not keep -- pipe ends belonging to other stages. Leaving one open means the pipe
+/// still has a writer and its reader never sees EOF.
+///
+/// Returns the child's pid, already runnable. Errors return a shell exit code.
+fn spawn_child(
+    name: &str,
+    args: &[&str],
+    stdin: vfs::Fd,
+    stdout: vfs::Fd,
+    close_in_child: &[vfs::Fd],
+) -> Result<scheduler::process::Pid, i32> {
     let path = if name.contains('/') {
         resolve(name)
     } else {
@@ -161,14 +183,20 @@ fn try_exec(name: &str, _args: &[&str]) -> i32 {
         Ok(l) => l,
         Err(KError::NotFound) => {
             eprint_line(&format!("shell: command not found: {}", name));
-            return 127;
+            return Err(127);
         }
         Err(e) => {
             eprint_line(&format!("shell: {}: {}", name, err_str(e)));
-            return 126;
+            return Err(126);
         }
     };
 
+    // No argv yet: `args` goes nowhere. `_start` is `call4 main` with nothing
+    // marshalled and every main() takes no parameters, so there is no argument to
+    // pass and the 0 below is what the child gets. `/bin/echo hola` prints its
+    // fixed greeting and ignores the word -- which is the honest evidence that this
+    // half is missing.
+    let _ = args;
     let entry: fn(usize) = unsafe { core::mem::transmute(loaded.entry as usize) };
     let tid = match scheduler::spawn_blocked(
         name,
@@ -183,7 +211,7 @@ fn try_exec(name: &str, _args: &[&str]) -> i32 {
             // Nothing owns the image yet.
             crate::mm::psram_exec::slot_free(loaded.slot);
             eprint_line(&format!("shell: {}: cannot spawn ({})", name, err_str(e)));
-            return 126;
+            return Err(126);
         }
     };
 
@@ -194,9 +222,53 @@ fn try_exec(name: &str, _args: &[&str]) -> i32 {
     //
     // The slot rides on the process: reaping it is what returns the slot.
     let pid = scheduler::process::register_process(name, tid, true, Some(loaded.slot));
-    scheduler::unblock_task(tid);
 
-    wait_for(pid, name)
+    // Between register_process (which cloned the table) and unblock_task (after
+    // which the child could run) is the only window where its table can be edited.
+    if stdin != STDIN {
+        let _ = vfs::dup2_in(pid, stdin, STDIN);
+    }
+    if stdout != STDOUT {
+        let _ = vfs::dup2_in(pid, stdout, STDOUT);
+    }
+    for &fd in close_in_child {
+        vfs::close_in(pid, fd);
+    }
+
+    scheduler::unblock_task(tid);
+    Ok(pid)
+}
+
+/// Waits for every pid and returns the LAST one's status, the way a shell reports a
+/// pipeline.
+///
+/// Order does not matter, and not because of the scheduler: sys_wait reaps whichever
+/// child has become a zombie, not a named one. So this just reaps as many times as
+/// there are children and picks out the one it was asked about. That is also what
+/// makes a pipeline drain -- an upstream stage's fds are only released when its
+/// process is reaped, and until they are, the pipe still has a writer and the
+/// downstream stage waits.
+fn wait_all(pids: &[scheduler::process::Pid]) -> i32 {
+    let last = match pids.last() {
+        Some(p) => *p,
+        None => return 0,
+    };
+    let mut last_status = 0;
+    for _ in 0..pids.len() {
+        let mut status: i32 = 0;
+        let reaped = crate::syscall::invoke(
+            crate::syscall::Syscall::Wait as usize,
+            [&mut status as *mut i32 as usize, 0, 0, 0, 0, 0],
+        );
+        if reaped < 0 {
+            eprint_line(&format!("shell: wait failed ({})", reaped));
+            break;
+        }
+        if reaped as u32 == last {
+            last_status = status;
+        }
+    }
+    last_status
 }
 
 /// Blocks until the child exits, and returns its status.
@@ -518,6 +590,17 @@ fn cmd_free() -> i32 {
     emit_line(&format!(
         "heap  {:>11}  {:>11}  {:>11}",
         s.total, s.used, s.free
+    ));
+    // Userland images do not live on the heap -- they get a slot out of the
+    // reserved PSRAM region -- so the line above would never move no matter how
+    // many programs ran, and a slot leak would be invisible until the 33rd exec
+    // failed with "busy".
+    let used = crate::mm::psram_exec::slots_in_use();
+    emit_line(&format!(
+        "slots {:>11}  {:>11}  {:>11}",
+        crate::mm::psram_exec::SLOT_COUNT,
+        used,
+        crate::mm::psram_exec::SLOT_COUNT - used
     ));
     0
 }

@@ -390,6 +390,46 @@ pub fn dup(fd: Fd) -> KResult<Fd> {
     table.insert(open_file)
 }
 
+// dup2/close aimed at another process's table.
+//
+// There is no fork here. In Unix the child dup2s itself between fork and exec;
+// this child does not run until unblock_task, so whoever spawns it has to arrange
+// its stdio from the outside. Both take a pid rather than using the caller's table.
+
+/// dup2 inside `pid`'s table.
+pub fn dup2_in(pid: Pid, oldfd: Fd, newfd: Fd) -> KResult<Fd> {
+    if oldfd < 0 || newfd < 0 || newfd >= MAX_OPEN_FILES as Fd {
+        return Err(KError::BadFd);
+    }
+    let mut tables = PROCESS_FD_TABLES.lock();
+    let table = tables.get_mut(&pid).ok_or(KError::BadFd)?;
+
+    let open_file = match table.entries.get(oldfd as usize) {
+        Some(Some(f)) => f.clone(),
+        _ => return Err(KError::BadFd),
+    };
+    if oldfd == newfd {
+        return Ok(newfd);
+    }
+    while table.entries.len() <= newfd as usize {
+        table.entries.push(None);
+    }
+    table.entries[newfd as usize] = Some(open_file);
+    Ok(newfd)
+}
+
+/// close inside `pid`'s table. Missing fds are not an error: callers close a whole
+/// set of pipe ends without tracking which of them a given child ever had.
+pub fn close_in(pid: Pid, fd: Fd) {
+    if fd < 0 {
+        return;
+    }
+    let mut tables = PROCESS_FD_TABLES.lock();
+    if let Some(table) = tables.get_mut(&pid) {
+        let _ = table.remove(fd);
+    }
+}
+
 pub fn clone_fd_table(parent_pid: Pid, child_pid: Pid) {
     let mut tables = PROCESS_FD_TABLES.lock();
     let parent_table = tables.get(&parent_pid).cloned();

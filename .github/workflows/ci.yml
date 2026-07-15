@@ -18,11 +18,10 @@ jobs:
       - name: Regenerar y validar tabla de particiones
         run: python tools/partition-gen/partition_gen.py
   automerge:
-    name: Auto-PR and Merge to main
+    name: Auto-Merge to main
     needs: [logic-tests]
     runs-on: ubuntu-latest
     permissions:
-      pull-requests: write
       contents: write
     steps:
       - name: Checkout repository
@@ -30,10 +29,11 @@ jobs:
         with:
           fetch-depth: 0
           token: ${{ secrets.GITHUB_TOKEN }}
-      - name: Create and merge Pull Request to main
+      - name: Merge develop into main and push
         if: github.event_name == 'push' && github.ref_name == 'develop'
         run: |
-          gh pr create --base main --head develop --title "Auto-PR: develop to main" --body "Automated PR created after develop branch tests passed." || true
-          gh pr merge --merge --admin || gh pr merge --merge || (git config --global user.name "github-actions[bot]" && git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com" && git checkout main && git merge --no-ff develop -m "Auto-merge develop to main" && git push origin main)
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout main
+          git merge --no-ff develop -m "Auto-merge develop to main"
+          git push origin main

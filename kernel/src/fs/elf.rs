@@ -35,24 +35,10 @@ struct ProgramHeader {
     p_align: u32,
 }
 
-#[repr(C)]
-struct DynEntry {
-    d_tag: i32,
-    d_val: u32,
-}
-
-#[repr(C)]
-struct RelEntry {
-    r_offset: u32,
-    r_info: u32,
-}
-
-#[repr(C)]
-struct RelaEntry {
-    r_offset: u32,
-    r_info: u32,
-    r_addend: i32,
-}
+// DynEntry / RelEntry / RelaEntry lived here to walk PT_DYNAMIC. They went with the
+// ET_DYN branch: the kernel does not parse ELF relocations at all any more. The host
+// digests them at build time into a flat fixup table, which is the only ELF knowledge
+// this loader needs.
 
 pub fn load_elf(path: &str) -> KResult<(u32, usize, *mut u8)> {
     let fd = crate::vfs::open(path, crate::vfs::OpenFlags::RDONLY)?;
@@ -115,106 +101,23 @@ pub fn load_elf(path: &str) -> KResult<(u32, usize, *mut u8)> {
 
     let total_size = (max_vaddr - min_vaddr) as usize;
 
-    if eh.e_type == 3 {
-        let layout = core::alloc::Layout::from_size_align(total_size, 4096)
-            .map_err(|_| KError::InvalidArgument)?;
-        let load_addr = unsafe { alloc::alloc::alloc(layout) };
-        if load_addr.is_null() {
-            let _ = crate::vfs::close(fd);
-            return Err(KError::NoMem);
-        }
-        unsafe {
-            core::ptr::write_bytes(load_addr, 0, total_size);
-        }
-        let load_bias = load_addr as usize as i32 - min_vaddr as i32;
-
-        for ph in phs {
-            if ph.p_type == 1 {
-                if ph.p_filesz > ph.p_memsz {
-                    unsafe {
-                        alloc::alloc::dealloc(load_addr, layout);
-                    }
-                    let _ = crate::vfs::close(fd);
-                    return Err(KError::Corrupt);
-                }
-                let dest_addr = (ph.p_vaddr as i32 + load_bias) as *mut u8;
-                if let Err(e) =
-                    crate::vfs::seek(fd, crate::vfs::SeekFrom::Start(ph.p_offset as u64))
-                {
-                    unsafe {
-                        alloc::alloc::dealloc(load_addr, layout);
-                    }
-                    let _ = crate::vfs::close(fd);
-                    return Err(e);
-                }
-                let dest_slice =
-                    unsafe { core::slice::from_raw_parts_mut(dest_addr, ph.p_filesz as usize) };
-                if crate::vfs::read(fd, dest_slice)? != ph.p_filesz as usize {
-                    unsafe {
-                        alloc::alloc::dealloc(load_addr, layout);
-                    }
-                    let _ = crate::vfs::close(fd);
-                    return Err(KError::Corrupt);
-                }
-            }
-        }
-
-        for ph in phs {
-            if ph.p_type == 2 {
-                let dyn_addr = (ph.p_vaddr as i32 + load_bias) as *const DynEntry;
-                let dyn_count = ph.p_memsz as usize / size_of::<DynEntry>();
-                let dyns = unsafe { core::slice::from_raw_parts(dyn_addr, dyn_count) };
-                let (mut rel_addr, mut rel_sz, mut rela_addr, mut rela_sz) =
-                    (0u32, 0u32, 0u32, 0u32);
-                for entry in dyns {
-                    match entry.d_tag {
-                        17 => rel_addr = entry.d_val,
-                        18 => rel_sz = entry.d_val,
-                        7 => rela_addr = entry.d_val,
-                        8 => rela_sz = entry.d_val,
-                        0 => break,
-                        _ => {}
-                    }
-                }
-                if rel_addr != 0 && rel_sz != 0 {
-                    let rels = unsafe {
-                        core::slice::from_raw_parts(
-                            (rel_addr as i32 + load_bias) as *const RelEntry,
-                            rel_sz as usize / size_of::<RelEntry>(),
-                        )
-                    };
-                    for rel in rels {
-                        if rel.r_info & 0xFF == 17 {
-                            let ptr = (rel.r_offset as i32 + load_bias) as *mut u32;
-                            unsafe {
-                                *ptr = (*ptr).wrapping_add(load_bias as u32);
-                            }
-                        }
-                    }
-                }
-                if rela_addr != 0 && rela_sz != 0 {
-                    let relas = unsafe {
-                        core::slice::from_raw_parts(
-                            (rela_addr as i32 + load_bias) as *const RelaEntry,
-                            rela_sz as usize / size_of::<RelaEntry>(),
-                        )
-                    };
-                    for rela in relas {
-                        if rela.r_info & 0xFF == 17 {
-                            let ptr = (rela.r_offset as i32 + load_bias) as *mut u32;
-                            unsafe {
-                                *ptr = (rela.r_addend as i32 + load_bias) as u32;
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        let _ = crate::vfs::close(fd);
-        let entry = (eh.e_entry as i32 + load_bias) as u32;
-        return Ok((entry, total_size, load_addr));
-    }
+    // No ET_DYN branch here on purpose.
+    //
+    // There used to be one. It was never reachable and it was wrong twice over:
+    //   * It matched relocations with `r_info & 0xFF == 17`. On Xtensa 17 is
+    //     R_XTENSA_DIFF8, an assembler-internal relocation; R_XTENSA_RELATIVE is 5.
+    //     17 is not RELATIVE on any common arch either (ARM 23, x86_64 8, RISC-V 3),
+    //     so the constant was guessed. It would have matched nothing and jumped
+    //     into unrelocated code.
+    //   * Its DT_RELA arm wrote `addend + bias`, but `ld` leaves 0 in the addend for
+    //     section symbols and the resolved value in the word, so that stores the bare
+    //     bias.
+    // And it could never have run: the LLVM Xtensa backend rejects PIC outright
+    //   ("PIC relocations is not supported" -- XtensaISelLowering.cpp), so no ET_DYN
+    //   binary can be produced for this target at all. Verified against core itself.
+    //
+    // Relocatable loading is done instead from a build-time fixup table over an
+    // ordinary ET_EXEC (ld --emit-relocs); see kernel/build.rs.
 
     let dbase = crate::mm::psram_exec::user_data_base();
     if dbase == 0 {

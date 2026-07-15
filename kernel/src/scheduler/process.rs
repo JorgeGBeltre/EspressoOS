@@ -107,14 +107,20 @@ pub fn register_process(
     pid
 }
 
-/// Reports whether `pid` has exited and is waiting to be cleaned up.
-pub fn is_zombie(pid: Pid) -> bool {
+/// Reports whether `pid` is finished: either sitting Zombie, or already reaped.
+///
+/// A missing entry means gone, NOT running. Pids are handed out monotonically
+/// (`next_pid += 1`) and never reused within a boot, so an absent pid can only be
+/// one that has already been cleaned up. Answering "false" there would conflate
+/// "still running" with "long gone" -- and since `reap_orphans` is what removes
+/// the entry, anything polling for a session to end would poll forever.
+pub fn has_exited(pid: Pid) -> bool {
     PROCESS_TABLE
         .lock()
         .table
         .get(&pid)
         .map(|p| p.state == ProcessState::Zombie)
-        .unwrap_or(false)
+        .unwrap_or(true)
 }
 
 /// Drops a process nobody will ever wait() for, releasing its fd table.
@@ -151,9 +157,14 @@ pub fn reap(pid: Pid) {
 /// CHANNEL_CLOSE, a TCP reset that strands the Connection, a failure halfway
 /// through setup), sweep for the one condition they all end in.
 ///
-/// Safe against a live task: a process only reaches Zombie from inside sys_exit,
-/// by which point its task is already Zombie, off the ready queue, and will never
-/// touch an fd again.
+/// Safe against a live task only because of the order today's exit path runs in:
+/// `scheduler::exit` marks the TASK Zombie before invoking the Exit syscall that
+/// marks the PROCESS Zombie, and every exit goes through task_trampoline. A direct
+/// sys_exit syscall reverses that -- syscall/handler.rs marks the process Zombie
+/// about twenty lines before the task -- so this sweep could reap a process whose
+/// task is still running, and its next fd operation would fall through to pid 0's
+/// table. Move mark_zombie above the process update there before exposing sys_exit
+/// to userland.
 pub fn reap_orphans() {
     let dead: Vec<Pid> = {
         let pt = PROCESS_TABLE.lock();

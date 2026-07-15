@@ -146,9 +146,14 @@ impl Channel {
     /// True once the shell has exited on its own -- the user typed `exit`, or it
     /// died. Replaces the old "exit requested" flag: the session ends when the
     /// shell actually ends, not when it announces it will.
+    ///
+    /// Must use `has_exited`, not a Zombie test: reap_orphans runs on this very
+    /// task and deletes the entry, so "not Zombie" and "not in the table" are both
+    /// "finished" here. Reading a missing pid as still-running would mean we never
+    /// send CHANNEL_CLOSE and the client hangs.
     pub fn shell_exited(&self) -> bool {
         match &self.shell {
-            Some(s) => scheduler::process::is_zombie(s.pid),
+            Some(s) => scheduler::process::has_exited(s.pid),
             None => false,
         }
     }

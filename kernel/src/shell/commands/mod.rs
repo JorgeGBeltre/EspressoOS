@@ -67,7 +67,20 @@ pub(crate) fn write_all(fd: vfs::Fd, bytes: &[u8]) {
         match vfs::write(fd, &bytes[done..]) {
             Ok(0) | Err(KError::WouldBlock) => scheduler::yield_now(),
             Ok(n) => done += n,
-            Err(_) => return,
+            // The session hung up. Nowhere to put the rest, and nowhere to
+            // complain to either.
+            Err(KError::IoError) => return,
+            // Anything else is the sink failing under us -- a full filesystem on a
+            // redirected stdout, say. Swallowing that would let `echo x > /config`
+            // truncate the file, write nothing and still return a clean prompt, so
+            // say it on stderr, which `>` never captures. The recursion is one deep
+            // at most: the inner call is on STDERR.
+            Err(e) => {
+                if fd != STDERR {
+                    write_all(STDERR, format!("shell: write failed ({:?})\n", e).as_bytes());
+                }
+                return;
+            }
         }
     }
 }

@@ -32,8 +32,11 @@ impl SessionShell {
     /// Blocked on purpose until seeded: one fd operation before `seed_fd_table`
     /// and `or_insert_with(new_process_table)` would hand this task /dev/console,
     /// putting the SSH session's output on the serial port.
-    pub fn start(channel_id: u32) -> KResult<SessionShell> {
-        let chan = session::create(ChannelKind::Ssh { channel_id });
+    pub fn start(channel_id: u32, user: &str) -> KResult<SessionShell> {
+        let chan = session::create(
+            ChannelKind::Ssh { channel_id },
+            Some(String::from(user)),
+        );
 
         let tid = match scheduler::spawn_blocked(
             "ssh-shell",
@@ -123,14 +126,14 @@ impl Channel {
         }
     }
 
-    pub fn on_request(&mut self, req_type: &[u8], cols: u32, rows: u32) -> bool {
+    pub fn on_request(&mut self, req_type: &[u8], cols: u32, rows: u32, user: &str) -> bool {
         match req_type {
             b"pty-req" => {
                 self.pty_cols = cols;
                 self.pty_rows = rows;
                 true
             }
-            b"shell" => match SessionShell::start(self.local_id) {
+            b"shell" => match SessionShell::start(self.local_id, user) {
                 Ok(s) => {
                     self.shell = Some(s);
                     self.shell_started = true;
@@ -198,9 +201,15 @@ impl Channel {
     }
 }
 
-fn ssh_shell_entry(_arg: usize) {
-    crate::shell::run_session(Some(crate::drivers::ssh::config::DEV_USER));
+fn ssh_shell_entry(arg: usize) {
+    // The prompt must name whoever actually authenticated, not the compiled
+    // DEV_USER. It used to print DEV_USER unconditionally, which meant a login as
+    // any other account -- /etc/passwd allows them -- was shown as DEV_USER's. That
+    // is what hid a live root:root: `ssh root@board` came back with a
+    // `youareme@EspressoOS:~$` prompt and looked like it had been refused.
+    let user = session::get(arg as u32).and_then(|c| c.user.clone());
+    crate::shell::run_session(user.as_deref());
     // Returning is the exit path: task_trampoline calls exit(0), which marks the
     // task Zombie for the scheduler and the process Zombie for reap_orphans. The
-    // channel reached this task through its fd table, never through `arg`.
+    // channel reaches this task through its fd table; `arg` is only its id.
 }

@@ -181,7 +181,7 @@ fn main() -> ! {
     // whose 0/1/2 point at their own channel, and both hand that channel to their
     // children through clone_fd_table. The only difference left is which arm of
     // SessionChannel::write runs.
-    let uart_chan = session::create(session::ChannelKind::Uart);
+    let uart_chan = session::create(session::ChannelKind::Uart, None);
     match scheduler::spawn_blocked(
         "shell",
         shell_task,

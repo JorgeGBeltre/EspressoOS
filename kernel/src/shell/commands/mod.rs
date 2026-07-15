@@ -138,6 +138,98 @@ pub fn end_redirect(saved: Option<vfs::Fd>) {
     }
 }
 
+/// Priority the scheduler ignores -- `next_ready` only looks at affinity, and
+/// `Task::priority` has no readers. Matches sys_spawn so the two agree if it ever
+/// grows any.
+const EXEC_PRIO: u8 = 10;
+
+/// Runs a program from `/bin` (or a path, if the name has a slash) and waits.
+///
+/// No argv: `_args` is dropped on the floor. There is nowhere to put it -- `_start`
+/// is `call4 main` with nothing marshalled, and every program's `main()` takes no
+/// parameters. Wiring that up is its own job; this exists to answer the question
+/// that cannot be answered by reading code, which is whether a child's output
+/// reaches the session that launched it.
+fn try_exec(name: &str, _args: &[&str]) -> i32 {
+    let path = if name.contains('/') {
+        resolve(name)
+    } else {
+        format!("/bin/{}", name)
+    };
+
+    let loaded = match crate::fs::elf::load_elf(&path) {
+        Ok(l) => l,
+        Err(KError::NotFound) => {
+            eprint_line(&format!("shell: command not found: {}", name));
+            return 127;
+        }
+        Err(e) => {
+            eprint_line(&format!("shell: {}: {}", name, err_str(e)));
+            return 126;
+        }
+    };
+
+    let entry: fn(usize) = unsafe { core::mem::transmute(loaded.entry as usize) };
+    let tid = match scheduler::spawn_blocked(
+        name,
+        entry,
+        0,
+        layout::DEFAULT_STACK_SIZE,
+        EXEC_PRIO,
+        true,
+    ) {
+        Ok(t) => t,
+        Err(e) => {
+            // Nothing owns the image yet.
+            crate::mm::psram_exec::slot_free(loaded.slot);
+            eprint_line(&format!("shell: {}: cannot spawn ({})", name, err_str(e)));
+            return 126;
+        }
+    };
+
+    // register_process finds the parent by scanning for the CALLING task's tid, so
+    // the parent is this shell. The child therefore inherits the shell's fd table --
+    // and with it the session's channel on 0/1/2 -- and its cwd, without a line here
+    // to arrange it. That inheritance is the whole point of giving the shell a pid.
+    //
+    // The slot rides on the process: reaping it is what returns the slot.
+    let pid = scheduler::process::register_process(name, tid, true, Some(loaded.slot));
+    scheduler::unblock_task(tid);
+
+    wait_for(pid, name)
+}
+
+/// Blocks until the child exits, and returns its status.
+///
+/// Goes through the trap rather than calling sys_wait directly, because the trap IS
+/// the blocking: sys_wait parks the task and sets the restart flag, and the trap
+/// epilogue then leaves PC on the `syscall` instruction so it re-executes on wake.
+/// Called as a plain function it would return 0 immediately, having waited for
+/// nothing.
+///
+/// `status` is a kernel stack address. sys_wait writes it after a null check and
+/// nothing else -- no syscall in this kernel validates a user pointer -- so it
+/// simply works. That is also why pointer validation has to land before userland
+/// can issue syscalls of its own.
+fn wait_for(pid: scheduler::process::Pid, name: &str) -> i32 {
+    let mut status: i32 = 0;
+    let reaped = crate::syscall::invoke(
+        crate::syscall::Syscall::Wait as usize,
+        [&mut status as *mut i32 as usize, 0, 0, 0, 0, 0],
+    );
+    if reaped < 0 {
+        eprint_line(&format!("shell: {}: wait failed ({})", name, reaped));
+        return 1;
+    }
+    // sys_wait reaps whichever child is a zombie, not a named one. try_exec blocks,
+    // so the shell only ever has one -- if that stops being true this silently
+    // returns the wrong program's status.
+    if reaped as u32 != pid {
+        eprint_line(&format!("shell: {}: reaped pid {} but expected {}", name, reaped, pid));
+    }
+    status
+}
+
 pub(crate) fn eprint_pipeline_unsupported() {
     eprint_line("shell: pipelines not yet supported; running the first stage");
 }
@@ -177,10 +269,7 @@ pub fn dispatch(name: &str, args: &[&str]) -> i32 {
         "nmcli" => cmd_nmcli(args),
         "sudo" => cmd_sudo(args),
         "" => 0,
-        other => {
-            eprint_line(&format!("shell: command not found: {}", other));
-            127
-        }
+        other => try_exec(other, args),
     }
 }
 

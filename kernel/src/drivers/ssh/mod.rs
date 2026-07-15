@@ -727,8 +727,12 @@ impl Connection {
             (0, 0)
         };
 
+        // Copied out before borrowing self.channel, and it is the authenticated name
+        // rather than config::DEV_USER: /etc/passwd can admit other accounts, so the
+        // two are not the same thing.
+        let user = self.auth_user.clone();
         let (remote_id, success) = match self.channel.as_mut() {
-            Some(ch) => (ch.remote_id, ch.on_request(&req_type, cols, rows)),
+            Some(ch) => (ch.remote_id, ch.on_request(&req_type, cols, rows, &user)),
             None => return Ok(()),
         };
 

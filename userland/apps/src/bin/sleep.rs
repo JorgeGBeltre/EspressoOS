@@ -25,11 +25,15 @@ const SLEEP_MS: usize = 3000;
 
 #[no_mangle]
 pub extern "C" fn main() -> i32 {
-    println!("sleep: holding a slot for 3s");
+    // Both timestamps, so two runs prove for themselves whether they overlapped.
+    // "run it on one session while the other one sleeps" is not a test if the
+    // output looks identical either way -- it just moves the claim onto whoever
+    // was watching the clock.
     let start = uptime_ms();
+    println!("sleep: start t={}", start);
     while uptime_ms().wrapping_sub(start) < SLEEP_MS {
         yield_now();
     }
-    println!("sleep: done");
+    println!("sleep: end   t={}", uptime_ms());
     0
 }

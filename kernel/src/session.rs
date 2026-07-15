@@ -30,6 +30,11 @@ pub struct SessionChannel {
     pub id: SessionId,
     pub kind: ChannelKind,
 
+    /// Who authenticated on this session, or None for the console, which has no
+    /// login. A task entry takes a usize and a name is a String, so this is how the
+    /// user reaches the shell: the task gets its session id and looks itself up.
+    pub user: Option<String>,
+
     /// wire -> session. Unused by the Uart arm, which reads the FIFO directly.
     to_session: Mutex<VecDeque<u8>>,
 
@@ -200,7 +205,7 @@ static SESSIONS: Mutex<BTreeMap<SessionId, Arc<SessionChannel>>> = Mutex::new(BT
 
 static NEXT_ID: AtomicU32 = AtomicU32::new(1);
 
-pub fn create(kind: ChannelKind) -> Arc<SessionChannel> {
+pub fn create(kind: ChannelKind, user: Option<String>) -> Arc<SessionChannel> {
     let id = match kind {
         ChannelKind::Uart => UART_SESSION,
         ChannelKind::Ssh { .. } => NEXT_ID.fetch_add(1, Ordering::Relaxed),
@@ -208,6 +213,7 @@ pub fn create(kind: ChannelKind) -> Arc<SessionChannel> {
     let chan = Arc::new(SessionChannel {
         id,
         kind,
+        user,
         to_session: Mutex::new(VecDeque::new()),
         from_session: Mutex::new(VecDeque::new()),
         open: AtomicBool::new(true),

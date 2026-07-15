@@ -1,6 +1,5 @@
 #![allow(dead_code)]
 
-use crate::arch::xtensa::sync::Mutex;
 use crate::arch::xtensa::timer;
 use crate::drivers::uart;
 use crate::mm;
@@ -15,15 +14,11 @@ pub const STDIN: vfs::Fd = 0;
 pub const STDOUT: vfs::Fd = 1;
 pub const STDERR: vfs::Fd = 2;
 
-static CWD: Mutex<String> = Mutex::new(String::new());
-
+// The cwd lives on the Process, not here. It used to be one kernel-global
+// Mutex<String>, which meant `cd` in an SSH session silently moved the serial
+// console's cwd too, and a fresh session inherited the previous one's directory.
 pub fn cwd_get() -> String {
-    let c = CWD.lock();
-    if c.is_empty() {
-        String::from("/")
-    } else {
-        c.clone()
-    }
+    scheduler::process::cwd_get()
 }
 
 fn norm_abs(path: &str) -> String {
@@ -479,7 +474,7 @@ fn cmd_cd(args: &[&str]) -> i32 {
 
     match vfs::readdir(&abs) {
         Ok(_) => {
-            *CWD.lock() = abs;
+            scheduler::process::cwd_set(&abs);
             0
         }
         Err(e) => {

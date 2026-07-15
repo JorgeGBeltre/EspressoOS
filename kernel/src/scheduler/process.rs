@@ -24,6 +24,11 @@ pub struct Process {
     pub elf_load_addr: *mut u8,
     pub elf_size: usize,
 
+    /// Working directory. Per process, not global: two sessions must be able to
+    /// `cd` independently, and a child has to inherit its parent's cwd the way it
+    /// inherits the fd table.
+    pub cwd: String,
+
     pub pending_signals: u32,
     pub signal_handlers: [usize; 32],
     pub signal_restorers: [usize; 32],
@@ -66,10 +71,12 @@ pub fn register_process(
     pt.next_pid += 1;
 
     let mut parent_pid = None;
+    let mut cwd = String::from("/");
     let current_tid = super::current();
     for (&p, proc) in &pt.table {
         if proc.main_task == current_tid {
             parent_pid = Some(p);
+            cwd = proc.cwd.clone();
             break;
         }
     }
@@ -84,6 +91,7 @@ pub fn register_process(
         children: Vec::new(),
         elf_load_addr,
         elf_size,
+        cwd,
         pending_signals: 0,
         signal_handlers: [0; 32],
         signal_restorers: [0; 32],
@@ -105,6 +113,35 @@ pub fn register_process(
     }
 
     pid
+}
+
+/// The calling process's working directory, or "/" for a task that has no process
+/// (the net and heartbeat tasks). They never resolve paths, so the fallback only
+/// exists to keep this total.
+pub fn cwd_get() -> String {
+    let pid = match get_current_pid() {
+        Some(p) => p,
+        None => return String::from("/"),
+    };
+    PROCESS_TABLE
+        .lock()
+        .table
+        .get(&pid)
+        .map(|p| p.cwd.clone())
+        .unwrap_or_else(|| String::from("/"))
+}
+
+/// Sets the calling process's working directory. `path` must already be absolute
+/// and normalized.
+pub fn cwd_set(path: &str) {
+    let pid = match get_current_pid() {
+        Some(p) => p,
+        None => return,
+    };
+    if let Some(proc) = PROCESS_TABLE.lock().table.get_mut(&pid) {
+        proc.cwd.clear();
+        proc.cwd.push_str(path);
+    }
 }
 
 /// Reports whether `pid` is finished: either sitting Zombie, or already reaped.

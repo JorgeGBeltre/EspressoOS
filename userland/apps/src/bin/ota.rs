@@ -4,7 +4,7 @@
 use libc::{println, print, read, ota_state, yield_now};
 
 #[no_mangle]
-pub extern "C" fn main() -> i32 {
+pub extern "C" fn main(_argc: i32, _argv: *const *const u8) -> i32 {
     println!("--- EspressoOS OTA Control Utility ---");
     println!("1. Get status of the current image");
     println!("2. Mark current image as INVALID (Failure/automatic rollback)");

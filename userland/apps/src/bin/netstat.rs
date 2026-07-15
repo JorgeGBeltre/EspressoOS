@@ -4,7 +4,7 @@
 use libc::{println, open, read, close};
 
 #[no_mangle]
-pub fn main() -> i32 {
+pub extern "C" fn main(_argc: i32, _argv: *const *const u8) -> i32 {
     let mut buf = [0u8; 2048];
     let fd = open("/proc/net/sockets", 0);
     if fd < 0 {

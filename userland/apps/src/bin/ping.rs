@@ -35,7 +35,7 @@ fn parse_ip(s: &str) -> Option<[u8; 4]> {
 }
 
 #[no_mangle]
-pub fn main() -> i32 {
+pub extern "C" fn main(_argc: i32, _argv: *const *const u8) -> i32 {
 
 
 

@@ -4,7 +4,7 @@
 use libc::{println, print, read, spawn, wait, yield_now, pipe, dup2, close, readdir};
 
 #[no_mangle]
-pub extern "C" fn main() -> i32 {
+pub extern "C" fn main(_argc: i32, _argv: *const *const u8) -> i32 {
     println!("--- EspressoOS Shell (Userland) ---");
     let mut buf = [0u8; 64];
     loop {

@@ -14,7 +14,7 @@ fn read_file_to_buf(path: &str, buf: &mut [u8]) -> usize {
 }
 
 #[no_mangle]
-pub fn main() -> i32 {
+pub extern "C" fn main(_argc: i32, _argv: *const *const u8) -> i32 {
     let fd = socket(2, 1, 0);
     if fd < 0 {
         println!("httpd: could not create socket");

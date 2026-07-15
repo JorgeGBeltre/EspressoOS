@@ -4,7 +4,7 @@
 use libc::{println, socket, connect, write, read, close, timeval, settimeofday, sockaddr_in, yield_now};
 
 #[no_mangle]
-pub extern "C" fn main() -> i32 {
+pub extern "C" fn main(_argc: i32, _argv: *const *const u8) -> i32 {
     println!("[sntp] Starting time synchronization...");
 
     let fd = socket(2, 2, 0);

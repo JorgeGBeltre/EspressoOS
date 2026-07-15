@@ -24,7 +24,7 @@ use libc::{println, uptime_ms, yield_now};
 const SLEEP_MS: usize = 3000;
 
 #[no_mangle]
-pub extern "C" fn main() -> i32 {
+pub extern "C" fn main(_argc: i32, _argv: *const *const u8) -> i32 {
     // Both timestamps, so two runs prove for themselves whether they overlapped.
     // "run it on one session while the other one sleeps" is not a test if the
     // output looks identical either way -- it just moves the claim onto whoever

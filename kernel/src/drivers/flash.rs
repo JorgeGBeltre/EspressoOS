@@ -18,6 +18,13 @@ fn with_flash<R>(f: impl FnOnce(&mut FlashStorage) -> R) -> R {
     f(fs)
 }
 
+/// Capacidad que esp-storage deriva del byte 3 del header en 0x0000, no del chip.
+/// Si el header se escribió con el default de espflash (4MB), todo acceso por
+/// encima de esa marca falla con OutOfBounds. Ver espflash.toml.
+pub fn capacity() -> usize {
+    with_flash(|fs| fs.capacity())
+}
+
 fn check_range(offset: u32, len: usize) -> KResult<()> {
     let end = (offset as u64)
         .checked_add(len as u64)

@@ -182,6 +182,36 @@ pub fn spawn(
     priority: u8,
     is_user: bool,
 ) -> KResult<Tid> {
+    spawn_inner(name, entry, arg, stack_size, priority, is_user, false)
+}
+
+/// Creates the task in `Blocked` and does not queue it, so the caller can finish
+/// setting it up before it can be scheduled. Pair with `unblock_task`.
+///
+/// `spawn` queues the task immediately, which means it can run before the caller
+/// has registered its pid. A task without a pid falls back to pid 0 in every fd
+/// operation (see `vfs::write`), so anything that must own its own fd table has
+/// to be created blocked, registered, and only then unblocked.
+pub fn spawn_blocked(
+    name: &str,
+    entry: fn(usize),
+    arg: usize,
+    stack_size: usize,
+    priority: u8,
+    is_user: bool,
+) -> KResult<Tid> {
+    spawn_inner(name, entry, arg, stack_size, priority, is_user, true)
+}
+
+fn spawn_inner(
+    name: &str,
+    entry: fn(usize),
+    arg: usize,
+    stack_size: usize,
+    priority: u8,
+    is_user: bool,
+    start_blocked: bool,
+) -> KResult<Tid> {
     let reserved = with_sched(|s| match s.next_tid.checked_add(1) {
         Some(next) => {
             let tid = s.next_tid;
@@ -200,10 +230,15 @@ pub fn spawn(
     if name == "net" {
         task.affinity = Some(0);
     }
+    if start_blocked {
+        task.state = TaskState::Blocked;
+    }
 
     let inserted = with_sched(|s| {
         s.tasks.insert(tid, task);
-        s.ready.push(tid);
+        if !start_blocked {
+            s.ready.push(tid);
+        }
     });
     match inserted {
         Some(()) => Ok(tid),

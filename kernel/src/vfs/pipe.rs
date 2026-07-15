@@ -72,11 +72,19 @@ impl Inode for PipeReadInode {
                 return Ok(0);
             }
 
+            // Enqueue and go Blocked while buffer.lock is still held. A waker has
+            // to hold that same lock to reach its unblock loop, so it can never
+            // observe this tid on the list without also observing it Blocked.
+            // That matters because unblock_task no-ops on a Ready task and the
+            // waker clears the list right after: a wakeup landing in that window
+            // would be lost forever, with data sitting in the pipe. Only yield
+            // once the lock is released.
             let tid = crate::scheduler::current();
             self.pipe.readers_blocked.lock().push(tid);
+            crate::scheduler::block_current_noswitch();
 
             drop(guard);
-            crate::scheduler::block_current();
+            crate::scheduler::yield_now();
         }
     }
 
@@ -161,11 +169,13 @@ impl Inode for PipeWriteInode {
                 return Ok(n);
             }
 
+            // Same enqueue-then-block atomicity as PipeReadInode::read_at.
             let tid = crate::scheduler::current();
             self.pipe.writers_blocked.lock().push(tid);
+            crate::scheduler::block_current_noswitch();
 
             drop(guard);
-            crate::scheduler::block_current();
+            crate::scheduler::yield_now();
         }
     }
 

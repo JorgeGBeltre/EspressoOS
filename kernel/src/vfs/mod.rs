@@ -374,6 +374,22 @@ pub fn dup2(oldfd: Fd, newfd: Fd) -> KResult<Fd> {
     Ok(newfd)
 }
 
+/// Duplicates `fd` onto the lowest free slot, like dup(2).
+pub fn dup(fd: Fd) -> KResult<Fd> {
+    if fd < 0 {
+        return Err(KError::BadFd);
+    }
+    let pid = crate::scheduler::process::get_current_pid().unwrap_or(0);
+    let mut tables = PROCESS_FD_TABLES.lock();
+    let table = tables.entry(pid).or_insert_with(FdTable::new_process_table);
+
+    let open_file = match table.entries.get(fd as usize) {
+        Some(Some(f)) => f.clone(),
+        _ => return Err(KError::BadFd),
+    };
+    table.insert(open_file)
+}
+
 pub fn clone_fd_table(parent_pid: Pid, child_pid: Pid) {
     let mut tables = PROCESS_FD_TABLES.lock();
     let parent_table = tables.get(&parent_pid).cloned();

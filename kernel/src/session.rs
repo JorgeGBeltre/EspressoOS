@@ -71,14 +71,50 @@ impl SessionChannel {
         if buf.is_empty() {
             return Ok(0);
         }
+        // ONLCR lives here, in the terminal, not in the shell. Callers emit a bare
+        // \n and a channel turns it into \r\n on the way out; a file inode does no
+        // such thing, so `echo x > f` lands as LF the way it should. That also
+        // stops redirection from being a special case in the shell.
         match self.kind {
-            // uart::write always takes the whole buffer, so this arm never
-            // reports WouldBlock.
-            ChannelKind::Uart => Ok(uart::write(buf)),
-            ChannelKind::Ssh { .. } => match push(&self.from_session, buf) {
-                0 => Err(KError::WouldBlock),
-                n => Ok(n),
-            },
+            // uart::write always takes the whole slice, so this arm can neither
+            // tear a \r\n nor report WouldBlock.
+            ChannelKind::Uart => {
+                for (body, nl) in onlcr_chunks(buf) {
+                    if !body.is_empty() {
+                        uart::write(body);
+                    }
+                    if nl {
+                        uart::write(b"\r\n");
+                    }
+                }
+                Ok(buf.len())
+            }
+            ChannelKind::Ssh { .. } => {
+                let mut ring = self.from_session.lock();
+                let mut taken = 0usize;
+                for (body, nl) in onlcr_chunks(buf) {
+                    let n = core::cmp::min(RING_CAP.saturating_sub(ring.len()), body.len());
+                    ring.extend(body[..n].iter().copied());
+                    taken += n;
+                    if n < body.len() {
+                        break;
+                    }
+                    if nl {
+                        // All or nothing: half a \r\n on the wire is worse than
+                        // none, so leave the \n for the caller's next attempt.
+                        if RING_CAP.saturating_sub(ring.len()) < 2 {
+                            break;
+                        }
+                        ring.extend(b"\r\n".iter().copied());
+                        // The caller handed us one byte, not the two we sent.
+                        taken += 1;
+                    }
+                }
+                match taken {
+                    0 => Err(KError::WouldBlock),
+                    n => Ok(n),
+                }
+            }
         }
     }
 
@@ -127,6 +163,18 @@ impl SessionChannel {
     pub fn has_output(&self) -> bool {
         !self.from_session.lock().is_empty()
     }
+}
+
+/// Splits `buf` into (body, ends_with_newline) pairs for ONLCR.
+///
+/// Allocates nothing and copies nothing: split_inclusive keeps each \n with its
+/// own chunk, and a buffer with no \n at all is one chunk and one send.
+fn onlcr_chunks(buf: &[u8]) -> impl Iterator<Item = (&[u8], bool)> {
+    buf.split_inclusive(|&b| b == b'\n')
+        .map(|chunk| match chunk.strip_suffix(b"\n") {
+            Some(body) => (body, true),
+            None => (chunk, false),
+        })
 }
 
 fn push(ring: &Mutex<VecDeque<u8>>, data: &[u8]) -> usize {

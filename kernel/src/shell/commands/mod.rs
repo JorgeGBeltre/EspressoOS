@@ -11,28 +11,9 @@ use alloc::format;
 
 use super::parser::Redirect;
 
-#[derive(Clone, Copy)]
-enum Sink {
-    Console,
-
-    Ssh,
-
-    File(vfs::Fd),
-}
-
-static OUTPUT: Mutex<Sink> = Mutex::new(Sink::Console);
-
-static BASE: Mutex<Sink> = Mutex::new(Sink::Console);
-
-pub fn set_base_ssh() {
-    *BASE.lock() = Sink::Ssh;
-    *OUTPUT.lock() = Sink::Ssh;
-}
-
-pub fn set_base_console() {
-    *BASE.lock() = Sink::Console;
-    *OUTPUT.lock() = Sink::Console;
-}
+pub const STDIN: vfs::Fd = 0;
+pub const STDOUT: vfs::Fd = 1;
+pub const STDERR: vfs::Fd = 2;
 
 static CWD: Mutex<String> = Mutex::new(String::new());
 
@@ -74,85 +55,87 @@ fn resolve(path: &str) -> String {
     }
 }
 
-fn emit(bytes: &[u8]) {
-    let mut sink = OUTPUT.lock();
-    match &mut *sink {
-        Sink::Console => {
-            let _ = uart::write(bytes);
-        }
-        Sink::Ssh => {
-            let _ = crate::shell::remote::command_output_to_ssh(bytes);
-        }
-        Sink::File(fd) => {
-            let _ = vfs::write(*fd, bytes);
+/// Writes every byte or gives up, whichever comes first.
+///
+/// A channel accepts short writes and answers WouldBlock when its ring is full,
+/// so the retry loop lives here -- outside the VFS, where yielding is legal
+/// because no lock is held. IoError means the session is gone; there is nowhere
+/// left to put the rest, so drop it rather than spin.
+pub(crate) fn write_all(fd: vfs::Fd, bytes: &[u8]) {
+    let mut done = 0usize;
+    while done < bytes.len() {
+        match vfs::write(fd, &bytes[done..]) {
+            Ok(0) | Err(KError::WouldBlock) => scheduler::yield_now(),
+            Ok(n) => done += n,
+            Err(_) => return,
         }
     }
+}
+
+fn emit(bytes: &[u8]) {
+    write_all(STDOUT, bytes);
 }
 
 fn emit_str(s: &str) {
     emit(s.as_bytes());
 }
 
+// Emits a bare \n, never \r\n: turning that into CRLF is the terminal's job
+// (see SessionChannel::write). A redirected stdout is a plain file inode, which
+// translates nothing, so `echo x > f` gets LF the way it should.
 fn emit_line(s: &str) {
-    let mut sink = OUTPUT.lock();
-    match &mut *sink {
-        Sink::Console => {
-            let _ = uart::write(s.as_bytes());
-            let _ = uart::write(b"\r\n");
-        }
-        Sink::Ssh => {
-            let _ = crate::shell::remote::command_output_to_ssh(s.as_bytes());
-            let _ = crate::shell::remote::command_output_to_ssh(b"\r\n");
-        }
-        Sink::File(fd) => {
-            let _ = vfs::write(*fd, s.as_bytes());
-            let _ = vfs::write(*fd, b"\n");
-        }
-    }
+    emit(s.as_bytes());
+    emit(b"\n");
 }
 
+// stderr, so `>` never captures it -- which is the whole reason fd 2 exists.
 fn eprint_line(s: &str) {
-    match *BASE.lock() {
-        Sink::Ssh => {
-            let _ = crate::shell::remote::command_output_to_ssh(s.as_bytes());
-            let _ = crate::shell::remote::command_output_to_ssh(b"\r\n");
-        }
-        _ => {
-            let _ = uart::write(s.as_bytes());
-            let _ = uart::write(b"\r\n");
-        }
-    }
+    write_all(STDERR, s.as_bytes());
+    write_all(STDERR, b"\n");
 }
 
-pub fn begin_redirect(redirect: &Redirect) -> KResult<()> {
-    match redirect {
-        Redirect::None => {
-            let base = *BASE.lock();
-            *OUTPUT.lock() = base;
-            Ok(())
-        }
-        Redirect::Truncate(path) => {
-            let flags = OpenFlags(OpenFlags::WRONLY.0 | OpenFlags::CREATE.0 | OpenFlags::TRUNC.0);
-            let fd = vfs::open(&resolve(path), flags)?;
-            *OUTPUT.lock() = Sink::File(fd);
-            Ok(())
-        }
-        Redirect::Append(path) => {
-            let flags = OpenFlags(OpenFlags::WRONLY.0 | OpenFlags::CREATE.0 | OpenFlags::APPEND.0);
-            let fd = vfs::open(&resolve(path), flags)?;
-            *OUTPUT.lock() = Sink::File(fd);
-            Ok(())
-        }
-    }
-}
+/// Points STDOUT at `redirect`'s file, returning the saved original so
+/// `end_redirect` can put it back. This is the plain dup2 dance: the command
+/// underneath writes fd 1 and never learns it moved.
+pub fn begin_redirect(redirect: &Redirect) -> KResult<Option<vfs::Fd>> {
+    let (path, extra) = match redirect {
+        Redirect::None => return Ok(None),
+        Redirect::Truncate(p) => (p, OpenFlags::TRUNC.0),
+        Redirect::Append(p) => (p, OpenFlags::APPEND.0),
+    };
 
-pub fn end_redirect() {
-    let mut sink = OUTPUT.lock();
-    if let Sink::File(fd) = *sink {
+    let flags = OpenFlags(OpenFlags::WRONLY.0 | OpenFlags::CREATE.0 | extra);
+    let fd = vfs::open(&resolve(path), flags)?;
+
+    let saved = match vfs::dup(STDOUT) {
+        Ok(s) => s,
+        Err(e) => {
+            let _ = vfs::close(fd);
+            return Err(e);
+        }
+    };
+    if let Err(e) = vfs::dup2(fd, STDOUT) {
         let _ = vfs::close(fd);
+        let _ = vfs::close(saved);
+        return Err(e);
     }
+    let _ = vfs::close(fd);
+    Ok(Some(saved))
+}
 
-    *sink = *BASE.lock();
+pub fn end_redirect(saved: Option<vfs::Fd>) {
+    if let Some(s) = saved {
+        let _ = vfs::dup2(s, STDOUT);
+        let _ = vfs::close(s);
+    }
+}
+
+pub(crate) fn eprint_pipeline_unsupported() {
+    eprint_line("shell: pipelines not yet supported; running the first stage");
+}
+
+pub(crate) fn eprint_syntax_error(s: &str) {
+    eprint_line(s);
 }
 
 pub fn dispatch(name: &str, args: &[&str]) -> i32 {

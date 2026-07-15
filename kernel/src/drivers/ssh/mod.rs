@@ -16,7 +16,6 @@ use rand_core::RngCore;
 use sha2::{Digest, Sha256};
 
 use crate::prelude::*;
-use crate::shell::remote;
 
 use channel::Channel;
 use crypt::Aead;
@@ -179,6 +178,19 @@ impl Connection {
         self.state == State::Closed
     }
 
+    /// Tears the session down for good, whatever killed it -- clean logout, a
+    /// client CHANNEL_CLOSE, or the TCP socket dropping out from under us.
+    ///
+    /// Dropping the Channel drops its SessionShell, which closes the channel, so
+    /// the shell's next read sees EOF and its task exits. The process is then
+    /// collected by process::reap_orphans. Idempotent: once channel is None this
+    /// costs nothing, which matters because the caller polls it.
+    pub fn shutdown(&mut self) {
+        self.close_shell();
+        self.channel = None;
+        self.state = State::Closed;
+    }
+
     pub fn pump<T: Transport>(&mut self, t: &mut T, host: &HostKey) -> KResult<()> {
         if self.state == State::Closed {
             return Ok(());
@@ -220,9 +232,10 @@ impl Connection {
         if self.state == State::Session {
             self.pump_shell_output()?;
 
-            if !self.closing && remote::bridge_exit_requested() && !remote::bridge_has_output() {
+            // The shell exited on its own and we have flushed its last bytes (the
+            // "logout"). No flag to clear: the shell's own death is the signal.
+            if !self.closing && self.shell_exited() && !self.shell_has_output() {
                 self.close_channel_from_shell()?;
-                remote::bridge_clear_exit();
                 self.closing = true;
                 self.closing_deadline =
                     crate::arch::xtensa::timer::uptime_ms().saturating_add(1500);
@@ -657,7 +670,7 @@ impl Connection {
                         self.send_packet(&p)?;
                     }
                 }
-                remote::bridge_close();
+                self.close_shell();
                 self.state = State::Closed;
                 Ok(())
             }
@@ -755,6 +768,20 @@ impl Connection {
         Ok(())
     }
 
+    fn shell_exited(&self) -> bool {
+        self.channel.as_ref().map(|c| c.shell_exited()).unwrap_or(false)
+    }
+
+    fn shell_has_output(&self) -> bool {
+        self.channel.as_ref().map(|c| c.has_output()).unwrap_or(false)
+    }
+
+    fn close_shell(&self) {
+        if let Some(ch) = self.channel.as_ref() {
+            ch.close_shell();
+        }
+    }
+
     fn pump_shell_output(&mut self) -> KResult<()> {
         let (remote_id, mut window, maxp, started) = match self.channel.as_ref() {
             Some(ch) => (
@@ -769,7 +796,7 @@ impl Connection {
             return Ok(());
         }
         loop {
-            if window == 0 || !remote::bridge_has_output() {
+            if window == 0 {
                 break;
             }
 
@@ -777,7 +804,11 @@ impl Connection {
             if cap == 0 {
                 break;
             }
-            let data = remote::bridge_take_output(cap);
+            // Borrow ends with the statement, so send_packet can take &mut self.
+            let data = match self.channel.as_ref() {
+                Some(ch) => ch.take_output(cap),
+                None => break,
+            };
             if data.is_empty() {
                 break;
             }
@@ -820,7 +851,7 @@ impl Connection {
         let p = w.into_bytes();
 
         let _ = self.send_packet(&p);
-        remote::bridge_close();
+        self.close_shell();
         self.state = State::Closed;
         Ok(())
     }

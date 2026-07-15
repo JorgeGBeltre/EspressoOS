@@ -268,10 +268,11 @@ fn banner() {
 }
 
 fn shell_task(_arg: usize) {
-    loop {
-        shell::run();
-        scheduler::yield_now();
-    }
+    // No user prefix on the prompt, and no loop: the serial channel never reports
+    // EOF, so run_session does not return. If it ever did, letting the task exit
+    // is the honest outcome -- respawning the session over a dead channel would
+    // just spin.
+    shell::run_session(None);
 }
 
 fn heartbeat_task(_arg: usize) {

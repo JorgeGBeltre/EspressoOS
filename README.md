@@ -40,8 +40,12 @@ All command output and the shell present in **English**; the whole system identi
 
 ## What's New
 
-The most recent development cycle brought the system from "boots + SSH login" to a **fully interactive multitasking OS**:
+The most recent cycle made storage persist and rebuilt session I/O around file descriptors:
 
+- **`EspFs` persists on hardware.** `EspFs::mount` used to fail with `IoError`. The cause was not in the filesystem: `esp-storage` derives the flash capacity from **byte 3 of the image header at flash offset `0x0000`**, and espflash writes `FlashSize::default()` (**4 MB**) there unless told otherwise — so every access above `0x400000`, which is both `fs` *and* `ota_0`, was rejected as out of bounds. Fixed with [`espflash.toml`](espflash.toml) (§2). Files now survive a power cycle.
+- **The partition table on the chip is now yours.** Same root cause, second victim: without `partition_table` in `espflash.toml`, espflash flashes *its own* default table (`nvs` / `phy_init` / `factory@0x10000`), so `partitions.csv` had never actually reached the device. `otadata` was landing on top of `phy_init`.
+- **One session, one process.** The serial console and each SSH session now each own a **pid, an fd table, and a `SessionChannel`**. `emit()` collapsed to `vfs::write(1, …)`, redirection became a plain `dup2` swap, and the global `Sink`/`OUTPUT`/`BASE`/`CWD` state and the whole single-session SSH bridge (`shell/remote.rs`, −260 lines) are gone. `ONLCR` (`\n` → `\r\n`) lives in the channel, where a terminal keeps it — so `echo x > f` finally writes plain LF.
+- **The VFS no longer does I/O under a lock.** `vfs::read`/`write` used to hold the global fd-table `Mutex` — which **disables interrupts** — across `Inode::read_at`/`write_at`. They now snapshot the fd, release the guard, do the I/O unlocked, and re-credit the offset. That removed a class of hard wedge: a pipe read on an empty pipe parked the task while still holding the lock, and every other task then spun on it forever with interrupts off.
 - **Preemptive multitasking works on hardware.** The context switch was rewritten around the real esp-hal exception/interrupt model: the switch happens by overwriting the saved trap frame (`*save_frame`) in the vector epilogue on both the `syscall` trap and the SYSTIMER interrupt. `init`, `sh`, `net`, and a `heartbeat` task all run concurrently.
 - **Userland ELF execution from PSRAM.** User programs are compiled to per-process fixed-address slots, deployed into `/bin`, and executed from PSRAM mapped onto the **instruction bus** via the MMU (Harvard-split `.text`/`.data`, ROM `Cache_Ibus_MMU_Set`). A blocking `wait()` with a syscall-restart flag closes the `spawn → wait → exit → reap` loop.
 - **One unified shell, everywhere.** The **interactive console (UART0)** now runs the same full kernel shell as **SSH** — every built-in command works locally with argument parsing.
@@ -58,17 +62,20 @@ EspressoOS **boots and runs on a physical ESP32-S3**, is reachable over SSH, and
 | Capability | Status |
 | :--- | :--- |
 | Compiles & links for `xtensa-esp32s3-none-elf` (`--release`) | ✅ |
-| Boots: HAL init, kernel heap, VFS (`ramfs` on `/` + `/tmp`, `devfs` on `/dev`, `procfs` on `/proc`, `sysfs` on `/sys`) | ✅ |
+| Boots: HAL init, kernel heap, VFS (`EspFs` on `/`, `ramfs` on `/tmp`, `devfs` on `/dev`, `procfs` on `/proc`, `sysfs` on `/sys`) | ✅ |
 | **8 MB PSRAM** mapped, added to the heap, and **executable** (instruction-bus MMU mapping) | ✅ |
 | **Preemptive multitasking** — hand-written Xtensa windowed-register context switch | ✅ on hardware |
 | **Userland**: ELF programs loaded from `/bin` and executed from PSRAM (`spawn`/`wait`/`exit`) | ✅ on hardware |
 | **WiFi (STA) + DHCP + TCP/IP** (`esp-wifi` + `smoltcp`) | ✅ obtains an IP |
 | **SSH-2.0 server** (curve25519-sha256 · ssh-ed25519 · chacha20-poly1305@openssh) | ✅ `ssh youareme@<ip>` |
-| **Interactive shell** over UART **and** SSH (30+ commands, args, redirection, pipes) | ✅ on hardware |
+| **Interactive shell** over UART **and** SSH (30+ commands, args, redirection) | ✅ on hardware |
+| Pipelines (`a \| b`) | ⚠️ parsed; only the first stage runs |
 | **Runtime Wi-Fi CLI** (`wifi scan` / `wifi connect` / `ip` / `nmcli` shim) | ✅ builds; validate scan on hardware |
-| Persistent `EspFs` on `/` (survives reboot) | ⚠️ falls back to `ramfs` on device (open bug) |
+| **Persistent `EspFs` on `/`** (survives a power cycle) | ✅ on hardware |
+| **Per-session I/O**: console and SSH each own a pid, an fd table and a channel | ✅ on hardware |
+| Your `partitions.csv` is the table on the chip (6 entries, kernel at `0x20000`) | ✅ on hardware |
 
-> **Known open items:** `EspFs::mount` returns `IoError` on hardware, so `/` currently uses `ramfs` (files do **not** survive reboot yet); running `/bin/*` userland binaries *from the kernel shell* is not wired (their stdout would need routing); and `scan` while associated may need a disconnect→scan→reconnect fallback depending on `esp-wifi` behavior.
+> **Known open items:** running `/bin/*` userland binaries *from the kernel shell* is not wired — the shell's `dispatch` has no `exec` arm, so an unknown command is just `command not found` (the fd plumbing it needs is now in place). Multi-stage pipelines are parsed but only the first stage runs; `vfs/pipe.rs` exists and `sys_pipe` is wired, but nothing calls it yet. If an SSH client stops reading, the shell task spins yielding until it drains (a livelock, not a hang — the scheduler is round-robin, so the drain task still runs). `scan` while associated may need a disconnect→scan→reconnect fallback depending on `esp-wifi` behavior. OTA is wired but has never been verified end-to-end against the stock bootloader.
 
 ---
 
@@ -88,10 +95,8 @@ cd EspressoOS
 cp kernel/src/wifi_credentials.rs.example kernel/src/wifi_credentials.rs
 #   edit WIFI_SSID / WIFI_PASSWORD inside it
 
-# 3. Generate the partition table
-python tools/partition-gen/partition_gen.py
-
-# 4. Build + flash + open the serial monitor (one command)
+# 3. Build + flash + open the serial monitor (one command)
+#   espflash.toml is committed and supplies the flash size + partition table (see §2 Step 1)
 cargo run --release
 ```
 
@@ -138,11 +143,23 @@ Connect the **ESP32-S3** to the host over USB. The console is on **UART0** (`esp
 
 From the repository root (`EspressoOS/`):
 
-### Step 1 — Generate the partition table
+### Step 1 — Check `espflash.toml` (do not skip this)
+
+[`espflash.toml`](espflash.toml) is committed and needs no edits, but it is worth knowing what it does, because **both of its lines are load-bearing and neither fails loudly**:
+
+```toml
+partition_table = "partitions.csv"
+[flash]
+size = "16MB"
+```
+
+- **`size`** — espflash does *not* use the flash size it autodetects from the chip for the image header. Without this line it writes `FlashSize::default()` = **4 MB** into byte 3 of the header at `0x0000`, and `esp-storage` derives its capacity from exactly that byte. Everything above `0x400000` — the `fs` partition *and* `ota_0` — then fails with `OutOfBounds`, surfacing as `EspFs::mount` returning `IoError` on a build that compiles perfectly.
+- **`partition_table`** — without it, espflash flashes **its own default table** (`nvs` / `phy_init` / `factory@0x10000`), not yours. The kernel reads `layout::*` from [`prelude.rs`](kernel/src/prelude.rs) directly and never consults the table, so the mismatch does not stop the boot — it corrupts. `layout::OTADATA_OFFSET` (`0xF000`) lands on top of espflash's `phy_init`.
+
+Optionally, validate the CSV (this is what CI runs; espflash parses the CSV itself, so `partitions.bin` is not flashed):
 ```bash
 python tools/partition-gen/partition_gen.py
 ```
-Parses [`partitions.csv`](partitions.csv) into `partitions.bin`, validating alignment/boundaries (see [Memory Map](#memory-map--partition-table)).
 
 ### Step 2 — Set your boot Wi-Fi credentials
 ```bash
@@ -178,9 +195,11 @@ This runs `espflash flash --monitor` (configured in [`.cargo/config.toml`](.carg
    Live console. Starting subsystems.
    Kernel heap: 7471104 bytes
 ========================================
+[kernel] flash: 16 MB usable
+[kernel] / mounted on flash (espfs)
 [kernel] userland: 10 binaries installed/updated in EspFs
 [kernel] starting interactive console (kernel shell) on UART0...
-[kernel] task 'shell' created (tid=1)
+[kernel] task 'shell' created (tid=1, pid=1)
 [kernel] task 'heartbeat' created (tid=2)
 [kernel] task 'net' created (tid=3)
 [net] connecting to SSID 'your-ssid'...
@@ -191,6 +210,10 @@ This runs `espflash flash --monitor` (configured in [`.cargo/config.toml`](.carg
 EspressoOS shell. Type 'help' to see the commands.
 EspressoOS:~$
 ```
+Two of those lines are worth reading rather than skipping. **`flash: 16 MB usable`** is the kernel reporting the capacity `esp-storage` derived from the image header — if it says 4 MB, `espflash.toml` was not picked up and `EspFs` and OTA are both about to fail (the kernel prints an explicit warning naming the unreachable partitions). And **`/ mounted on flash (espfs)`** means the filesystem is real; `warning: EspFs::mount failed … using ramfs on /` means you have a working shell whose files vanish on reboot.
+
+Also worth checking once: the ESP-IDF bootloader prints the partition table it actually read. It should list **six** entries with `factory` at `0x00020000`. If you see three (`nvs` / `phy_init` / `factory@0x10000`), that is espflash's built-in default table and `partitions.csv` never reached the chip.
+
 The on-board LED blinks (~1 Hz) as the heartbeat proof-of-multitasking. If it doesn't, adjust `LED_GPIO` in [`main.rs`](kernel/src/main.rs) (typically GPIO 2 or GPIO 48).
 
 Monitor controls: **Ctrl+R** resets the chip, **Ctrl+C** exits the monitor.
@@ -383,13 +406,15 @@ EspressoOS:~$ echo saved > /tmp/a.txt          # truncate
 EspressoOS:~$ echo more >> /tmp/a.txt          # append
 EspressoOS:~$ ls / | cat                        # pipe (first stage is executed)
 ```
-> Multi-stage pipelines are parsed; currently the **first stage** runs (full N-stage piping in userland is a work item).
+> Redirection is a `dup2` swap onto fd 1, so a command never learns it moved. `stderr` is fd 2 and `>` does not capture it. Files get plain **LF**: the `\n` → `\r\n` translation belongs to the terminal channel, not to `echo`.
+>
+> Multi-stage pipelines are parsed; currently the **first stage** runs (full N-stage piping is a work item).
 
 **Ending a session:** `exit` (also `quit` / `logout`).
-- Over **SSH**, it performs a clean channel-close handshake — your client prints `Connection to <ip> closed.` and the server re-listens for the next connection.
-- On the **console**, it prints `logout` and restarts the shell.
+- Over **SSH**, the shell task exits, the server sends a clean `CHANNEL_EOF`/`CHANNEL_CLOSE` — your client prints `Connection to <ip> closed.` — and the process is reaped.
+- On the **console**, it prints `logout` and starts a fresh session (the banner reprints). It deliberately does *not* end the task: the serial port is the board's only local way in.
 
-**Concurrency:** the console and an SSH session can be used at the same time; command output is routed to the correct session per command. (The current working directory is shared global state between them.)
+**Concurrency:** the console and an SSH session are two independent processes. Each has its own pid, its own fd table with `0/1/2` bound to its own `SessionChannel`, and its own working directory — `cd` in one does not move the other, and a new SSH session always starts at `/`. Children inherit all of it through `clone_fd_table`, which is what will make `exec` work.
 
 ---
 
@@ -397,13 +422,14 @@ EspressoOS:~$ ls / | cat                        # pipe (first stage is executed)
 
 - **Arch (Xtensa LX7)** — [`arch/xtensa`](kernel/src/arch/xtensa): hand-written windowed-register context switch ([`context.rs`](kernel/src/arch/xtensa/context.rs)), exception/interrupt vectors with a **preempt-in-epilogue** switch ([`interrupts.rs`](kernel/src/arch/xtensa/interrupts.rs), [`syscall/trap.rs`](kernel/src/syscall/trap.rs)), SYSTIMER ([`timer.rs`](kernel/src/arch/xtensa/timer.rs)), SMP-ready `Mutex`.
 - **Memory** — [`mm`](kernel/src/mm): 8 MB octal PSRAM added to the `esp-alloc` heap ([`heap.rs`](kernel/src/mm/heap.rs)); the first 1 MB is reserved and **mapped to the instruction bus** so userland executes from PSRAM ([`psram_exec.rs`](kernel/src/mm/psram_exec.rs)); PMS memory protection behind `--features pms` ([`mpu.rs`](kernel/src/mm/mpu.rs)).
-- **Scheduler & processes** — [`scheduler`](kernel/src/scheduler): round-robin over per-task frames; `spawn`/`exit`/`wait`, zombie reaping, blocking `wait` via a syscall-restart flag; SMP core-1 run-queue behind `--features smp`.
-- **VFS** — [`vfs`](kernel/src/vfs): everything-is-a-file (`open`/`close`/`read`/`write`/`seek`/`readdir`), `devfs` (`/dev/console`, `/dev/null`, `/dev/zero`, `/dev/i2c0`, `/dev/spi0`), `ramfs`, `procfs` (`/proc`), `sysfs` (`/sys`), pipes.
-- **Filesystem** — [`fs`](kernel/src/fs): `EspFs`, a pure-Rust log-structured, wear-leveled FS over internal NOR flash, mounted at `/` (currently falls back to `ramfs` on device).
+- **Scheduler & processes** — [`scheduler`](kernel/src/scheduler): round-robin over per-task frames (FIFO — `Task::priority` is carried but not yet consulted); `spawn`/`exit`/`wait`, zombie reaping, blocking `wait` via a syscall-restart flag; per-process cwd; `spawn_blocked` for tasks that must be set up before they can run; `reap_orphans` for processes no one can `wait()` for; SMP core-1 run-queue behind `--features smp`.
+- **VFS** — [`vfs`](kernel/src/vfs): everything-is-a-file (`open`/`close`/`read`/`write`/`seek`/`readdir`/`dup`/`dup2`), per-process fd tables, `devfs` (`/dev/console`, `/dev/null`, `/dev/zero`, `/dev/i2c0`, `/dev/spi0`), `ramfs`, `procfs` (`/proc`), `sysfs` (`/sys`), pipes. `read`/`write` snapshot the fd, **release the fd-table lock, then do the I/O** — the lock disables interrupts, so a blocking inode underneath it would wedge the kernel.
+- **Sessions** — [`session.rs`](kernel/src/session.rs): a `SessionChannel` (`Uart` or `Ssh`) plus `SessionConsole`, the inode that makes one look like a file. Owns `ONLCR`, non-blocking short writes (`WouldBlock` = retry, `IoError` = the session is gone), and the per-session rings the SSH server drains.
+- **Filesystem** — [`fs`](kernel/src/fs): `EspFs`, a pure-Rust log-structured, wear-leveled FS over internal NOR flash, mounted at `/` and persistent across power cycles.
 - **Syscalls** — [`syscall`](kernel/src/syscall): stable ABI (`a2`=number, `a3..a8`=args); real `syscall`-instruction trap under `--features syscall-trap` (default).
 - **Userland** — [`userland`](userland): `no_std` `libc` + ELF programs (`init`, `sh`, `cat`, `echo`, `ls`, `ota`, `ping`, `sntp`, `netstat`, `httpd`) built to per-process PSRAM slots by [`kernel/build.rs`](kernel/build.rs) and deployed to `/bin`.
 - **Drivers** — [`drivers`](kernel/src/drivers): GPIO, UART, I2C, SPI, crypto/SHA, power, BLE, and Wi-Fi ([`wifi.rs`](kernel/src/drivers/wifi.rs)) bound to `smoltcp`.
-- **SSH-2.0 server** — [`drivers/ssh`](kernel/src/drivers/ssh): curve25519 KEX, ed25519 host key, chacha20-poly1305 transport, password auth, session channel bridged to the shell.
+- **SSH-2.0 server** — [`drivers/ssh`](kernel/src/drivers/ssh): curve25519 KEX, ed25519 host key, chacha20-poly1305 transport, password auth. One session at a time (one socket, one `Connection`, one channel). A `shell` request builds a `SessionShell`: create channel → `spawn_blocked` → `register_process` → `seed_fd_table` → `unblock_task`. The session ends when the shell process does.
 - **OTA** — [`ota`](kernel/src/ota): A/B slots + `otadata`, TCP :3300 receiver buffered in PSRAM, `ota apply`.
 
 ---
@@ -422,7 +448,8 @@ EspressoOS/
 │   │   ├── fs/              # espfs, ramfs, procfs, sysfs, devfs
 │   │   ├── mm/              # heap, psram_exec, mpu
 │   │   ├── scheduler/       # tasks, policy, processes, core_sync (SMP)
-│   │   ├── shell/           # commands/, parser, remote (console+SSH runner)
+│   │   ├── shell/           # commands/, parser  (one run_session for console+SSH)
+│   │   ├── session.rs       # SessionChannel (Uart|Ssh) + SessionConsole inode
 │   │   ├── syscall/         # table, handler, trap
 │   │   ├── vfs/             # inode, file, devfs, pipe, socket, mount
 │   │   ├── ota/             # A/B slots + otadata
@@ -432,8 +459,9 @@ EspressoOS/
 ├── userland/                # no_std libc + /bin programs (ELF, run from PSRAM)
 │   ├── libc/                # syscall wrappers, _start
 │   └── apps/src/bin/        # init, sh, cat, echo, ls, ota, ping, sntp, netstat, httpd
-├── tools/                   # partition-gen (CSV→bin), test harnesses
-├── partitions.csv           # 16 MB flash layout
+├── tools/                   # partition-gen (CSV→bin validator), test harnesses
+├── espflash.toml            # flash size + partition table — both load-bearing (§2)
+├── partitions.csv           # 16 MB flash layout (espflash reads this directly)
 └── README.md                # this file
 ```
 
@@ -450,11 +478,13 @@ The **16 MB** external SPI flash is laid out for the A/B update scheme, honoring
 0x00F000 ┤ otadata (A/B boot control, 8 KB)
 0x020000 ┤ factory app — Slot A (primary kernel, 4 MB)
 0x420000 ┤ ota_0 app  — Slot B (secondary kernel, 4 MB)
-0x820000 ┤ filesystem (EspFs / ramfs, ~7.8 MB)
+0x820000 ┤ filesystem (EspFs, ~7.8 MB)
 0xFF0000 ┤ coredump (64 KB)
 ```
 
-Flash layout constants live in [`prelude.rs`](kernel/src/prelude.rs); the table is generated from [`partitions.csv`](partitions.csv) by `tools/partition-gen/partition_gen.py`.
+Flash layout constants live in [`prelude.rs`](kernel/src/prelude.rs) and the table comes from [`partitions.csv`](partitions.csv), which espflash flashes because [`espflash.toml`](espflash.toml) points it there.
+
+> The two are **not** cross-checked at build time, and the kernel never reads the partition table — it addresses flash straight through `layout::*`. So a `prelude.rs` that disagrees with `partitions.csv` compiles, boots, and silently writes into the wrong partition. Keep them in sync by hand, and if you change either, re-read the bootloader's table dump on the next boot.
 
 **RAM:** 512 KB internal SRAM (kernel heap + esp-wifi `Internal` allocations) plus 8 MB PSRAM (general heap + the reserved 1 MB executable userland region at data alias `0x3c0f0000` / instruction alias `0x42800000`).
 
@@ -462,7 +492,7 @@ Flash layout constants live in [`prelude.rs`](kernel/src/prelude.rs); the table 
 
 ## Development Roadmap
 
-Structured into 10 incremental phases. Bring-up (P0), memory/PSRAM (P1), **preemptive** multitasking (P2), the syscall ABI + **userland execution** (P6), and networking with an SSH server (P7) are **verified on hardware**. Bus drivers (P3) and persistent `EspFs` (P4) are wired and compile-clean (P4 persistence has an open device bug). OTA (P5), PMS (P8, `--features pms`), and SMP (P9, `--features smp`) are implemented behind opt-in features so the default image stays the known-good one.
+Structured into 10 incremental phases. Bring-up (P0), memory/PSRAM (P1), **preemptive** multitasking (P2), persistent storage (P4), the syscall ABI + **userland execution** (P6), and networking with an SSH server (P7) are **verified on hardware**. Bus drivers (P3) are wired and compile-clean. OTA (P5), PMS (P8, `--features pms`), and SMP (P9, `--features smp`) are implemented behind opt-in features so the default image stays the known-good one.
 
 | Phase | Title | Status |
 | :--- | :--- | :--- |
@@ -470,14 +500,19 @@ Structured into 10 incremental phases. Bring-up (P0), memory/PSRAM (P1), **preem
 | P1 | Memory management (8 MB PSRAM heap) | ✅ hardware |
 | P2 | Task scheduler (preemptive context switch) | ✅ hardware |
 | P3 | Bus drivers (I2C `/dev/i2c0`, SPI `/dev/spi0`) | ✅ wired |
-| P4 | Storage & filesystems (`EspFs` on `/`) | ⚠️ ramfs fallback on device |
+| P4 | Storage & filesystems (`EspFs` on `/`) | ✅ hardware — persists across power cycles |
 | P5 | OTA A/B updates (TCP :3300 → `ota apply`) | ✅ wired |
 | P6 | Syscalls & userland (ABI + ELF exec from PSRAM) | ✅ hardware |
 | P7 | Networking (WiFi STA) + SSH-2.0 server + shell | ✅ hardware |
 | P8 | Memory protection (PMS, World-0/World-1) | 🔒 `--features pms` |
 | P9 | SMP dual-core (APP_CPU run-queue) | 🔒 `--features smp` |
 
-**Next steps:** fix `EspFs` persistence on device; wire launching `/bin/*` userland binaries from the kernel shell (with stdout routing); full N-stage pipelines; verify OTA boot-switch against the stock bootloader.
+**Next steps**, in dependency order:
+
+1. **`exec` from the shell** — add the arm `dispatch` doesn't have, so an unknown command resolves against `/bin`. The plumbing it needed is done: a child inherits its parent's channel and cwd through `clone_fd_table`, so its output already lands in the right session. [`/etc/rc`](kernel/src/main.rs) is written on every boot and never executed — that is a userland init nearly for free.
+2. **N-stage pipelines** — `vfs/pipe.rs` and `sys_pipe` exist; `run_pipeline` has to `dup2` a pipe between stages. Note the pipe blocks on an empty read, which is only legal because `vfs::read` releases the fd-table lock first.
+3. **Verify OTA end-to-end** — now that `ota_0` and `otadata` are actually reachable and the table on the chip is the right one, this can be tested for the first time.
+4. **Own bootloader** → Multiboot 2, to drop the ESP-IDF second stage.
 
 ---
 

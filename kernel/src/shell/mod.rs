@@ -107,9 +107,10 @@ fn execute(line: &str) {
                 return;
             }
             if pipeline.len() > 1 {
-                commands::eprint_pipeline_unsupported();
-            }
-            if let Some(cmd) = pipeline.into_iter().next() {
+                // Every stage of a pipeline is a /bin program, so this path skips
+                // the built-in table entirely. See commands::run_pipeline.
+                commands::run_pipeline(&pipeline);
+            } else if let Some(cmd) = pipeline.into_iter().next() {
                 run_command(&cmd);
             }
         }

@@ -362,8 +362,131 @@ fn wait_for(pid: scheduler::process::Pid, name: &str) -> i32 {
     status
 }
 
-pub(crate) fn eprint_pipeline_unsupported() {
-    eprint_line("shell: pipelines not yet supported; running the first stage");
+/// Runs `stages` connected by pipes and returns the last one's status.
+///
+/// Every stage is a program from /bin, never a built-in, even when a built-in of
+/// the same name exists. A built-in runs inside the shell's own task, so it cannot
+/// run concurrently with the rest -- and running the stages one after another is not
+/// a simplification but a deadlock: the first would fill the 4 KB pipe and block
+/// forever with nobody draining it. There is no fork here to escape with.
+///
+/// The visible cost is that `ls /tmp` (built-in, honours the path) and
+/// `ls /tmp | cat` (/bin/ls, ignores it) do different things until the userland
+/// programs learn argv the way echo just did.
+pub fn run_pipeline(stages: &[super::parser::Command]) -> i32 {
+    // Check every stage before touching anything. A missing third stage should not
+    // leave two slots taken and a pipe half built.
+    for s in stages {
+        let path = if s.name.contains('/') {
+            resolve(&s.name)
+        } else {
+            format!("/bin/{}", s.name)
+        };
+        if vfs::mount::resolve(&path).is_err() {
+            eprint_line(&format!(
+                "shell: {}: not found in /bin (a pipeline stage cannot be a built-in)",
+                s.name
+            ));
+            return 127;
+        }
+    }
+
+    // One pipe between each pair. The fds live in this shell's table; every child
+    // inherits a copy, which is why each has to be told to close the ones it does
+    // not use.
+    let mut pipes: Vec<(vfs::Fd, vfs::Fd)> = Vec::new();
+    for _ in 1..stages.len() {
+        match vfs::create_pipe() {
+            Ok(p) => pipes.push(p),
+            Err(e) => {
+                eprint_line(&format!("shell: pipe failed ({})", err_str(e)));
+                close_all(&pipes);
+                return 1;
+            }
+        }
+    }
+
+    let mut all_fds: Vec<vfs::Fd> = Vec::new();
+    for &(r, w) in &pipes {
+        all_fds.push(r);
+        all_fds.push(w);
+    }
+
+    let last = stages.len() - 1;
+    let mut pids = Vec::new();
+    let mut redirects: Vec<vfs::Fd> = Vec::new();
+
+    for (i, s) in stages.iter().enumerate() {
+        let stdin = if i == 0 { STDIN } else { pipes[i - 1].0 };
+
+        // A stage's own `>` beats the pipe, which is what a real shell does:
+        // `ls > f | cat` sends ls to the file and leaves cat with an empty pipe.
+        let stdout = match open_redirect(&s.redirect) {
+            Ok(Some(fd)) => {
+                redirects.push(fd);
+                fd
+            }
+            Ok(None) => {
+                if i == last {
+                    STDOUT
+                } else {
+                    pipes[i].1
+                }
+            }
+            Err(e) => {
+                eprint_line(&format!("shell: {}: {}", s.name, err_str(e)));
+                close_all(&pipes);
+                for fd in &redirects {
+                    let _ = vfs::close(*fd);
+                }
+                let _ = wait_all(&pids);
+                return 1;
+            }
+        };
+
+        let args: Vec<&str> = s.args.iter().map(|a| a.as_str()).collect();
+        match spawn_child(&s.name, &args, stdin, stdout, &all_fds) {
+            Ok(pid) => pids.push(pid),
+            Err(code) => {
+                // Whatever already started still has to be drained, or its slots and
+                // processes leak.
+                close_all(&pipes);
+                for fd in &redirects {
+                    let _ = vfs::close(*fd);
+                }
+                let _ = wait_all(&pids);
+                return code;
+            }
+        }
+    }
+
+    // The shell must drop its own ends now. While it still holds a write end the
+    // pipe has a writer, and the stage reading it would wait for an EOF that never
+    // comes.
+    close_all(&pipes);
+    for fd in &redirects {
+        let _ = vfs::close(*fd);
+    }
+
+    wait_all(&pids)
+}
+
+fn close_all(pipes: &[(vfs::Fd, vfs::Fd)]) {
+    for &(r, w) in pipes {
+        let _ = vfs::close(r);
+        let _ = vfs::close(w);
+    }
+}
+
+/// Opens a stage's `>` target, or None when it has none.
+fn open_redirect(redirect: &Redirect) -> KResult<Option<vfs::Fd>> {
+    let (path, extra) = match redirect {
+        Redirect::None => return Ok(None),
+        Redirect::Truncate(p) => (p, OpenFlags::TRUNC.0),
+        Redirect::Append(p) => (p, OpenFlags::APPEND.0),
+    };
+    let flags = OpenFlags(OpenFlags::WRONLY.0 | OpenFlags::CREATE.0 | extra);
+    Ok(Some(vfs::open(&resolve(path), flags)?))
 }
 
 pub(crate) fn eprint_syntax_error(s: &str) {

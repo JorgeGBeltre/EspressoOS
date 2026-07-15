@@ -370,14 +370,19 @@ fn init_etc_files() {
         }
     }
 
-    if let Err(_) = vfs::mount::resolve("/etc/passwd") {
-        if let Ok(fd) = vfs::open(
-            "/etc/passwd",
-            vfs::OpenFlags(vfs::OpenFlags::CREATE.0 | vfs::OpenFlags::WRONLY.0),
-        ) {
-            let passwd_content = b"root:root\nguest:guest\n";
-            let _ = vfs::write(fd, passwd_content);
-            let _ = vfs::close(fd);
-        }
+    // Never seed /etc/passwd. drivers/ssh/auth.rs consults it BEFORE the compiled
+    // DEV_USER/DEV_PASSWORD and returns Success on a match, so seeding it with
+    // defaults -- it used to be "root:root\nguest:guest\n" -- put two plaintext
+    // accounts on every board that changing DEV_PASSWORD did not close. And since
+    // it was only written when absent, a stale one survives a re-flash now that
+    // EspFs persists.
+    //
+    // A file that exists from here on is deliberate, so leave it alone and say so.
+    // Passwords in it are compared in plaintext.
+    if vfs::mount::resolve("/etc/passwd").is_ok() {
+        println!(
+            "[kernel] WARNING: /etc/passwd exists and overrides the compiled SSH credential; \
+             'rm /etc/passwd' to fall back to it"
+        );
     }
 }

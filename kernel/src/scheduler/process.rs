@@ -21,8 +21,14 @@ pub struct Process {
     pub state: ProcessState,
     pub exit_code: i32,
     pub children: Vec<Pid>,
-    pub elf_load_addr: *mut u8,
-    pub elf_size: usize,
+
+    /// The PSRAM slot this program's image occupies, for user processes.
+    ///
+    /// Replaces the old `elf_load_addr`/`elf_size` pair: nothing is allocated on
+    /// the heap any more, the loader takes a slot out of the reserved region and
+    /// whoever reaps the process hands it back. If this is not returned the slot is
+    /// gone for the rest of the boot -- there are 32.
+    pub slot: Option<crate::mm::psram_exec::SlotIndex>,
 
     /// Working directory. Per process, not global: two sessions must be able to
     /// `cd` independently, and a child has to inherit its parent's cwd the way it
@@ -63,8 +69,7 @@ pub fn register_process(
     name: &str,
     tid: Tid,
     is_user: bool,
-    elf_load_addr: *mut u8,
-    elf_size: usize,
+    slot: Option<crate::mm::psram_exec::SlotIndex>,
 ) -> Pid {
     let mut pt = PROCESS_TABLE.lock();
     let pid = pt.next_pid;
@@ -89,8 +94,7 @@ pub fn register_process(
         state: ProcessState::Running,
         exit_code: 0,
         children: Vec::new(),
-        elf_load_addr,
-        elf_size,
+        slot,
         cwd,
         pending_signals: 0,
         signal_handlers: [0; 32],
@@ -172,15 +176,24 @@ pub fn has_exited(pid: Pid) -> bool {
 /// live task's process entry would make get_current_pid() return None for it, and
 /// its next fd operation would silently fall through to pid 0's table.
 pub fn reap(pid: Pid) {
-    {
+    let slot = {
         let mut pt = PROCESS_TABLE.lock();
-        if let Some(proc) = pt.table.remove(&pid) {
-            if let Some(parent) = proc.parent_pid {
-                if let Some(p) = pt.table.get_mut(&parent) {
-                    p.children.retain(|c| *c != pid);
+        match pt.table.remove(&pid) {
+            Some(proc) => {
+                if let Some(parent) = proc.parent_pid {
+                    if let Some(p) = pt.table.get_mut(&parent) {
+                        p.children.retain(|c| *c != pid);
+                    }
                 }
+                proc.slot
             }
+            None => None,
         }
+    };
+    // Give the image's slot back. There are 32, so leaking one per exec would run
+    // the system out of them without ever reporting anything.
+    if let Some(s) = slot {
+        crate::mm::psram_exec::slot_free(s);
     }
     crate::vfs::cleanup_process_fds(pid);
 }

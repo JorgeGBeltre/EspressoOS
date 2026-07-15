@@ -51,7 +51,7 @@ impl SessionShell {
         };
 
         let pid =
-            scheduler::process::register_process("ssh-shell", tid, false, core::ptr::null_mut(), 0);
+            scheduler::process::register_process("ssh-shell", tid, false, None);
 
         if let Err(e) = vfs::seed_fd_table(pid, SessionConsole::new(chan.clone())) {
             // The task is still blocked and owns nothing, so undoing this is just

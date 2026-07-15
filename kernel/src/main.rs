@@ -191,13 +191,7 @@ fn main() -> ! {
         false,
     ) {
         Ok(tid) => {
-            let pid = scheduler::process::register_process(
-                "shell",
-                tid,
-                false,
-                core::ptr::null_mut(),
-                0,
-            );
+            let pid = scheduler::process::register_process("shell", tid, false, None);
             if let Err(e) = vfs::seed_fd_table(pid, session::SessionConsole::new(uart_chan)) {
                 println!("[kernel] warning: could not seed shell fd table: {:?}", e);
             }

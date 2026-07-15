@@ -268,11 +268,16 @@ fn banner() {
 }
 
 fn shell_task(_arg: usize) {
-    // No user prefix on the prompt, and no loop: the serial channel never reports
-    // EOF, so run_session does not return. If it ever did, letting the task exit
-    // is the honest outcome -- respawning the session over a dead channel would
-    // just spin.
-    shell::run_session(None);
+    // `exit` at the prompt makes run_session return: it breaks out before read_line
+    // is ever consulted, so "the UART never reports EOF" does not cover that path.
+    // Without this loop one `exit` ends the task, reap_orphans tears down pid 1,
+    // and the console is gone until a hardware reset -- on a board whose only local
+    // way in is this port. Looping gives back what it did before: log out, print
+    // the banner, start over. No spin risk: the UART channel never reports EOF, so
+    // the only way round the loop is a deliberate `exit`.
+    loop {
+        shell::run_session(None);
+    }
 }
 
 fn heartbeat_task(_arg: usize) {

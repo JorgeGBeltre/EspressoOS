@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 const APPS: &[&str] = &[
-    "init", "sh", "cat", "echo", "ls", "ota", "ping", "sntp", "netstat", "httpd",
+    "init", "sh", "cat", "echo", "ls", "ota", "ping", "sntp", "netstat", "httpd", "sleep",
 ];
 
 // Every binary links at the same address and the loader relocates it into whatever

@@ -304,6 +304,28 @@ pub fn create_pipe() -> KResult<(Fd, Fd)> {
     }
 }
 
+/// Installs a fresh fd table for `pid` with 0/1/2 all bound to `inode`.
+///
+/// This is an unconditional `insert`, deliberately not `entry().or_insert_with`:
+/// every other fd function falls back to `FdTable::new_process_table`, which is
+/// hardcoded to /dev/console. If a session's task reached any of them before it
+/// was seeded, its stdio would silently land on the serial port instead of its
+/// own channel -- and an SSH session would type into the UART. So the task must
+/// be created blocked, seeded here, and only then unblocked.
+pub fn seed_fd_table(pid: Pid, inode: Arc<dyn Inode>) -> KResult<()> {
+    let stdin = OpenFile::new(inode.clone(), OpenFlags::RDONLY)?;
+    let stdout = OpenFile::new(inode.clone(), OpenFlags::WRONLY)?;
+    let stderr = OpenFile::new(inode, OpenFlags::WRONLY)?;
+
+    let mut table = FdTable::new();
+    table.insert(stdin)?;
+    table.insert(stdout)?;
+    table.insert(stderr)?;
+
+    PROCESS_FD_TABLES.lock().insert(pid, table);
+    Ok(())
+}
+
 pub fn insert_open_file(open: OpenFile) -> KResult<Fd> {
     let pid = crate::scheduler::process::get_current_pid().unwrap_or(0);
     let mut tables = PROCESS_FD_TABLES.lock();

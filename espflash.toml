@@ -1,0 +1,14 @@
+# Ajustes de flasheo de EspressoOS.
+#
+# `size` es OBLIGATORIO aquí. espflash NO usa el tamaño que autodetecta del chip
+# para el header de la imagen: escribe `FlashSize::default()` (= 4MB) en el byte 3
+# del header del bootloader (offset 0x0000). esp-storage deriva su `capacity` de
+# ese byte, no del chip, así que con el default todo acceso >= 0x400000 falla con
+# OutOfBounds -> KError::IoError. Eso deja fuera las particiones `ota_0` (0x420000)
+# y `fs` (0x820000): EspFs::mount() falla y OTA no puede escribir.
+#
+# Debe coincidir con layout::FLASH_SIZE (kernel/src/prelude.rs) y con el tamaño
+# real de la flash del módulo.
+
+[flash]
+size = "16MB"

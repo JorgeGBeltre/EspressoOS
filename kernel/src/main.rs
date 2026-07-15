@@ -110,6 +110,19 @@ fn main() -> ! {
         Err(e) => println!("[kernel] warning: devfs::init failed: {:?}", e),
     }
 
+    let flash_cap = drivers::flash::capacity() as u32;
+    println!("[kernel] flash: {} MB usable", flash_cap / (1024 * 1024));
+    if flash_cap < layout::FLASH_SIZE {
+        println!(
+            "[kernel] warning: image header declares {} MB but layout needs {} MB; \
+             espfs (0x{:X}) and ota_0 (0x{:X}) are unreachable. Reflash with espflash.toml (size = \"16MB\").",
+            flash_cap / (1024 * 1024),
+            layout::FLASH_SIZE / (1024 * 1024),
+            layout::FS_OFFSET,
+            layout::OTA0_OFFSET
+        );
+    }
+
     match fs::EspFs::mount() {
         Ok(espfs) => match vfs::mount("/", espfs) {
             Ok(()) => println!("[kernel] / mounted on flash (espfs)"),

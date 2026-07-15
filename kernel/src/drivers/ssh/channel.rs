@@ -1,10 +1,10 @@
 #![allow(dead_code)]
 
-use core::sync::atomic::{AtomicBool, Ordering};
-
 use crate::prelude::*;
 use crate::scheduler;
-use crate::shell::remote::{self, SshChannelIo};
+use crate::scheduler::process::Pid;
+use crate::session::{self, ChannelKind, SessionChannel, SessionConsole};
+use crate::vfs;
 
 pub const INITIAL_WINDOW: u32 = 64 * 1024;
 
@@ -14,7 +14,80 @@ pub const WINDOW_ADJUST_THRESHOLD: u32 = INITIAL_WINDOW / 2;
 
 const SSH_SHELL_STACK: usize = 8 * 1024;
 
-static SHELL_TASK_SPAWNED: AtomicBool = AtomicBool::new(false);
+const SSH_SHELL_PRIO: u8 = 1;
+
+/// The shell behind one SSH channel.
+///
+/// A session owns its channel, its task, its pid and its fd table -- exactly like
+/// the serial console does. No global latch, no shared bridge, so a session
+/// cannot inherit a previous one's state.
+pub struct SessionShell {
+    pub chan: Arc<SessionChannel>,
+    pub pid: Pid,
+}
+
+impl SessionShell {
+    /// Wires up a session and lets it run.
+    ///
+    /// Blocked on purpose until seeded: one fd operation before `seed_fd_table`
+    /// and `or_insert_with(new_process_table)` would hand this task /dev/console,
+    /// putting the SSH session's output on the serial port.
+    pub fn start(channel_id: u32) -> KResult<SessionShell> {
+        let chan = session::create(ChannelKind::Ssh { channel_id });
+
+        let tid = match scheduler::spawn_blocked(
+            "ssh-shell",
+            ssh_shell_entry,
+            chan.id as usize,
+            SSH_SHELL_STACK,
+            SSH_SHELL_PRIO,
+            false,
+        ) {
+            Ok(t) => t,
+            Err(e) => {
+                session::destroy(chan.id);
+                return Err(e);
+            }
+        };
+
+        let pid =
+            scheduler::process::register_process("ssh-shell", tid, false, core::ptr::null_mut(), 0);
+
+        if let Err(e) = vfs::seed_fd_table(pid, SessionConsole::new(chan.clone())) {
+            // The task is still blocked and owns nothing, so undoing this is just
+            // dropping what we made. It never runs, so it never becomes a zombie
+            // for reap_orphans to find -- reap it here.
+            scheduler::process::reap(pid);
+            session::destroy(chan.id);
+            return Err(e);
+        }
+
+        scheduler::unblock_task(tid);
+        Ok(SessionShell { chan, pid })
+    }
+
+    /// Ends the session. The shell's next read sees EOF, `run_session` returns,
+    /// and task_trampoline exits the task for us.
+    ///
+    /// Deliberately does not reap: the task is almost certainly still running and
+    /// has not even noticed the EOF yet. Pulling its process entry now would make
+    /// get_current_pid() return None underneath it and drop its remaining writes
+    /// into pid 0's table. `process::reap_orphans` collects it once it is really
+    /// gone.
+    pub fn close(&self) {
+        session::destroy(self.chan.id);
+    }
+}
+
+impl Drop for SessionShell {
+    fn drop(&mut self) {
+        // Covers the paths that never reach an explicit close: a TCP reset that
+        // strands the Connection, or the Connection being replaced by the next
+        // client. Without this the task would sit forever on a channel nobody can
+        // reach.
+        self.close();
+    }
+}
 
 pub struct Channel {
     pub local_id: u32,
@@ -31,6 +104,8 @@ pub struct Channel {
 
     pub pty_cols: u32,
     pub pty_rows: u32,
+
+    shell: Option<SessionShell>,
 }
 
 impl Channel {
@@ -44,6 +119,7 @@ impl Channel {
             shell_started: false,
             pty_cols: 80,
             pty_rows: 24,
+            shell: None,
         }
     }
 
@@ -54,41 +130,53 @@ impl Channel {
                 self.pty_rows = rows;
                 true
             }
-            b"shell" => {
-                self.start_shell();
-                self.shell_started = true;
-                true
-            }
+            b"shell" => match SessionShell::start(self.local_id) {
+                Ok(s) => {
+                    self.shell = Some(s);
+                    self.shell_started = true;
+                    true
+                }
+                Err(_) => false,
+            },
 
             _ => false,
         }
     }
 
-    fn start_shell(&self) {
-        remote::bridge_open();
+    /// True once the shell has exited on its own -- the user typed `exit`, or it
+    /// died. Replaces the old "exit requested" flag: the session ends when the
+    /// shell actually ends, not when it announces it will.
+    pub fn shell_exited(&self) -> bool {
+        match &self.shell {
+            Some(s) => scheduler::process::is_zombie(s.pid),
+            None => false,
+        }
+    }
 
-        if SHELL_TASK_SPAWNED
-            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-            .is_ok()
-        {
-            match scheduler::spawn(
-                "ssh-shell",
-                ssh_shell_entry,
-                self.local_id as usize,
-                SSH_SHELL_STACK,
-                1,
-                false,
-            ) {
-                Ok(_) => {}
-                Err(_) => {
-                    SHELL_TASK_SPAWNED.store(false, Ordering::Release);
-                }
-            }
+    pub fn has_output(&self) -> bool {
+        match &self.shell {
+            Some(s) => s.chan.has_output(),
+            None => false,
+        }
+    }
+
+    pub fn take_output(&self, max: usize) -> Vec<u8> {
+        match &self.shell {
+            Some(s) => s.chan.take_output(max),
+            None => Vec::new(),
+        }
+    }
+
+    pub fn close_shell(&self) {
+        if let Some(s) = &self.shell {
+            s.close();
         }
     }
 
     pub fn on_data(&mut self, data: &[u8]) -> KResult<Option<u32>> {
-        let _ = remote::bridge_push_input(data);
+        if let Some(s) = &self.shell {
+            let _ = s.chan.push_input(data);
+        }
 
         self.recv_window = self.recv_window.saturating_sub(data.len() as u32);
         if self.recv_window < WINDOW_ADJUST_THRESHOLD {
@@ -105,13 +193,9 @@ impl Channel {
     }
 }
 
-fn ssh_shell_entry(arg: usize) {
-    let channel_id = arg as u32;
-    loop {
-        if remote::bridge_is_open() {
-            let mut io = SshChannelIo::new(channel_id);
-            remote::run_with_io(&mut io);
-        }
-        scheduler::yield_now();
-    }
+fn ssh_shell_entry(_arg: usize) {
+    crate::shell::run_session(Some(crate::drivers::ssh::config::DEV_USER));
+    // Returning is the exit path: task_trampoline calls exit(0), which marks the
+    // task Zombie for the scheduler and the process Zombie for reap_orphans. The
+    // channel reached this task through its fd table, never through `arg`.
 }

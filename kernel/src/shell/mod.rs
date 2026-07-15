@@ -2,71 +2,102 @@
 
 pub mod commands;
 pub mod parser;
-pub mod remote;
 
-use crate::drivers::uart;
 use crate::prelude::*;
 use crate::scheduler;
+use crate::vfs;
 use alloc::format;
 
-const PROMPT: &str = "EspressoOS> ";
+use commands::{write_all, STDIN, STDOUT};
 
 const MAX_LINE: usize = 256;
 
-pub fn run() {
-    remote::run_with_io(&mut remote::ConsoleIo);
-}
-
-pub(crate) fn banner_bytes() -> &'static [u8] {
-    b"\r\nEspressoOS shell. Type 'help' to see the commands.\r\n"
-}
-
-pub(crate) fn prompt_bytes() -> &'static [u8] {
-    PROMPT.as_bytes()
-}
-
 pub(crate) const MAX_LINE_LEN: usize = MAX_LINE;
 
-pub(crate) fn execute_line(line: &str) {
-    execute(line);
-}
+/// Runs one interactive session on the caller's own fds, and returns when stdin
+/// reports end of session.
+///
+/// There is exactly one of these for both the serial console and SSH. Nothing
+/// here knows which it is: the session's channel is fd 0/1/2 of the calling
+/// process, seeded before this task was ever unblocked. `\n` goes out bare --
+/// the channel adds the `\r`.
+pub fn run_session(user: Option<&str>) {
+    out(b"\nEspressoOS shell. Type 'help' to see the commands.\n");
 
-fn banner() {
-    console_write(b"\r\n");
-    console_write(b"EspressoOS shell. Type 'help' to see the commands.\r\n");
-}
-
-fn read_line(buf: &mut String) {
+    let mut line = String::new();
     loop {
-        match uart::getc() {
-            Some(byte) => match byte {
+        let cwd = commands::cwd_get();
+        let display_cwd = if cwd == "/" { "~" } else { cwd.as_str() };
+        let prompt = match user {
+            Some(u) => format!("{}@EspressoOS:{}$ ", u, display_cwd),
+            None => format!("EspressoOS:{}$ ", display_cwd),
+        };
+        out(prompt.as_bytes());
+
+        line.clear();
+        if !read_line(&mut line) {
+            break;
+        }
+
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if trimmed == "exit" || trimmed == "quit" || trimmed == "logout" {
+            out(b"logout\n");
+            break;
+        }
+        execute(trimmed);
+    }
+}
+
+fn out(bytes: &[u8]) {
+    write_all(STDOUT, bytes);
+}
+
+/// Returns false when the session is over (stdin hit EOF), true on a full line.
+///
+/// The serial channel never reports EOF, so the console shell loops forever; an
+/// SSH channel does, the moment it is closed, which is what lets its task fall
+/// off the end and exit.
+fn read_line(buf: &mut String) -> bool {
+    loop {
+        let mut b = [0u8; 1];
+        match vfs::read(STDIN, &mut b) {
+            Ok(0) => return false,
+            Ok(_) => match b[0] {
                 b'\r' | b'\n' => {
-                    console_write(b"\r\n");
-                    return;
+                    out(b"\n");
+                    return true;
                 }
                 0x08 | 0x7f => {
                     if buf.pop().is_some() {
-                        console_write(b"\x08 \x08");
+                        out(b"\x08 \x08");
                     }
                 }
                 0x03 => {
                     buf.clear();
-                    console_write(b"^C\r\n");
-                    return;
+                    out(b"^C\n");
+                    return true;
                 }
-                b if (0x20..0x7f).contains(&b) => {
+                c if (0x20..0x7f).contains(&c) => {
                     if buf.len() < MAX_LINE {
-                        buf.push(b as char);
-                        console_write(&[b]);
+                        buf.push(c as char);
+                        out(&[c]);
                     }
                 }
                 _ => {}
             },
-            None => {
-                scheduler::yield_now();
-            }
+            // Nothing typed yet. Yielding is safe here: vfs::read holds no lock
+            // once it returns.
+            Err(KError::WouldBlock) => scheduler::yield_now(),
+            Err(_) => return false,
         }
     }
+}
+
+pub(crate) fn execute_line(line: &str) {
+    execute(line);
 }
 
 fn execute(line: &str) {
@@ -76,42 +107,32 @@ fn execute(line: &str) {
                 return;
             }
             if pipeline.len() > 1 {
-                eprintln_console("shell: pipelines not yet supported; running the first stage");
+                commands::eprint_pipeline_unsupported();
             }
             if let Some(cmd) = pipeline.into_iter().next() {
                 run_command(&cmd);
             }
         }
         Err(e) => {
-            eprintln_console(&format!("shell: syntax error ({:?})", e));
+            commands::eprint_syntax_error(&format!("shell: syntax error ({:?})", e));
         }
     }
 }
 
 fn run_command(cmd: &parser::Command) {
-    if let Err(e) = commands::begin_redirect(&cmd.redirect) {
-        eprintln_console(&format!(
-            "shell: could not open redirection target ({:?})",
-            e
-        ));
-        return;
-    }
+    let saved = match commands::begin_redirect(&cmd.redirect) {
+        Ok(s) => s,
+        Err(e) => {
+            commands::eprint_syntax_error(&format!(
+                "shell: could not open redirection target ({:?})",
+                e
+            ));
+            return;
+        }
+    };
 
     let args: Vec<&str> = cmd.args.iter().map(|s| s.as_str()).collect();
     let _code = commands::dispatch(cmd.name.as_str(), &args);
 
-    commands::end_redirect();
-}
-
-fn console_write(bytes: &[u8]) {
-    let _ = uart::write(bytes);
-}
-
-fn print_prompt() {
-    console_write(PROMPT.as_bytes());
-}
-
-fn eprintln_console(s: &str) {
-    console_write(s.as_bytes());
-    console_write(b"\r\n");
+    commands::end_redirect(saved);
 }

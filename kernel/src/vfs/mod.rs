@@ -304,6 +304,28 @@ pub fn create_pipe() -> KResult<(Fd, Fd)> {
     }
 }
 
+/// Installs a fresh fd table for `pid` with 0/1/2 all bound to `inode`.
+///
+/// This is an unconditional `insert`, deliberately not `entry().or_insert_with`:
+/// every other fd function falls back to `FdTable::new_process_table`, which is
+/// hardcoded to /dev/console. If a session's task reached any of them before it
+/// was seeded, its stdio would silently land on the serial port instead of its
+/// own channel -- and an SSH session would type into the UART. So the task must
+/// be created blocked, seeded here, and only then unblocked.
+pub fn seed_fd_table(pid: Pid, inode: Arc<dyn Inode>) -> KResult<()> {
+    let stdin = OpenFile::new(inode.clone(), OpenFlags::RDONLY)?;
+    let stdout = OpenFile::new(inode.clone(), OpenFlags::WRONLY)?;
+    let stderr = OpenFile::new(inode, OpenFlags::WRONLY)?;
+
+    let mut table = FdTable::new();
+    table.insert(stdin)?;
+    table.insert(stdout)?;
+    table.insert(stderr)?;
+
+    PROCESS_FD_TABLES.lock().insert(pid, table);
+    Ok(())
+}
+
 pub fn insert_open_file(open: OpenFile) -> KResult<Fd> {
     let pid = crate::scheduler::process::get_current_pid().unwrap_or(0);
     let mut tables = PROCESS_FD_TABLES.lock();
@@ -350,6 +372,22 @@ pub fn dup2(oldfd: Fd, newfd: Fd) -> KResult<Fd> {
 
     table.entries[newfd as usize] = Some(open_file);
     Ok(newfd)
+}
+
+/// Duplicates `fd` onto the lowest free slot, like dup(2).
+pub fn dup(fd: Fd) -> KResult<Fd> {
+    if fd < 0 {
+        return Err(KError::BadFd);
+    }
+    let pid = crate::scheduler::process::get_current_pid().unwrap_or(0);
+    let mut tables = PROCESS_FD_TABLES.lock();
+    let table = tables.entry(pid).or_insert_with(FdTable::new_process_table);
+
+    let open_file = match table.entries.get(fd as usize) {
+        Some(Some(f)) => f.clone(),
+        _ => return Err(KError::BadFd),
+    };
+    table.insert(open_file)
 }
 
 pub fn clone_fd_table(parent_pid: Pid, child_pid: Pid) {

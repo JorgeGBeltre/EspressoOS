@@ -632,11 +632,22 @@ pub fn net_task(_arg: usize) {
                 }
             }
 
+            // Session shells are spawned from here, so they have no parent and
+            // nothing can wait() for them. Sweep them up once they exit; this is
+            // what actually frees a finished session's fd table and its channel.
+            crate::scheduler::process::reap_orphans();
+
             {
                 let sock = sockets.get_mut::<tcp::Socket>(ssh_handle);
 
                 if !sock.is_open() {
                     let _ = sock.listen(SSH_PORT);
+                    if ssh_active {
+                        // The socket went away without a clean SSH close. Tear the
+                        // session down anyway, or its shell task would sit on a
+                        // channel no client can reach.
+                        ssh_conn.shutdown();
+                    }
                     ssh_active = false;
                 }
                 if sock.is_active() && !ssh_active {
@@ -648,6 +659,7 @@ pub fn net_task(_arg: usize) {
                     match ssh_conn.pump(&mut transport, &host_key) {
                         Ok(()) => {
                             if ssh_conn.is_closed() {
+                                ssh_conn.shutdown();
                                 transport.close();
                                 ssh_active = false;
                             }
@@ -659,6 +671,7 @@ pub fn net_task(_arg: usize) {
                                     ssh_conn.state(),
                                     e
                                 );
+                                ssh_conn.shutdown();
                                 transport.close();
                                 ssh_active = false;
                             }

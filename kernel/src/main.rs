@@ -12,6 +12,7 @@ mod mm;
 mod ota;
 mod prelude;
 mod scheduler;
+mod session;
 mod shell;
 mod syscall;
 mod vfs;
@@ -173,15 +174,36 @@ fn main() -> ! {
     scheduler::init();
 
     println!("[kernel] starting interactive console (kernel shell) on UART0...");
-    match scheduler::spawn(
+
+    // The serial console is session 0, built before the scheduler runs so the
+    // shell task can be seeded with it. This is what makes the serial shell and
+    // an SSH shell structurally identical: both own a pid, both own an fd table
+    // whose 0/1/2 point at their own channel, and both hand that channel to their
+    // children through clone_fd_table. The only difference left is which arm of
+    // SessionChannel::write runs.
+    let uart_chan = session::create(session::ChannelKind::Uart);
+    match scheduler::spawn_blocked(
         "shell",
         shell_task,
-        0,
+        uart_chan.id as usize,
         layout::DEFAULT_STACK_SIZE,
         PRIO_DEFAULT,
         false,
     ) {
-        Ok(tid) => println!("[kernel] task 'shell' created (tid={})", tid),
+        Ok(tid) => {
+            let pid = scheduler::process::register_process(
+                "shell",
+                tid,
+                false,
+                core::ptr::null_mut(),
+                0,
+            );
+            if let Err(e) = vfs::seed_fd_table(pid, session::SessionConsole::new(uart_chan)) {
+                println!("[kernel] warning: could not seed shell fd table: {:?}", e);
+            }
+            scheduler::unblock_task(tid);
+            println!("[kernel] task 'shell' created (tid={}, pid={})", tid, pid);
+        }
         Err(e) => println!("[kernel] ERROR: could not create shell: {:?}", e),
     }
 
@@ -246,10 +268,11 @@ fn banner() {
 }
 
 fn shell_task(_arg: usize) {
-    loop {
-        shell::run();
-        scheduler::yield_now();
-    }
+    // No user prefix on the prompt, and no loop: the serial channel never reports
+    // EOF, so run_session does not return. If it ever did, letting the task exit
+    // is the honest outcome -- respawning the session over a dead channel would
+    // just spin.
+    shell::run_session(None);
 }
 
 fn heartbeat_task(_arg: usize) {

@@ -107,6 +107,67 @@ pub fn register_process(
     pid
 }
 
+/// Reports whether `pid` has exited and is waiting to be cleaned up.
+pub fn is_zombie(pid: Pid) -> bool {
+    PROCESS_TABLE
+        .lock()
+        .table
+        .get(&pid)
+        .map(|p| p.state == ProcessState::Zombie)
+        .unwrap_or(false)
+}
+
+/// Drops a process nobody will ever wait() for, releasing its fd table.
+///
+/// sys_wait only reaps children of a caller that has a pid of its own. Session
+/// shells are spawned by the net task, which has none, so their processes get
+/// parent_pid = None and would sit Zombie forever -- and the fd table holds the
+/// session's Arc<SessionChannel>, so the channel would never be freed either.
+/// The spawner reaps them explicitly instead.
+///
+/// Only call this once the task is actually gone (see `is_zombie`). Removing a
+/// live task's process entry would make get_current_pid() return None for it, and
+/// its next fd operation would silently fall through to pid 0's table.
+pub fn reap(pid: Pid) {
+    {
+        let mut pt = PROCESS_TABLE.lock();
+        if let Some(proc) = pt.table.remove(&pid) {
+            if let Some(parent) = proc.parent_pid {
+                if let Some(p) = pt.table.get_mut(&parent) {
+                    p.children.retain(|c| *c != pid);
+                }
+            }
+        }
+    }
+    crate::vfs::cleanup_process_fds(pid);
+}
+
+/// Reaps every exited process that nobody can wait() for.
+///
+/// sys_wait only reaps children of a caller that has a pid, so a process with
+/// parent_pid = None has no possible waiter -- its entry and its fd table would
+/// live forever, and an SSH session's table holds the last Arc to its channel.
+/// Rather than chase every path a session can die on (clean logout, client
+/// CHANNEL_CLOSE, a TCP reset that strands the Connection, a failure halfway
+/// through setup), sweep for the one condition they all end in.
+///
+/// Safe against a live task: a process only reaches Zombie from inside sys_exit,
+/// by which point its task is already Zombie, off the ready queue, and will never
+/// touch an fd again.
+pub fn reap_orphans() {
+    let dead: Vec<Pid> = {
+        let pt = PROCESS_TABLE.lock();
+        pt.table
+            .iter()
+            .filter(|(_, p)| p.state == ProcessState::Zombie && p.parent_pid.is_none())
+            .map(|(&pid, _)| pid)
+            .collect()
+    };
+    for pid in dead {
+        reap(pid);
+    }
+}
+
 pub fn check_signals(save_frame: &mut esp_hal::xtensa_lx_rt::exception::Context) -> bool {
     let current_tid = super::current();
     let mut pt = PROCESS_TABLE.lock();

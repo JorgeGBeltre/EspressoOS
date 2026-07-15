@@ -10,22 +10,59 @@ use core::fmt::{Write, Result};
 
 
 extern "Rust" {
-    fn main() -> i32;
+    fn main(argc: i32, argv: *const *const u8) -> i32;
 }
 
+/// Entry point. The kernel hands one usize in a2: a pointer to the argv blob it
+/// wrote into the top of this program's data slot, laid out as
+///
+///     [argc: u32][argv[0]]..[argv[argc-1]][NULL][strings...]
+///
+/// main takes two parameters and the kernel only passes one, so `_start` unpacks:
+/// argc is the first word and argv is the blob plus four.
+///
+/// The `entry` below is load-bearing and easy to leave out.
+///
+/// On Xtensa the register window is not rotated by the call -- it is rotated by the
+/// `entry` instruction in the callee's prologue, by PS.CALLINC*4. A #[naked]
+/// function has no prologue, so without this it runs in the CALLER's window and a2
+/// holds whatever the caller had there, not the argument. The kernel invokes this
+/// through a callx8, which by the ABI leaves the argument in a10; `entry` rotates
+/// by eight and brings it to a2. Reading a10 directly would work today and break
+/// the day the compiler picks call4 or call12.
+///
+/// Then, since call4 rotates the callee's window by four, the caller's a6..a9 land
+/// in the callee's a2..a5 -- so argc in a6 and argv in a7 is what puts them in
+/// main's a2 and a3.
 #[no_mangle]
 #[unsafe(naked)]
 pub unsafe extern "C" fn _start() -> ! {
     core::arch::naked_asm!(
-
-
-
+        "entry a1, 32",
+        "l32i  a6, a2, 0",
+        "addi  a7, a2, 4",
         "call4 main",
         "mov a2, a6",
         "call4 exit",
         "loop:",
         "j loop"
     );
+}
+
+/// The `i`th argument as a string.
+///
+/// # Safety
+/// `argv` must be the pointer main was given, and `i` must be less than its argc.
+pub unsafe fn arg(argv: *const *const u8, i: i32) -> &'static str {
+    let p = *argv.offset(i as isize);
+    if p.is_null() {
+        return "";
+    }
+    let mut len = 0usize;
+    while *p.add(len) != 0 {
+        len += 1;
+    }
+    core::str::from_utf8_unchecked(core::slice::from_raw_parts(p, len))
 }
 
 

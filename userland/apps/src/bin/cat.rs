@@ -4,7 +4,7 @@
 use libc::{open, read, write, close, println};
 
 #[no_mangle]
-pub extern "C" fn main() -> i32 {
+pub extern "C" fn main(_argc: i32, _argv: *const *const u8) -> i32 {
     let fd = open("/etc/hosts", 1);
     if fd < 0 {
         println!("cat: could not open /etc/hosts");

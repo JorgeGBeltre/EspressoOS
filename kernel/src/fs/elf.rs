@@ -59,6 +59,9 @@ pub struct LoadedElf {
     /// Instruction-bus base of the slot: `entry`'s frame of reference.
     pub text_base: u32,
     pub data_base: *mut u8,
+    /// Bytes of the data slot the image itself occupies. Everything from here to
+    /// SLOT_SIZE is free for the caller -- argv goes there.
+    pub data_size: u32,
 }
 
 fn rd32(b: &[u8], o: usize) -> u32 {
@@ -255,6 +258,7 @@ fn place(
         slot,
         text_base: text_exec,
         data_base: data_write as *mut u8,
+        data_size: data.size,
     })
 }
 

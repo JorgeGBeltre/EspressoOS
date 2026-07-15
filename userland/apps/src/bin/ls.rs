@@ -4,7 +4,7 @@
 use libc::{println, readdir};
 
 #[no_mangle]
-pub extern "C" fn main() -> i32 {
+pub extern "C" fn main(_argc: i32, _argv: *const *const u8) -> i32 {
     let mut buf = [0u8; 1024];
     let n = readdir("/", &mut buf);
     if n < 0 {

@@ -4,7 +4,7 @@
 use libc::{println, open, read, close, spawn, wait, yield_now};
 
 #[no_mangle]
-pub extern "C" fn main() -> i32 {
+pub extern "C" fn main(_argc: i32, _argv: *const *const u8) -> i32 {
     println!("[init] Initialization process PID 1 started");
     
 

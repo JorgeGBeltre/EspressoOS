@@ -285,7 +285,15 @@ pub fn unlink(path: &str) -> KResult<()> {
     //
     // Note what this does NOT forbid: `rm /tmp/x` from inside /tmp/x. POSIX allows it,
     // and the path names the directory rather than gesturing at it.
-    let last = path.rsplit('/').next().unwrap_or("");
+    // trim_end_matches first. Without it a single trailing slash walks straight past
+    // this: "./" splits to ["", "."], so rsplit's first item is the empty string, not
+    // ".", and `rm ./` deleted the cwd exactly as `rm .` used to. The guard has to see
+    // the last NAME, and a trailing slash is punctuation, not a name.
+    let last = path
+        .trim_end_matches('/')
+        .rsplit('/')
+        .next()
+        .unwrap_or("");
     if last == "." || last == ".." {
         return Err(KError::InvalidArgument);
     }

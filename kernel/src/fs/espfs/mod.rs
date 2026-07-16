@@ -358,6 +358,11 @@ impl FsState {
     }
 
     fn compact(&mut self) -> KResult<()> {
+        // Temporary: compaction is the one thing a deploy boot does that a quiet boot
+        // does not, and it only fires when the active half is nearly full -- which is
+        // why the hang was so hard to reproduce. Announce it so the boot log says
+        // whether it ran.
+        crate::println!("[espfs] compacting half {} -> {}", self.active_half, 1 - self.active_half);
         let dst = 1 - self.active_half;
         let dbase = self.geom.half_off[dst];
         let dend = dbase + self.geom.half_size;

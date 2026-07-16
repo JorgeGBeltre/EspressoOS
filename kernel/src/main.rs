@@ -369,14 +369,12 @@ fn install_userland() {
             let _ = vfs::close(fd);
         }
 
-        // DIAGNOSTIC (temporary): force every binary to redeploy this boot, so the
-        // verify-after-write below actually runs. The hang only appeared on a boot that
-        // rewrote /bin/ls, and rewrites are rare -- content_matches skips a binary whose
-        // bytes already match. Forcing keeps the near-full flash state (no erase) so a
-        // compaction, if that is what corrupts the write, still fires. Flip to false
-        // once the read-back verification has told us whether the write is the problem.
-        const DIAG_FORCE_REDEPLOY: bool = true;
-        if match_exists && !DIAG_FORCE_REDEPLOY {
+        // The diagnostic forced-redeploy that lived here has done its job: two boots of
+        // rewriting all twelve binaries showed every one passing read-back verification
+        // and never triggered a compaction. The write path is exonerated. Leaving it on
+        // was actively harmful -- it appended ~180 KB to the log every boot, marching the
+        // active half toward the compaction that is the remaining suspect.
+        if match_exists {
             continue;
         }
 

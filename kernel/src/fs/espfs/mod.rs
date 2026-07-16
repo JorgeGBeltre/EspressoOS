@@ -364,6 +364,15 @@ impl FsState {
         // that only reproduced after many boots was first suspected here, precisely
         // because it runs so seldom. Log it: an operator seeing this line right before a
         // failure knows where to look, and its absence rules the path out.
+        //
+        // KNOWN DEBT (not fixed): the compacted image can be LARGER than the source, so
+        // the NoSpace checks below can fire and, because every future append re-triggers
+        // this same overflowing compaction, wedge the filesystem for good. Two ways it
+        // grows: read_file materializes sparse holes as explicit zero bytes, and each
+        // COMPACT_CHUNK gets its own record header. Neither bites at today's sizes -- the
+        // half is ~4 MB and the live set is ~180 KB of dense files -- but a sparse file
+        // or a genuinely full half would. The real fix is to preserve holes and coalesce
+        // chunks; until then this returns an honest error rather than corrupting anything.
         crate::println!("[espfs] compacting half {} -> {}", self.active_half, 1 - self.active_half);
         let dst = 1 - self.active_half;
         let dbase = self.geom.half_off[dst];
@@ -425,16 +434,20 @@ impl FsState {
             }
         }
 
-        for (ino, exts) in new_ext {
-            if let Some(Node {
-                body: Body::File(f),
-                ..
-            }) = self.nodes.get_mut(&ino)
-            {
-                f.extents = exts;
-            }
-        }
-
+        // Commit, then apply -- in that order, and the order is the point.
+        //
+        // The new half is fully written at this point, but nothing durable yet says so:
+        // the on-flash superblock still names the old half. write_super is the commit.
+        // It is also the one step here that does flash I/O and can therefore fail, and
+        // its `?` bails out of compact entirely.
+        //
+        // So everything that mutates in-memory state -- the scalar swap AND the new
+        // extents -- has to happen AFTER it. This loop used to run first: on a
+        // write_super error it left every file's extents pointing into the new half
+        // while active_half/cursor and the flash superblock still described the old one,
+        // an inconsistency that only a reboot cleared. Now an early Err leaves both
+        // memory and flash describing the old half, unchanged, which is exactly what a
+        // half-done compaction should look like: as if it never started.
         let new_slot = 1 - self.super_slot;
         let new_gen = self.generation + 1;
         self.write_super(new_slot, new_gen, dst as u32)?;
@@ -444,6 +457,16 @@ impl FsState {
         self.next_seq = seq;
         self.generation = new_gen;
         self.super_slot = new_slot;
+
+        for (ino, exts) in new_ext {
+            if let Some(Node {
+                body: Body::File(f),
+                ..
+            }) = self.nodes.get_mut(&ino)
+            {
+                f.extents = exts;
+            }
+        }
         Ok(())
     }
 

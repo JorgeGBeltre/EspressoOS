@@ -265,12 +265,23 @@ fn print_help() {
     }
 }
 
+/// Where to look for `cmd`: /bin if it is a bare name, otherwise wherever it says.
+///
+/// This is PATH search and nothing else. The /bin prefix must stay -- `ls` means the
+/// program, and dropping it because "the VFS resolves paths now" would send `ls` after
+/// a `cd /tmp` looking for /tmp/ls. But it applies only to a bare NAME.
+///
+/// The test is `contains('/')`, not `starts_with('/')`, which is what the kernel shell
+/// has always used. With starts_with, `./hello` was not absolute, so it got the prefix:
+/// "/bin/./hello", which normalize collapses to "/bin/hello". Typing ./hello in /tmp
+/// ran a different program with the same name and said nothing, or reported "not found"
+/// about a path never typed. /tmp/hello was never consulted.
 fn resolve_path<'a>(cmd: &str, out_buf: &'a mut [u8]) -> &'a str {
     let cmd = cmd.trim();
     if cmd.is_empty() {
         return "";
     }
-    if cmd.starts_with('/') {
+    if cmd.contains('/') {
         let cmd_bytes = cmd.as_bytes();
         if cmd_bytes.len() < out_buf.len() {
             out_buf[..cmd_bytes.len()].copy_from_slice(cmd_bytes);

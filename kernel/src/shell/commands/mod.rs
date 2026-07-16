@@ -25,34 +25,22 @@ pub fn cwd_set(path: &str) -> KResult<()> {
     scheduler::process::cwd_set(path)
 }
 
-fn norm_abs(path: &str) -> String {
-    let mut comps: Vec<&str> = Vec::new();
-    for part in path.split('/') {
-        match part {
-            "" | "." => {}
-            ".." => {
-                comps.pop();
-            }
-            p => comps.push(p),
-        }
-    }
-    let mut out = String::from("/");
-    out.push_str(&comps.join("/"));
-    out
-}
-
-fn resolve(path: &str) -> String {
-    if path.starts_with('/') {
-        norm_abs(path)
-    } else {
-        let mut base = cwd_get();
-        if !base.ends_with('/') {
-            base.push('/');
-        }
-        base.push_str(path);
-        norm_abs(&base)
-    }
-}
+// `resolve` and `norm_abs` lived here. They took a path the user typed and made it
+// absolute by hand, because mount::normalize used to reject anything that did not begin
+// with '/'. The VFS resolves relative paths against the calling process's cwd now, so
+// every one of their ten call sites was doing the VFS's job a second time, worse:
+// norm_abs was a whole second copy of normalize's lexical rules, and it had no
+// MAX_NAME_LEN check.
+//
+// Deleting them is not tidying. It is what makes `rm .` fixable at all.
+//
+// `resolve(".")` returned the cwd -- the '.' collapsed inside norm_abs -- so vfs::unlink
+// received "/tmp/x", a legitimate absolute path indistinguishable from a deliberate
+// `rm /tmp/x`. There was nothing left for unlink to refuse. POSIX says rmdir(".") shall
+// fail, and that rule is about the path AS THE CALLER WROTE IT. Passing the raw path
+// through is what lets the check live in vfs::unlink, where the '.' is still visible.
+//
+// The distributed rule was itself what made the invariant unenforceable.
 
 /// Writes every byte or gives up, whichever comes first.
 ///
@@ -117,7 +105,7 @@ pub fn begin_redirect(redirect: &Redirect) -> KResult<Option<vfs::Fd>> {
     };
 
     let flags = OpenFlags(OpenFlags::WRONLY.0 | OpenFlags::CREATE.0 | extra);
-    let fd = vfs::open(&resolve(path), flags)?;
+    let fd = vfs::open(path, flags)?;
 
     let saved = match vfs::dup(STDOUT) {
         Ok(s) => s,
@@ -171,8 +159,12 @@ fn spawn_child(
     stdout: vfs::Fd,
     close_in_child: &[vfs::Fd],
 ) -> Result<scheduler::process::Pid, i32> {
+    // The /bin/ prefix stays. It is PATH search, not cwd compensation -- `ls` means the
+    // program, and dropping it as "the VFS resolves paths now" would make `ls` after a
+    // `cd /tmp` look for /tmp/ls. A name with a slash in it is a path, and the VFS
+    // resolves it: `./hello` and `../bin/hello` reach the right file with no help.
     let path = if name.contains('/') {
-        resolve(name)
+        String::from(name)
     } else {
         format!("/bin/{}", name)
     };
@@ -324,7 +316,7 @@ pub fn run_pipeline(stages: &[super::parser::Command]) -> i32 {
     // leave two slots taken and a pipe half built.
     for s in stages {
         let path = if s.name.contains('/') {
-            resolve(&s.name)
+            s.name.clone()
         } else {
             format!("/bin/{}", s.name)
         };
@@ -432,7 +424,7 @@ fn open_redirect(redirect: &Redirect) -> KResult<Option<vfs::Fd>> {
         Redirect::Append(p) => (p, OpenFlags::APPEND.0),
     };
     let flags = OpenFlags(OpenFlags::WRONLY.0 | OpenFlags::CREATE.0 | extra);
-    Ok(Some(vfs::open(&resolve(path), flags)?))
+    Ok(Some(vfs::open(path, flags)?))
 }
 
 pub(crate) fn eprint_syntax_error(s: &str) {
@@ -753,9 +745,11 @@ fn cmd_reboot() -> i32 {
 }
 
 fn cmd_ls(args: &[&str]) -> i32 {
-    let raw = args.first().copied().unwrap_or(".");
-    let path = resolve(raw);
-    match vfs::readdir(&path) {
+    // "." with no argument, and the VFS turns that into the cwd. It used to be
+    // resolve()'s job; now `ls` and `/bin/ls` reach the same directory by the same
+    // route, which is the entire point.
+    let path = args.first().copied().unwrap_or(".");
+    match vfs::readdir(path) {
         Ok(entries) => {
             for e in &entries {
                 emit_line(&format_entry(e));
@@ -763,7 +757,7 @@ fn cmd_ls(args: &[&str]) -> i32 {
             0
         }
         Err(e) => {
-            eprint_line(&format!("ls: {}: {}", raw, err_str(e)));
+            eprint_line(&format!("ls: {}: {}", path, err_str(e)));
             1
         }
     }
@@ -771,19 +765,23 @@ fn cmd_ls(args: &[&str]) -> i32 {
 
 fn cmd_cd(args: &[&str]) -> i32 {
     let target = args.first().copied().unwrap_or("/");
-    let abs = resolve(target);
 
     // readdir first, so that `cd` to a file or a missing directory is reported as
     // such. cwd_set validates too, but only that the path is well formed -- it has no
     // opinion on whether it exists.
-    if let Err(e) = vfs::readdir(&abs) {
+    //
+    // Both get the raw path: each resolves it against this process's cwd, and cwd_set
+    // stores what normalize hands back, which is absolute. Two resolutions of the same
+    // string by the same rule -- the shell no longer has an opinion about what `..`
+    // means.
+    if let Err(e) = vfs::readdir(target) {
         eprint_line(&format!("cd: {}: {}", target, err_str(e)));
         return 1;
     }
     // Propagated rather than dropped. It used to return 0 no matter what cwd_set did,
     // so a `cd` that did not take reported success and the next command silently ran
     // in the old directory.
-    if let Err(e) = scheduler::process::cwd_set(&abs) {
+    if let Err(e) = scheduler::process::cwd_set(target) {
         eprint_line(&format!("cd: {}: {}", target, err_str(e)));
         return 1;
     }
@@ -812,7 +810,7 @@ fn cmd_cat(args: &[&str]) -> i32 {
     }
     let mut status = 0;
     for path in args {
-        if let Err(e) = cat_one(&resolve(path)) {
+        if let Err(e) = cat_one(path) {
             eprint_line(&format!("cat: {}: {}", path, err_str(e)));
             status = 1;
         }
@@ -847,7 +845,7 @@ fn cmd_mkdir(args: &[&str]) -> i32 {
     }
     let mut status = 0;
     for path in args {
-        if let Err(e) = vfs::mkdir(&resolve(path)) {
+        if let Err(e) = vfs::mkdir(path) {
             eprint_line(&format!("mkdir: {}: {}", path, err_str(e)));
             status = 1;
         }
@@ -863,7 +861,7 @@ fn cmd_touch(args: &[&str]) -> i32 {
     let mut status = 0;
     let flags = OpenFlags(OpenFlags::WRONLY.0 | OpenFlags::CREATE.0);
     for path in args {
-        match vfs::open(&resolve(path), flags) {
+        match vfs::open(path, flags) {
             Ok(fd) => {
                 let _ = vfs::close(fd);
             }
@@ -883,7 +881,7 @@ fn cmd_rm(args: &[&str]) -> i32 {
     }
     let mut status = 0;
     for path in args {
-        if let Err(e) = vfs::unlink(&resolve(path)) {
+        if let Err(e) = vfs::unlink(path) {
             eprint_line(&format!("rm: {}: {}", path, err_str(e)));
             status = 1;
         }
@@ -909,7 +907,7 @@ fn cmd_write(args: &[&str]) -> i32 {
     text.push('\n');
 
     let flags = OpenFlags(OpenFlags::WRONLY.0 | OpenFlags::CREATE.0 | OpenFlags::TRUNC.0);
-    let fd = match vfs::open(&resolve(path), flags) {
+    let fd = match vfs::open(path, flags) {
         Ok(fd) => fd,
         Err(e) => {
             eprint_line(&format!("write: {}: {}", path, err_str(e)));

@@ -269,6 +269,27 @@ pub fn mkdir(path: &str) -> KResult<()> {
 }
 
 pub fn unlink(path: &str) -> KResult<()> {
+    // POSIX: unlinking "." or ".." shall fail. The check has to happen on the path AS
+    // WRITTEN, before normalize touches it, and that is the whole reason it could not
+    // exist until now.
+    //
+    // normalize collapses "." and pops ".." lexically. A moment later `rm .` from
+    // /tmp/x is the string "/tmp/x" -- indistinguishable from a deliberate
+    // `rm /tmp/x` typed from somewhere else, and there is nothing left to refuse. The
+    // shell used to do that collapsing itself, in its own resolve(), so unlink only
+    // ever saw the aftermath. `rm .` silently deleted the caller's working directory,
+    // leaving `pwd` naming a directory that no longer existed and no chdir syscall to
+    // escape with.
+    //
+    // Deleting the shell's resolve() is what let the raw "." reach this line.
+    //
+    // Note what this does NOT forbid: `rm /tmp/x` from inside /tmp/x. POSIX allows it,
+    // and the path names the directory rather than gesturing at it.
+    let last = path.rsplit('/').next().unwrap_or("");
+    if last == "." || last == ".." {
+        return Err(KError::InvalidArgument);
+    }
+
     let norm = mount::normalize(path)?;
     let (parent_path, name) = mount::split_parent(&norm)?;
     let parent = mount::resolve(parent_path)?;

@@ -46,23 +46,91 @@ unsafe impl Sync for Process {}
 
 pub struct ProcessTable {
     pub table: BTreeMap<Pid, Process>,
+
+    /// tid -> pid, the reverse of `Process::main_task`.
+    ///
+    /// Private, and inside ProcessTable rather than beside it, on purpose. Seven
+    /// places used to walk `table` looking for `main_task == current_tid` -- an O(n)
+    /// scan under a Mutex that disables interrupts, on the syscall path. A second
+    /// `static` map would have fixed the cost and left the two free to drift, with a
+    /// lock order to remember. Behind the same guard, mutated by the same methods,
+    /// and unnameable from outside this module, they cannot.
+    by_tid: BTreeMap<Tid, Pid>,
+
     pub next_pid: u32,
+}
+
+impl ProcessTable {
+    /// The pid owning `tid`, if any.
+    ///
+    /// Takes the tid rather than reading it, so the caller keeps the existing lock
+    /// order: `scheduler::current()` locks SCHED, and doing that from in here would
+    /// nest PROCESS_TABLE -> SCHED on every syscall.
+    pub fn pid_of_tid(&self, tid: Tid) -> Option<Pid> {
+        self.by_tid.get(&tid).copied()
+    }
+
+    fn insert_process(&mut self, proc: Process) {
+        self.by_tid.insert(proc.main_task, proc.pid);
+        self.table.insert(proc.pid, proc);
+    }
+
+    /// Removes a process and returns it. The only way out of the table: both maps
+    /// move together or neither does.
+    fn remove_process(&mut self, pid: Pid) -> Option<Process> {
+        let proc = self.table.remove(&pid)?;
+        self.by_tid.remove(&proc.main_task);
+        if let Some(parent) = proc.parent_pid {
+            if let Some(p) = self.table.get_mut(&parent) {
+                p.children.retain(|c| *c != pid);
+            }
+        }
+        Some(proc)
+    }
 }
 
 pub static PROCESS_TABLE: Mutex<ProcessTable> = Mutex::new(ProcessTable {
     table: BTreeMap::new(),
+    by_tid: BTreeMap::new(),
     next_pid: 1,
 });
 
 pub fn get_current_pid() -> Option<Pid> {
-    let current_tid = super::current();
-    let pt = PROCESS_TABLE.lock();
-    for (&pid, proc) in &pt.table {
-        if proc.main_task == current_tid {
-            return Some(pid);
-        }
-    }
-    None
+    let tid = super::current();
+    PROCESS_TABLE.lock().pid_of_tid(tid)
+}
+
+/// Detaches an exited child of `parent` and returns (pid, exit code, slot).
+///
+/// Exists so that sys_wait does not reach into the table itself. It was the one
+/// place outside this module that removed a process, which made `by_tid` an
+/// invariant maintained by discipline instead of by construction.
+pub fn take_zombie_child(parent: Pid) -> Option<(Pid, i32, Option<crate::mm::psram_exec::SlotIndex>)> {
+    let mut pt = PROCESS_TABLE.lock();
+    let child = pt
+        .table
+        .get(&parent)?
+        .children
+        .iter()
+        .copied()
+        .find(|c| {
+            pt.table
+                .get(c)
+                .map(|p| p.state == ProcessState::Zombie)
+                .unwrap_or(false)
+        })?;
+    let proc = pt.remove_process(child)?;
+    Some((proc.pid, proc.exit_code, proc.slot))
+}
+
+/// Whether `parent` has any children left to wait for.
+pub fn has_children(parent: Pid) -> bool {
+    PROCESS_TABLE
+        .lock()
+        .table
+        .get(&parent)
+        .map(|p| !p.children.is_empty())
+        .unwrap_or(false)
 }
 
 pub fn register_process(
@@ -71,20 +139,19 @@ pub fn register_process(
     is_user: bool,
     slot: Option<crate::mm::psram_exec::SlotIndex>,
 ) -> Pid {
+    // Outside the lock: scheduler::current() takes SCHED, and this used to call it
+    // while holding PROCESS_TABLE -- nesting the two for no reason.
+    let current_tid = super::current();
+
     let mut pt = PROCESS_TABLE.lock();
     let pid = pt.next_pid;
     pt.next_pid += 1;
 
-    let mut parent_pid = None;
-    let mut cwd = String::from("/");
-    let current_tid = super::current();
-    for (&p, proc) in &pt.table {
-        if proc.main_task == current_tid {
-            parent_pid = Some(p);
-            cwd = proc.cwd.clone();
-            break;
-        }
-    }
+    let parent_pid = pt.pid_of_tid(current_tid);
+    let cwd = parent_pid
+        .and_then(|p| pt.table.get(&p))
+        .map(|p| p.cwd.clone())
+        .unwrap_or_else(|| String::from("/"));
 
     let proc = Process {
         pid,
@@ -102,7 +169,7 @@ pub fn register_process(
         saved_signal_context: None,
     };
 
-    pt.table.insert(pid, proc);
+    pt.insert_process(proc);
 
     if let Some(p) = parent_pid {
         if let Some(parent_proc) = pt.table.get_mut(&p) {
@@ -176,20 +243,10 @@ pub fn has_exited(pid: Pid) -> bool {
 /// live task's process entry would make get_current_pid() return None for it, and
 /// its next fd operation would silently fall through to pid 0's table.
 pub fn reap(pid: Pid) {
-    let slot = {
-        let mut pt = PROCESS_TABLE.lock();
-        match pt.table.remove(&pid) {
-            Some(proc) => {
-                if let Some(parent) = proc.parent_pid {
-                    if let Some(p) = pt.table.get_mut(&parent) {
-                        p.children.retain(|c| *c != pid);
-                    }
-                }
-                proc.slot
-            }
-            None => None,
-        }
-    };
+    // Both maps and the parent's child list move together inside remove_process; the
+    // guard is released before the cleanup below, which takes other locks.
+    let slot = PROCESS_TABLE.lock().remove_process(pid).and_then(|p| p.slot);
+
     // Give the image's slot back. There are 32, so leaking one per exec would run
     // the system out of them without ever reporting anything.
     if let Some(s) = slot {
@@ -233,13 +290,7 @@ pub fn check_signals(save_frame: &mut esp_hal::xtensa_lx_rt::exception::Context)
     let current_tid = super::current();
     let mut pt = PROCESS_TABLE.lock();
 
-    let mut current_pid = None;
-    for (&pid, proc) in &pt.table {
-        if proc.main_task == current_tid {
-            current_pid = Some(pid);
-            break;
-        }
-    }
+    let current_pid = pt.pid_of_tid(current_tid);
 
     let pid = match current_pid {
         Some(p) => p,

@@ -183,30 +183,23 @@ fn sys_exit(args: &[usize]) -> isize {
     let code = arg(args, 0) as i32;
 
     let current_tid = crate::scheduler::current();
-    let mut parent_to_wake = None;
 
-    {
+    let parent_to_wake = {
         let mut pt = crate::scheduler::process::PROCESS_TABLE.lock();
-        let mut current_pid = None;
-        for (&pid, proc) in &mut pt.table {
-            if proc.main_task == current_tid {
+        let current_pid = pt.pid_of_tid(current_tid);
+
+        let parent_pid = match current_pid.and_then(|pid| pt.table.get_mut(&pid)) {
+            Some(proc) => {
                 proc.state = crate::scheduler::process::ProcessState::Zombie;
                 proc.exit_code = code;
-                current_pid = Some(pid);
-                break;
+                proc.parent_pid
             }
-        }
-
-        if let Some(pid) = current_pid {
-            if let Some(proc) = pt.table.get(&pid) {
-                if let Some(parent_pid) = proc.parent_pid {
-                    if let Some(parent_proc) = pt.table.get(&parent_pid) {
-                        parent_to_wake = Some(parent_proc.main_task);
-                    }
-                }
-            }
-        }
-    }
+            None => None,
+        };
+        parent_pid
+            .and_then(|p| pt.table.get(&p))
+            .map(|p| p.main_task)
+    };
 
     if let Some(parent_tid) = parent_to_wake {
         crate::scheduler::unblock_task(parent_tid);
@@ -282,58 +275,22 @@ fn sys_wait(args: &[usize]) -> isize {
     let status_ptr = arg(args, 0) as *mut i32;
     let current_tid = crate::scheduler::current();
 
-    let mut current_pid = None;
+    let current_pid = match crate::scheduler::process::PROCESS_TABLE
+        .lock()
+        .pid_of_tid(current_tid)
     {
-        let pt = crate::scheduler::process::PROCESS_TABLE.lock();
-        for (&pid, proc) in &pt.table {
-            if proc.main_task == current_tid {
-                current_pid = Some(pid);
-                break;
-            }
-        }
-    }
-    let current_pid = match current_pid {
         Some(pid) => pid,
         None => return KError::NotFound.as_errno(),
     };
 
-    let mut reaped: Option<(u32, i32, Option<crate::mm::psram_exec::SlotIndex>)> = None;
-    {
-        let mut pt = crate::scheduler::process::PROCESS_TABLE.lock();
-
-        let (children_empty, zombie_pid) = {
-            let current_proc = match pt.table.get(&current_pid) {
-                Some(p) => p,
-                None => return KError::NotFound.as_errno(),
-            };
-            if current_proc.children.is_empty() {
-                (true, None)
-            } else {
-                let mut z = None;
-                for &child_pid in &current_proc.children {
-                    if let Some(child_proc) = pt.table.get(&child_pid) {
-                        if child_proc.state == crate::scheduler::process::ProcessState::Zombie {
-                            z = Some(child_pid);
-                            break;
-                        }
-                    }
-                }
-                (false, z)
-            }
-        };
-
-        if children_empty {
-            return KError::NotFound.as_errno();
-        }
-
-        if let Some(child_pid) = zombie_pid {
-            let child_proc = pt.table.remove(&child_pid).unwrap();
-            if let Some(current_proc_mut) = pt.table.get_mut(&current_pid) {
-                current_proc_mut.children.retain(|&x| x != child_pid);
-            }
-            reaped = Some((child_pid, child_proc.exit_code, child_proc.slot));
-        }
+    if !crate::scheduler::process::has_children(current_pid) {
+        return KError::NotFound.as_errno();
     }
+
+    // Detaching the child belongs to process.rs: it was the one place outside that
+    // module that removed from PROCESS_TABLE, which is what made the tid->pid map an
+    // invariant kept by discipline rather than by construction.
+    let reaped = crate::scheduler::process::take_zombie_child(current_pid);
 
     if let Some((child_pid, code, slot)) = reaped {
         if !status_ptr.is_null() {
@@ -475,15 +432,18 @@ fn sys_sigaction(args: &[usize]) -> isize {
 
     let current_tid = crate::scheduler::current();
     let mut pt = crate::scheduler::process::PROCESS_TABLE.lock();
-    for proc in pt.table.values_mut() {
-        if proc.main_task == current_tid {
+    let pid = match pt.pid_of_tid(current_tid) {
+        Some(p) => p,
+        None => return KError::NotFound.as_errno(),
+    };
+    match pt.table.get_mut(&pid) {
+        Some(proc) => {
             proc.signal_handlers[sig as usize] = act.sa_handler;
             proc.signal_restorers[sig as usize] = act.sa_restorer;
-            return 0;
+            0
         }
+        None => KError::NotFound.as_errno(),
     }
-
-    KError::NotFound.as_errno()
 }
 
 fn sys_kill(args: &[usize]) -> isize {
@@ -510,8 +470,9 @@ fn sys_kill(args: &[usize]) -> isize {
 fn sys_sigreturn(_args: &[usize], frame: *mut esp_hal::xtensa_lx_rt::exception::Context) -> isize {
     let current_tid = crate::scheduler::current();
     let mut pt = crate::scheduler::process::PROCESS_TABLE.lock();
-    for proc in pt.table.values_mut() {
-        if proc.main_task == current_tid {
+    let pid = pt.pid_of_tid(current_tid);
+    if let Some(proc) = pid.and_then(|p| pt.table.get_mut(&p)) {
+        {
             if let Some(saved) = proc.saved_signal_context.take() {
                 if !frame.is_null() {
                     unsafe {

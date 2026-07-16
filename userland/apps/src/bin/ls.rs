@@ -46,12 +46,16 @@ fn list(path: &str) -> i32 {
 #[no_mangle]
 pub extern "C" fn main(argc: i32, argv: *const *const u8) -> i32 {
     if argc <= 1 {
-        // "/" and not the working directory, because a userland program cannot see
-        // one: the kernel keeps a cwd per process, but there is no getcwd syscall and
-        // vfs::mount::normalize rejects any path that does not start with '/'. So a
-        // bare `/bin/ls` and the shell's own `ls` still disagree after a `cd`, until
-        // either getcwd exists or the VFS resolves relative paths itself.
-        return list("/");
+        // "." -- the working directory, which this program still cannot see and does
+        // not need to. There is no getcwd syscall; the VFS resolves the "." against
+        // the cwd this process inherited when it was spawned. That is the whole point
+        // of the invariant: userland names a directory relative to itself and the
+        // kernel knows which one that is.
+        //
+        // This said "/" until the VFS learned to resolve relative paths, and the
+        // comment here named that as the fix. It is why `cd /tmp` then `ls` and
+        // `cd /tmp` then `/bin/ls` used to disagree.
+        return list(".");
     }
 
     let mut status = 0;

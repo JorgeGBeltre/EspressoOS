@@ -144,74 +144,11 @@ pub fn end_redirect(saved: Option<vfs::Fd>) {
 const EXEC_PRIO: u8 = 10;
 
 /// Runs a program from `/bin` (or a path, if the name has a slash) and waits.
-///
-/// No argv: `_args` is dropped on the floor. There is nowhere to put it -- `_start`
-/// is `call4 main` with nothing marshalled, and every program's `main()` takes no
-/// parameters. Wiring that up is its own job; this exists to answer the question
-/// that cannot be answered by reading code, which is whether a child's output
-/// reaches the session that launched it.
 fn try_exec(name: &str, args: &[&str]) -> i32 {
     match spawn_child(name, args, STDIN, STDOUT, &[]) {
         Ok(pid) => wait_all(&[pid]),
         Err(code) => code,
     }
-}
-
-/// Writes the argv blob into the top of the child's data slot and returns a pointer
-/// to it, which is what the task entry receives.
-///
-/// Layout, in the child's own addresses:
-///
-///     [argc: u32][argv[0]]..[argv[argc-1]][NULL][name\0][arg\0]..
-///
-/// argc leads so `_start` can unpack both of main's parameters from the single
-/// usize the kernel passes: argc is `*blob` and argv is `blob + 4`.
-///
-/// It goes at the TOP of the slot growing down, not after .bss, so that its address
-/// does not move when the program's data does. The pointers inside are the child's
-/// final addresses -- the blob is built after the image is placed, so nothing about
-/// it needs relocating.
-///
-/// It lives and dies with the slot: no allocation, and slot_free takes it with the
-/// image.
-fn write_argv(loaded: &crate::fs::elf::LoadedElf, name: &str, args: &[&str]) -> KResult<usize> {
-    let argc = 1 + args.len();
-    let ptrs_len = 4 + (argc + 1) * 4;
-    let strs_len = name.len() + 1 + args.iter().map(|a| a.len() + 1).sum::<usize>();
-    let blob_len = (ptrs_len + strs_len + 3) & !3;
-
-    let slot = crate::mm::psram_exec::SLOT_SIZE as usize;
-    if blob_len > slot {
-        return Err(KError::NoSpace);
-    }
-    let off = slot - blob_len;
-    // The image's .bss ends at data_size; below that is the program's own memory.
-    if off < loaded.data_size as usize {
-        return Err(KError::NoSpace);
-    }
-
-    let base = loaded.data_base as usize + off;
-    let mut ptr_at = base + 4;
-    let mut str_at = base + ptrs_len;
-
-    unsafe {
-        *(base as *mut u32) = argc as u32;
-        for s in core::iter::once(name).chain(args.iter().copied()) {
-            *(ptr_at as *mut u32) = str_at as u32;
-            core::ptr::copy_nonoverlapping(s.as_ptr(), str_at as *mut u8, s.len());
-            *((str_at + s.len()) as *mut u8) = 0;
-            ptr_at += 4;
-            str_at += s.len() + 1;
-        }
-        // argv is NULL-terminated as well as counted, so a program can walk it
-        // either way.
-        *(ptr_at as *mut u32) = 0;
-    }
-
-    // No sync_caches: this is the data bus on both sides. The image needed it
-    // because its code was written through the data alias and fetched through the
-    // instruction bus; argv is written and read through the same cache.
-    Ok(base)
 }
 
 /// Loads a program and arranges its stdio, without running it.
@@ -248,7 +185,12 @@ fn spawn_child(
         }
     };
 
-    let argv_ptr = match write_argv(&loaded, name, args) {
+    // argv[0] is the name as typed, the way a real shell passes it.
+    let mut argv: Vec<&str> = Vec::with_capacity(1 + args.len());
+    argv.push(name);
+    argv.extend_from_slice(args);
+
+    let argv_ptr = match crate::fs::elf::write_argv(&loaded, &argv) {
         Ok(p) => p,
         Err(e) => {
             crate::mm::psram_exec::slot_free(loaded.slot);

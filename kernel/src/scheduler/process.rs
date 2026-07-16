@@ -123,6 +123,14 @@ pub fn take_zombie_child(parent: Pid) -> Option<(Pid, i32, Option<crate::mm::psr
     Some((proc.pid, proc.exit_code, proc.slot))
 }
 
+/// The PSRAM slot of the calling process, if it has one. Kernel tasks do not.
+pub fn current_slot() -> Option<crate::mm::psram_exec::SlotIndex> {
+    let tid = super::current();
+    let pt = PROCESS_TABLE.lock();
+    let pid = pt.pid_of_tid(tid)?;
+    pt.table.get(&pid)?.slot
+}
+
 /// Whether `parent` has any children left to wait for.
 pub fn has_children(parent: Pid) -> bool {
     PROCESS_TABLE

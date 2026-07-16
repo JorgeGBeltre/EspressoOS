@@ -531,6 +531,46 @@ pub fn run_secondary() -> ! {
     }
 }
 
+/// The current task's stack, as `(start, end)`.
+///
+/// A task's stack is a kernel heap allocation (`Task::new` calls `alloc`), NOT part
+/// of its PSRAM slot -- the reserved region ends at the heap's base. So every
+/// `&mut buf` a user program hands to a syscall is a heap address, and a validator
+/// that only allowed the process's own slot would reject every `read()` in the
+/// userland.
+///
+/// Reads `s.current` directly rather than calling `current()`: that helper takes the
+/// SCHED lock, and this Mutex is not reentrant, so calling it from inside
+/// `with_sched` would be a hard hang.
+pub fn current_stack_range() -> Option<(usize, usize)> {
+    with_sched(|s| {
+        #[cfg(feature = "smp")]
+        let cur = if core_id() == 1 { s.current1 } else { s.current };
+        #[cfg(not(feature = "smp"))]
+        let cur = s.current;
+
+        s.tasks.get(&cur).map(|t| {
+            let base = t.stack_base as usize;
+            (base, base.saturating_add(t.stack_size))
+        })
+    })
+    .flatten()
+}
+
+/// Whether the running task is userland. False for kernel tasks and if the
+/// scheduler has not started.
+pub fn current_task_is_user() -> bool {
+    with_sched(|s| {
+        #[cfg(feature = "smp")]
+        let cur = if core_id() == 1 { s.current1 } else { s.current };
+        #[cfg(not(feature = "smp"))]
+        let cur = s.current;
+
+        s.tasks.get(&cur).map(|t| t.is_user).unwrap_or(false)
+    })
+    .unwrap_or(false)
+}
+
 pub fn set_task_user(tid: Tid, is_user: bool) {
     with_sched(|s| {
         if let Some(t) = s.tasks.get_mut(&tid) {

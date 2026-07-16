@@ -24,7 +24,7 @@ pub extern "C" fn main(_argc: i32, _argv: *const *const u8) -> i32 {
 
     loop {
         println!("[init] Launching interactive console (/bin/sh)...");
-        let pid = spawn("/bin/sh", 0, 0, 0, 0);
+        let pid = spawn("/bin/sh", core::ptr::null());
         if pid >= 0 {
             let mut status = 0;
             let _ = wait(&mut status);
@@ -57,10 +57,15 @@ fn execute_rc(data: &[u8]) {
             cmd_str = line[..line.len() - 1].trim();
         }
         
+        // Still drops every argument past the program name: the tokens here are
+        // Rust &strs cut out of an immutable buffer, and spawn needs C strings. Not
+        // worth building, because this parser is meant to go -- /bin/sh is the
+        // interpreter, and init's job is to run `sh /etc/rc`, not to be a second
+        // shell that understands a different subset of the syntax.
         let mut parts = cmd_str.split_whitespace();
         if let Some(bin_path) = parts.next() {
             println!("[init] Executing: {} (bg={})", bin_path, bg);
-            let pid = spawn(bin_path, 0, 0, 0, 0);
+            let pid = spawn(bin_path, core::ptr::null());
             if pid >= 0 {
                 if !bg {
                     let mut status = 0;

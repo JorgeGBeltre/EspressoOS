@@ -78,14 +78,88 @@ fn arg(args: &[usize], i: usize) -> usize {
     }
 }
 
+/// Rejects a pointer a user process has no business handing us.
+///
+/// The boundary is the MODE, not the process: a kernel task is trusted with any
+/// address, which is what lets the shell pass `&mut status` from its own stack to
+/// sys_wait. A user task gets exactly two regions:
+///
+///   * **its own stack** -- a kernel heap allocation, not part of its slot, and
+///     where every `&mut buf` in the userland lives. Omitting it would reject every
+///     `read()` there is.
+///   * **its own data slot** -- globals, `.rodata`, `.bss` and argv. Not the text
+///     slot: nothing in a program points a data pointer at its own code.
+///
+/// Anything else -- another process's slot, the kernel's own structures, a
+/// peripheral register -- is a Fault. Until this existed, `sys_wait` would write an
+/// exit code to any address it was given and `user_slice` only rejected null, which
+/// was an arbitrary kernel write reachable from userland.
+/// The end of whichever region `ptr` belongs to, or Fault if it belongs to none.
+///
+/// The end matters as much as the membership: it is the only honest bound for
+/// walking a NUL-terminated string a process handed us. A fixed cap is wrong in
+/// both directions -- 4 KB would let a string near the top of the stack be read
+/// past the stack's end, and would reject a legitimate 5 KB one in the data slot.
+///
+/// Returns None for a kernel task, which is trusted and has no region.
+fn user_region_end(ptr: usize) -> KResult<Option<usize>> {
+    if ptr == 0 {
+        return Err(KError::Fault);
+    }
+    if !crate::scheduler::current_task_is_user() {
+        return Ok(None);
+    }
+    if let Some((lo, hi)) = crate::scheduler::current_stack_range() {
+        if ptr >= lo && ptr < hi {
+            return Ok(Some(hi));
+        }
+    }
+    if let Some(slot) = crate::scheduler::process::current_slot() {
+        let lo = crate::mm::psram_exec::slot_data(slot) as usize;
+        let hi = lo + crate::mm::psram_exec::SLOT_SIZE as usize;
+        if ptr >= lo && ptr < hi {
+            return Ok(Some(hi));
+        }
+    }
+    Err(KError::Fault)
+}
+
+pub(crate) fn validate_user(ptr: usize, len: usize) -> KResult<()> {
+    if len == 0 {
+        return Ok(());
+    }
+    let end = ptr.checked_add(len).ok_or(KError::Fault)?;
+    match user_region_end(ptr)? {
+        None => Ok(()),
+        Some(hi) if end <= hi => Ok(()),
+        Some(_) => Err(KError::Fault),
+    }
+}
+
+/// A kernel task has no region, so its strings still need SOME bound -- trusted is
+/// not the same as infinite, and a missing NUL would spin forever.
+const KERNEL_STR_MAX: usize = 4096;
+
+/// Length of a NUL-terminated string a process handed us, without reading past the
+/// region it lives in.
+pub(crate) fn user_strnlen(ptr: usize) -> KResult<usize> {
+    let hi = user_region_end(ptr)?.unwrap_or(ptr.saturating_add(KERNEL_STR_MAX));
+    let mut n = 0usize;
+    while ptr + n < hi {
+        if unsafe { *((ptr + n) as *const u8) } == 0 {
+            return Ok(n);
+        }
+        n += 1;
+    }
+    // Ran to the end of the region without finding one.
+    Err(KError::Fault)
+}
+
 unsafe fn user_slice<'a>(ptr: usize, len: usize) -> KResult<&'a [u8]> {
     if len == 0 {
         return Ok(&[]);
     }
-    if ptr == 0 {
-        return Err(KError::Fault);
-    }
-
+    validate_user(ptr, len)?;
     Ok(core::slice::from_raw_parts(ptr as *const u8, len))
 }
 
@@ -93,10 +167,7 @@ unsafe fn user_slice_mut<'a>(ptr: usize, len: usize) -> KResult<&'a mut [u8]> {
     if len == 0 {
         return Ok(&mut []);
     }
-    if ptr == 0 {
-        return Err(KError::Fault);
-    }
-
+    validate_user(ptr, len)?;
     Ok(core::slice::from_raw_parts_mut(ptr as *mut u8, len))
 }
 
@@ -210,69 +281,133 @@ fn sys_exit(args: &[usize]) -> isize {
     0
 }
 
+/// Most arguments a process can hand `spawn`.
+///
+/// The walk terminates without this: `user_argv` cannot step outside the caller's
+/// region, and `write_argv` refuses a blob that will not fit a 16 KB slot. The limit
+/// is here because the Vec<String> is built BEFORE either of those bites -- a
+/// thousand pointers to short strings would allocate a thousand kernel Strings and
+/// only then be told the blob was too big.
+const MAX_ARGC: usize = 64;
+
+/// Copies a NULL-terminated `*const *const u8` out of the calling process.
+///
+/// Every pointer in it belongs to the caller and is checked as such, the same way any
+/// other pointer crossing this boundary is. The strings are copied rather than
+/// borrowed because the blob they end up in is built in a DIFFERENT slot -- the
+/// child's -- after `load_elf` has run.
+fn user_argv(argv_ptr: usize) -> KResult<Vec<String>> {
+    if argv_ptr == 0 {
+        return Ok(Vec::new());
+    }
+    // An unaligned char** is a bug in the caller, but `l32i` on an unaligned address
+    // traps, which would turn that bug into a kernel exception. Refuse it here rather
+    // than take the fault.
+    if argv_ptr & 3 != 0 {
+        return Err(KError::Fault);
+    }
+
+    let mut out: Vec<String> = Vec::new();
+    let mut p = argv_ptr;
+    loop {
+        if out.len() == MAX_ARGC {
+            return Err(KError::NoSpace);
+        }
+        validate_user(p, 4)?;
+        let s = unsafe { *(p as *const u32) } as usize;
+        if s == 0 {
+            return Ok(out);
+        }
+        // user_strnlen bounds itself to the region `s` lives in, so a slice of that
+        // length starting there cannot reach past it. Re-validating would run the same
+        // region check twice and could not fail differently.
+        let len = user_strnlen(s)?;
+        let bytes = unsafe { core::slice::from_raw_parts(s as *const u8, len) };
+        out.push(String::from(
+            core::str::from_utf8(bytes).map_err(|_| KError::InvalidArgument)?,
+        ));
+        p += 4;
+    }
+}
+
+/// Starts a program from an image on disk.
+///
+///     arg 0,1 = path (ptr, len) in the caller's memory
+///     arg 2   = argv: NULL-terminated *const *const u8 in the caller's memory, or 0
+///
+/// argv is copied into the child's slot, which is what execve does and for the same
+/// reason: the array the parent holds is in the parent's memory, and the child has
+/// its own.
+///
+/// The second form of this call -- a raw entry point, taken when arg 2 was non-zero
+/// -- is gone. Nothing used it; all five callers in the tree passed 0. What it did
+/// was spawn a task at an address of userland's choosing with `is_user = false`,
+/// which is arbitrary kernel execution and, because validate_user trusts any task
+/// that is not a user task, also a switch that turns the pointer checks off. It could
+/// not be repaired by validating the entry point: there is no address a user process
+/// has any business jumping to as the kernel.
 fn sys_spawn(args: &[usize]) -> isize {
-    let name = match unsafe { user_str(arg(args, 0), arg(args, 1)) } {
+    let path = match unsafe { user_str(arg(args, 0), arg(args, 1)) } {
         Ok(s) => s,
         Err(e) => return e.as_errno(),
     };
-    let entry_raw = arg(args, 2);
 
-    if entry_raw == 0 {
-        match crate::fs::elf::load_elf(name) {
-            Ok(loaded) => {
-                let entry: fn(usize) = unsafe { core::mem::transmute(loaded.entry as usize) };
-                match crate::scheduler::spawn_blocked(
-                    name,
-                    entry,
-                    0,
-                    layout::DEFAULT_STACK_SIZE,
-                    10,
-                    true,
-                ) {
-                    Ok(tid) => {
-                        // The slot goes on the process: reaping it is what returns
-                        // the slot to the pool.
-                        let pid = crate::scheduler::process::register_process(
-                            name,
-                            tid,
-                            true,
-                            Some(loaded.slot),
-                        );
-                        crate::scheduler::unblock_task(tid);
-                        pid as isize
-                    }
-                    Err(e) => {
-                        // Nothing owns the image yet, so the slot is ours to drop.
-                        crate::mm::psram_exec::slot_free(loaded.slot);
-                        e.as_errno()
-                    }
-                }
-            }
-            Err(e) => e.as_errno(),
-        }
-    } else {
-        let entry: fn(usize) = unsafe { core::mem::transmute::<usize, fn(usize)>(entry_raw) };
-        let entry_arg = arg(args, 3);
-        let mut stack_size = arg(args, 4);
-        if stack_size == 0 {
-            stack_size = layout::DEFAULT_STACK_SIZE;
-        }
-        let priority = arg(args, 5) as u8;
+    // Copied out before anything is allocated: a bad argv never reaches a slot.
+    let mut argv = match user_argv(arg(args, 2)) {
+        Ok(v) => v,
+        Err(e) => return e.as_errno(),
+    };
+    // A child always gets an argv[0]. `_start` unpacks the blob unconditionally, so
+    // "no arguments" has to mean [path] -- passing 0 is what made every program
+    // sys_spawn started take a LoadProhibited on its first instruction.
+    if argv.is_empty() {
+        argv.push(String::from(path));
+    }
 
-        match crate::scheduler::spawn_blocked(name, entry, entry_arg, stack_size, priority, false) {
-            Ok(tid) => {
-                // A bare entry point, not an image: no slot to own.
-                let pid = crate::scheduler::process::register_process(name, tid, false, None);
-                crate::scheduler::unblock_task(tid);
-                pid as isize
-            }
-            Err(e) => e.as_errno(),
+    let loaded = match crate::fs::elf::load_elf(path) {
+        Ok(l) => l,
+        Err(e) => return e.as_errno(),
+    };
+
+    let refs: Vec<&str> = argv.iter().map(|s| s.as_str()).collect();
+    let argv_ptr = match crate::fs::elf::write_argv(&loaded, &refs) {
+        Ok(p) => p,
+        Err(e) => {
+            // Nothing owns the image yet, so the slot is ours to drop.
+            crate::mm::psram_exec::slot_free(loaded.slot);
+            return e.as_errno();
+        }
+    };
+
+    let entry: fn(usize) = unsafe { core::mem::transmute(loaded.entry as usize) };
+    match crate::scheduler::spawn_blocked(path, entry, argv_ptr, layout::DEFAULT_STACK_SIZE, 10, true)
+    {
+        Ok(tid) => {
+            // The slot goes on the process: reaping it is what returns the slot to
+            // the pool.
+            let pid =
+                crate::scheduler::process::register_process(path, tid, true, Some(loaded.slot));
+            crate::scheduler::unblock_task(tid);
+            pid as isize
+        }
+        Err(e) => {
+            crate::mm::psram_exec::slot_free(loaded.slot);
+            e.as_errno()
         }
     }
 }
 
 fn sys_wait(args: &[usize]) -> isize {
     let status_ptr = arg(args, 0) as *mut i32;
+    // The write that started all this: sys_wait used to store the exit code at
+    // whatever address it was handed, checking only for null. A null pointer is a
+    // legal "I don't want the status", so it is allowed through here and skipped at
+    // the store.
+    if !status_ptr.is_null() {
+        if let Err(e) = validate_user(status_ptr as usize, core::mem::size_of::<i32>()) {
+            return e.as_errno();
+        }
+    }
     let current_tid = crate::scheduler::current();
 
     let current_pid = match crate::scheduler::process::PROCESS_TABLE
@@ -423,6 +558,9 @@ fn sys_sigaction(args: &[usize]) -> isize {
     if sig <= 0 || sig >= 32 || sig == 9 {
         return KError::InvalidArgument.as_errno();
     }
+    if let Err(e) = validate_user(act_ptr as usize, core::mem::size_of::<Sigaction>()) {
+        return e.as_errno();
+    }
 
     if act_ptr.is_null() {
         return KError::Fault.as_errno();
@@ -566,6 +704,9 @@ fn sys_connect(args: &[usize]) -> isize {
     if addr_ptr.is_null() || addr_len < core::mem::size_of::<sockaddr_in>() {
         return KError::InvalidArgument.as_errno();
     }
+    if let Err(e) = validate_user(addr_ptr as usize, core::mem::size_of::<sockaddr_in>()) {
+        return e.as_errno();
+    }
 
     let addr = unsafe { &*addr_ptr };
 
@@ -625,6 +766,9 @@ fn sys_bind(args: &[usize]) -> isize {
     if addr_ptr.is_null() || addr_len < core::mem::size_of::<sockaddr_in>() {
         return KError::InvalidArgument.as_errno();
     }
+    if let Err(e) = validate_user(addr_ptr as usize, core::mem::size_of::<sockaddr_in>()) {
+        return e.as_errno();
+    }
     let addr = unsafe { &*addr_ptr };
     let port = u16::from_be(addr.sin_port);
 
@@ -682,8 +826,8 @@ struct timeval {
 
 fn sys_gettimeofday(args: &[usize]) -> isize {
     let tv_ptr = arg(args, 0) as *mut timeval;
-    if tv_ptr.is_null() {
-        return KError::InvalidArgument.as_errno();
+    if let Err(e) = validate_user(tv_ptr as usize, core::mem::size_of::<timeval>()) {
+        return e.as_errno();
     }
 
     let uptime_us = esp_hal::time::now().duration_since_epoch().to_micros();
@@ -702,8 +846,8 @@ fn sys_gettimeofday(args: &[usize]) -> isize {
 
 fn sys_settimeofday(args: &[usize]) -> isize {
     let tv_ptr = arg(args, 0) as *const timeval;
-    if tv_ptr.is_null() {
-        return KError::InvalidArgument.as_errno();
+    if let Err(e) = validate_user(tv_ptr as usize, core::mem::size_of::<timeval>()) {
+        return e.as_errno();
     }
 
     let tv = unsafe { &*tv_ptr };

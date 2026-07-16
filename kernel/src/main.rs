@@ -312,6 +312,31 @@ fn sleep_ms(ms: u64) {
     }
 }
 
+/// Whether the file open at `fd` is byte-for-byte `want`, read from wherever its
+/// offset currently sits.
+///
+/// The caller checks the length first, so this only has to walk it. 512 bytes at a
+/// time: the boot task's stack has to hold this, and the alternative -- one buffer the
+/// size of the biggest binary -- would be 16 KB of it.
+fn content_matches(fd: vfs::Fd, want: &[u8]) -> bool {
+    let mut off = 0usize;
+    let mut buf = [0u8; 512];
+    while off < want.len() {
+        let n = match vfs::read(fd, &mut buf) {
+            // Short of `want` and out of file: a mismatch, not a match by exhaustion.
+            Ok(0) => return false,
+            Ok(n) => n,
+            Err(_) => return false,
+        };
+        let end = off + n;
+        if end > want.len() || buf[..n] != want[off..end] {
+            return false;
+        }
+        off = end;
+    }
+    true
+}
+
 fn install_userland() {
     if userland_bin::USERLAND_BINARIES.is_empty() {
         println!("[kernel] userland not embedded");
@@ -327,11 +352,20 @@ fn install_userland() {
         let mut match_exists = false;
         let read_flags = vfs::OpenFlags(vfs::OpenFlags::RDONLY.0);
         if let Ok(fd) = vfs::open(&path, read_flags) {
-            if let Ok(inode) = vfs::get_inode(fd) {
-                if inode.size() == bytes.len() as u64 {
-                    match_exists = true;
-                }
-            }
+            // Length first because it is free and rules out most of the work -- but
+            // length was the ENTIRE test, and it is blind to every change that does not
+            // move it, which is most of them. Changing list("/") to list(".") in ls.rs
+            // builds a 13440-byte binary either way (measured, both ways), so /bin/ls
+            // went on running the previous build across reflash after reflash. EspFs
+            // persists, so "for now" meant "until someone erases the flash".
+            //
+            // A deployer that silently ships the last build is worse than one that
+            // always rewrites: it makes every test downstream a test of the wrong code,
+            // and says nothing.
+            let size_ok = vfs::get_inode(fd)
+                .map(|i| i.size() == bytes.len() as u64)
+                .unwrap_or(false);
+            match_exists = size_ok && content_matches(fd, bytes);
             let _ = vfs::close(fd);
         }
 

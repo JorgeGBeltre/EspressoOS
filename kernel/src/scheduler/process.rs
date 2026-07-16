@@ -33,7 +33,16 @@ pub struct Process {
     /// Working directory. Per process, not global: two sessions must be able to
     /// `cd` independently, and a child has to inherit its parent's cwd the way it
     /// inherits the fd table.
-    pub cwd: String,
+    ///
+    /// Private, like `by_tid` and for the same reason. It has two writers -- `cwd_set`
+    /// and `register_process`, which seeds it from the parent -- and once the VFS
+    /// resolves relative paths against it, "this string is absolute and normalized"
+    /// stops being a nicety and becomes something every path in the kernel depends on.
+    /// An invariant with two writers is only as good as the discipline of the second;
+    /// an invariant whose field cannot be named from outside this module has no third.
+    ///
+    /// It costs nothing: the only readers were already in here.
+    cwd: String,
 
     pub pending_signals: u32,
     pub signal_handlers: [usize; 32],
@@ -155,6 +164,16 @@ pub fn register_process(
     let pid = pt.next_pid;
     pt.next_pid += 1;
 
+    // The cwd's second writer. It does not validate, and does not need to: both of its
+    // sources are already valid. "/" is, and a parent's cwd is whatever cwd_set last
+    // normalized into it -- or, inductively, what ITS parent was registered with. The
+    // base case is every process with no parent, which gets the literal.
+    //
+    // That argument only holds while `cwd_set` and this are the only two writers, which
+    // is what the private field buys and why it is private.
+    //
+    // Note this cannot call cwd_set to reuse its validation even if it wanted to: the
+    // guard is already held here, and cwd_set takes it again.
     let parent_pid = pt.pid_of_tid(current_tid);
     let cwd = parent_pid
         .and_then(|p| pt.table.get(&p))
@@ -194,33 +213,66 @@ pub fn register_process(
     pid
 }
 
-/// The calling process's working directory, or "/" for a task that has no process
-/// (the net and heartbeat tasks). They never resolve paths, so the fallback only
-/// exists to keep this total.
-pub fn cwd_get() -> String {
-    let pid = match get_current_pid() {
-        Some(p) => p,
-        None => return String::from("/"),
-    };
-    PROCESS_TABLE
-        .lock()
-        .table
-        .get(&pid)
-        .map(|p| p.cwd.clone())
-        .unwrap_or_else(|| String::from("/"))
+/// The calling process's working directory, or None if the caller has no process.
+///
+/// The None is the point. Plenty of kernel code runs on a task with no process entry
+/// -- the boot code, the net task, the heartbeat -- and those tasks DO resolve paths:
+/// the net task reads /etc/passwd on every SSH password attempt, and the boot task
+/// writes /bin and /etc. Today that is harmless because every one of those paths is an
+/// absolute literal and normalize rejects anything else outright, so "what is the cwd
+/// of a task with no process" never gets asked.
+///
+/// Once the VFS resolves relative paths, it gets asked on every call, and answering
+/// "/" would be a silent lie: a relative path from the net task would quietly read
+/// some file under the root instead of failing. So the question has an answer that
+/// means "there isn't one", and the VFS turns that into InvalidArgument -- exactly
+/// what those callers get today.
+pub fn cwd_of_caller() -> Option<String> {
+    let pid = get_current_pid()?;
+    PROCESS_TABLE.lock().table.get(&pid).map(|p| p.cwd.clone())
 }
 
-/// Sets the calling process's working directory. `path` must already be absolute
-/// and normalized.
-pub fn cwd_set(path: &str) {
-    let pid = match get_current_pid() {
-        Some(p) => p,
-        None => return,
-    };
-    if let Some(proc) = PROCESS_TABLE.lock().table.get_mut(&pid) {
-        proc.cwd.clear();
-        proc.cwd.push_str(path);
-    }
+/// The calling process's working directory, or "/" for a task that has no process.
+///
+/// The total version, for display and for the shell -- which always has a process, so
+/// the fallback never fires there. Anything deciding where a relative path points must
+/// use `cwd_of_caller` instead and handle the None; see its doc for why.
+pub fn cwd_get() -> String {
+    cwd_of_caller().unwrap_or_else(|| String::from("/"))
+}
+
+/// Sets the calling process's working directory, normalizing and validating `path`.
+///
+/// This used to take an already-absolute path on trust, documented and unenforced.
+/// That was survivable while the cwd was a shell-local nicety: a bad one made `pwd`
+/// lie and nothing else. It stops being survivable when the VFS resolves relative
+/// paths against it, because then it is an input to every path resolution in the
+/// kernel -- and it would fail open, not closed. `mount::resolve` never re-checks
+/// absoluteness after normalize, and `split_components` splits "tmp/foo" into exactly
+/// the same components as "/tmp/foo", so a relative cwd would resolve against the root
+/// and silently hit the wrong file rather than erroring.
+///
+/// The normalize MUST stay outside the lock. It reads as a stylistic choice today and
+/// it is not: once normalize consults the cwd for relative paths, it calls
+/// `cwd_of_caller`, which takes PROCESS_TABLE. Doing that under this function's own
+/// guard is same-lock reentry, and this Mutex answers that by wedging the core with
+/// interrupts off -- no panic, no message. The guard is bound to a name rather than
+/// left as an `if let` scrutinee temporary for the same reason: so that its lifetime
+/// is something you can see instead of something you have to know.
+pub fn cwd_set(path: &str) -> KResult<()> {
+    // Outside the lock. Not a style preference -- see above.
+    let norm = crate::vfs::mount::normalize(path)?;
+    debug_assert!(
+        norm.starts_with('/'),
+        "normalize returned a relative path; the cwd would resolve against the root"
+    );
+
+    let pid = get_current_pid().ok_or(KError::NotFound)?;
+    let mut pt = PROCESS_TABLE.lock();
+    let proc = pt.table.get_mut(&pid).ok_or(KError::NotFound)?;
+    proc.cwd.clear();
+    proc.cwd.push_str(&norm);
+    Ok(())
 }
 
 /// Reports whether `pid` is finished: either sitting Zombie, or already reaped.

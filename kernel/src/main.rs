@@ -369,7 +369,14 @@ fn install_userland() {
             let _ = vfs::close(fd);
         }
 
-        if match_exists {
+        // DIAGNOSTIC (temporary): force every binary to redeploy this boot, so the
+        // verify-after-write below actually runs. The hang only appeared on a boot that
+        // rewrote /bin/ls, and rewrites are rare -- content_matches skips a binary whose
+        // bytes already match. Forcing keeps the near-full flash state (no erase) so a
+        // compaction, if that is what corrupts the write, still fires. Flip to false
+        // once the read-back verification has told us whether the write is the problem.
+        const DIAG_FORCE_REDEPLOY: bool = true;
+        if match_exists && !DIAG_FORCE_REDEPLOY {
             continue;
         }
 
@@ -380,11 +387,59 @@ fn install_userland() {
         );
         match vfs::open(&path, flags) {
             Ok(fd) => {
-                let _ = vfs::write(fd, bytes);
+                // The write result used to be discarded. A short write -- a record that
+                // did not fit, a NoSpace after a compaction -- left the binary truncated
+                // and still logged "Deployed", and a truncated ELF is exactly the kind
+                // of thing that loads far enough to jump into and then wanders off into
+                // an instruction that neither faults nor returns.
+                let wrote = vfs::write(fd, bytes);
                 let _ = vfs::close(fd);
+                match wrote {
+                    Ok(w) if w == bytes.len() => {}
+                    Ok(w) => {
+                        println!(
+                            "[kernel] ERROR: /bin/{} short write: {} of {} bytes -- removing",
+                            name, w, bytes.len()
+                        );
+                        let _ = vfs::unlink(&path);
+                        continue;
+                    }
+                    Err(e) => {
+                        println!("[kernel] ERROR: /bin/{} write failed: {:?} -- removing", name, e);
+                        let _ = vfs::unlink(&path);
+                        continue;
+                    }
+                }
+
+                // Read it straight back. If what the filesystem returns now is not what
+                // was just written, the file on flash is corrupt, and running it would
+                // hang or fault. Better to find that here, loudly, at boot, than to hand
+                // load_elf a bad image. Removing it turns a silent hang into an honest
+                // "command not found".
+                let verified = match vfs::open(&path, read_flags) {
+                    Ok(vfd) => {
+                        let ok = vfs::get_inode(vfd)
+                            .map(|i| i.size() == bytes.len() as u64)
+                            .unwrap_or(false)
+                            && content_matches(vfd, bytes);
+                        let _ = vfs::close(vfd);
+                        ok
+                    }
+                    Err(_) => false,
+                };
+                if !verified {
+                    println!(
+                        "[kernel] ERROR: /bin/{} FAILED read-back verification -- removing. \
+                         The write reached flash wrong; this is the deploy corruption.",
+                        name
+                    );
+                    let _ = vfs::unlink(&path);
+                    continue;
+                }
+
                 n += 1;
                 println!(
-                    "[kernel] Deployed /bin/{} ({} bytes) to EspFs",
+                    "[kernel] Deployed /bin/{} ({} bytes) to EspFs [verified]",
                     name,
                     bytes.len()
                 );

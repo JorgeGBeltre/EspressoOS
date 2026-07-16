@@ -89,7 +89,6 @@ EspressoOS **boots and runs on a physical ESP32-S3**, is reachable over SSH, and
 > - **A pipeline stage is always a `/bin` program, never a built-in.** A built-in runs inside the shell's own task, so it cannot run concurrently with the rest — and running the stages one after another is not a simplification but a deadlock, since the first would fill the 4 KB pipe with nobody draining it. There is no `fork` here to escape with. `wifi | cat` therefore fails with a clear error rather than doing something surprising.
 > - **`ls`, `cat` and `echo` exist twice** — as built-ins and as `/bin` programs — and the two do not agree yet. `echo`, `cat` and `ls` in `/bin` honour argv; the other userland programs still ignore it.
 > - **Userland cannot see its own working directory.** The kernel keeps a cwd per process, but there is no `getcwd` syscall and `vfs::mount::normalize` rejects any path not starting with `/`. So after `cd /tmp`, the built-in `ls` lists `/tmp` and `/bin/ls` lists `/`.
-> - **No syscall validates a user pointer.** `sys_wait` writes the exit status wherever it is told; `user_slice` only checks for null. Harmless while every userland program is ours, but it is an arbitrary kernel write waiting for a program with a bug.
 > - If an SSH client stops reading, the shell task spins yielding until it drains — a livelock, not a hang: the scheduler is round-robin, so the drain task still runs.
 > - `scan` disconnects, scans and reconnects, so it drops any SSH session over Wi-Fi (§4).
 > - OTA is built into the default image and has never been verified end to end against the stock bootloader.
@@ -437,6 +436,7 @@ Anything the table above does not name is looked up in `/bin`, so `/bin/echo hol
 | `/bin/cat [FILE...]` | ✅ honours argv; no arguments reads **stdin**, which is what makes it useful in a pipeline |
 | `/bin/ls [PATH...]` | ✅ honours argv; no arguments lists `/` (a program cannot see its cwd — see Next Steps) |
 | `/bin/sleep` | ✅ holds a slot for 3 s; exists to test that two images coexist |
+| `/bin/badptr` | ✅ self-test: hands the kernel four pointers it does not own and expects `EFAULT` from each, plus a control that must succeed |
 | `/bin/init`, `/bin/sh`, `/bin/ota`, `/bin/ping`, `/bin/sntp`, `/bin/netstat`, `/bin/httpd` | ⚠️ run, but ignore their arguments |
 
 ```
@@ -591,12 +591,11 @@ Structured into 10 incremental phases. Bring-up (P0), memory/PSRAM (P1), **preem
 
 **Next steps**, roughly in order of how soon each one bites:
 
-1. **Validate user pointers in syscalls.** `sys_wait` writes the exit status to whatever address it is handed, and `user_slice` only rejects null. That was academic while nothing ran in userland; now that programs take arguments and read stdin, it is an arbitrary kernel write one bug away. This should land before the userland grows.
-2. **Teach the rest of the userland argv.** `echo`, `cat` and `ls` honour it; `ota`, `ping`, `sntp`, `netstat`, `httpd`, `init` and `sh` take `(_argc, _argv)` and ignore them. Until then a built-in and its `/bin` twin can disagree.
-3. **Give userland its working directory** — either a `getcwd` syscall, or have `vfs::mount::resolve` resolve relative paths against the calling process's cwd, which is what POSIX does and would make the shell's own `resolve()` redundant. Today the kernel tracks a cwd that no program can read.
-4. **Run [`/etc/rc`](kernel/src/main.rs).** It is written on every boot and never executed — a userland init nearly for free, now that `exec` exists.
-5. **Verify OTA end to end** — `ota_0` and `otadata` are reachable and the table on the chip is finally the right one, so this can be tested for the first time.
-6. **Own bootloader** → Multiboot 2, to drop the ESP-IDF second stage.
+1. **Teach the rest of the userland argv.** `echo`, `cat` and `ls` honour it; `ota`, `ping`, `sntp`, `netstat`, `httpd`, `init` and `sh` take `(_argc, _argv)` and ignore them. Until then a built-in and its `/bin` twin can disagree.
+2. **Give userland its working directory** — either a `getcwd` syscall, or have `vfs::mount::resolve` resolve relative paths against the calling process's cwd, which is what POSIX does and would make the shell's own `resolve()` redundant. Today the kernel tracks a cwd that no program can read.
+3. **Run [`/etc/rc`](kernel/src/main.rs).** It is written on every boot and never executed — a userland init nearly for free, now that `exec` exists.
+4. **Verify OTA end to end** — `ota_0` and `otadata` are reachable and the table on the chip is finally the right one, so this can be tested for the first time.
+5. **Own bootloader** → Multiboot 2, to drop the ESP-IDF second stage.
 
 ---
 

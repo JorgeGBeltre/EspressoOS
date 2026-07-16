@@ -118,10 +118,18 @@ pub fn exit(code: i32) -> ! {
     loop {}
 }
 
-pub fn spawn(path: &str, entry: usize, arg: usize, stack_size: usize, priority: usize) -> isize {
-    unsafe {
-        syscall(6, path.as_ptr() as usize, path.len(), entry, arg, stack_size, priority)
-    }
+/// Starts `path` and returns its pid.
+///
+/// `argv` is a NULL-terminated array of NUL-terminated strings, exactly as execve
+/// takes one, or null for no arguments -- in which case the child gets `[path]`, so
+/// argv[0] always exists. By convention argv[0] is the name as the user typed it, not
+/// the resolved path.
+///
+/// The kernel copies argv into the child's memory before returning, so it does not
+/// have to outlive this call. Passing a pointer this process does not own returns
+/// EFAULT rather than corrupting anything, which is why this is not `unsafe`.
+pub fn spawn(path: &str, argv: *const *const u8) -> isize {
+    unsafe { syscall(6, path.as_ptr() as usize, path.len(), argv as usize, 0, 0, 0) }
 }
 
 pub fn wait(status: &mut i32) -> isize {

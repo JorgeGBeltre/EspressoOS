@@ -301,3 +301,66 @@ fn apply_fixups(
     }
     Ok(())
 }
+
+/// Writes the argv blob into the top of a freshly loaded program's data slot and
+/// returns a pointer to it, which is what the child's task entry receives.
+///
+/// `argv[0]` is the program name, as in C. Layout, in the child's own addresses:
+///
+///     [argc: u32][argv[0]]..[argv[argc-1]][NULL][argv[0]\0][argv[1]\0]..
+///
+/// argc leads so `_start` can unpack both of main's parameters from the single
+/// usize the kernel passes: argc is `*blob` and argv is `blob + 4`.
+///
+/// It goes at the TOP of the slot growing down, not after .bss, so that its address
+/// does not move when the program's data does. The pointers inside are the child's
+/// final addresses -- the blob is built after the image is placed, so nothing about
+/// it needs relocating.
+///
+/// It lives and dies with the slot: no allocation, and slot_free takes it with the
+/// image.
+///
+/// Lives here rather than in the shell because both ways to start a program need it,
+/// and they are in different crates' worth of the tree: the kernel shell's
+/// `spawn_child`, and `sys_spawn` for a userland parent like /bin/sh. When only the
+/// shell had it, sys_spawn passed 0 as the task argument and every program it started
+/// took a LoadProhibited on `_start`'s first instruction.
+pub fn write_argv(loaded: &LoadedElf, argv: &[&str]) -> KResult<usize> {
+    let argc = argv.len();
+    let ptrs_len = 4 + (argc + 1) * 4;
+    let strs_len = argv.iter().map(|a| a.len() + 1).sum::<usize>();
+    let blob_len = (ptrs_len + strs_len + 3) & !3;
+
+    let slot = SLOT_SIZE as usize;
+    if blob_len > slot {
+        return Err(KError::NoSpace);
+    }
+    let off = slot - blob_len;
+    // The image's .bss ends at data_size; below that is the program's own memory.
+    if off < loaded.data_size as usize {
+        return Err(KError::NoSpace);
+    }
+
+    let base = loaded.data_base as usize + off;
+    let mut ptr_at = base + 4;
+    let mut str_at = base + ptrs_len;
+
+    unsafe {
+        *(base as *mut u32) = argc as u32;
+        for s in argv {
+            *(ptr_at as *mut u32) = str_at as u32;
+            core::ptr::copy_nonoverlapping(s.as_ptr(), str_at as *mut u8, s.len());
+            *((str_at + s.len()) as *mut u8) = 0;
+            ptr_at += 4;
+            str_at += s.len() + 1;
+        }
+        // argv is NULL-terminated as well as counted, so a program can walk it
+        // either way.
+        *(ptr_at as *mut u32) = 0;
+    }
+
+    // No sync_caches: this is the data bus on both sides. The image needed it
+    // because its code was written through the data alias and fetched through the
+    // instruction bus; argv is written and read through the same cache.
+    Ok(base)
+}

@@ -37,7 +37,14 @@ pub fn run_session(user: Option<&str>) {
     //
     // Here rather than in main.rs's loop so that both callers get the contract,
     // including any future one that forgets to ask for it.
-    commands::cwd_set("/");
+    //
+    // The only way this fails is a caller with no process, and a session always has
+    // one -- it is what the session IS. Reported rather than dropped anyway: a session
+    // that silently started in someone else's directory is the bug this line exists to
+    // fix, and a silent failure here would reintroduce it wearing a fix's clothes.
+    if let Err(e) = commands::cwd_set("/") {
+        out(alloc::format!("shell: cannot reset the working directory: {:?}\n", e).as_bytes());
+    }
 
     out(b"\nEspressoOS shell. Type 'help' to see the commands.\n");
 

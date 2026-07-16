@@ -21,11 +21,8 @@ pub fn cwd_get() -> String {
     scheduler::process::cwd_get()
 }
 
-/// `path` must already be absolute and normalized -- an invariant this does not yet
-/// enforce, and which becomes load-bearing rather than cosmetic once the VFS resolves
-/// relative paths against it.
-pub fn cwd_set(path: &str) {
-    scheduler::process::cwd_set(path);
+pub fn cwd_set(path: &str) -> KResult<()> {
+    scheduler::process::cwd_set(path)
 }
 
 fn norm_abs(path: &str) -> String {
@@ -776,16 +773,21 @@ fn cmd_cd(args: &[&str]) -> i32 {
     let target = args.first().copied().unwrap_or("/");
     let abs = resolve(target);
 
-    match vfs::readdir(&abs) {
-        Ok(_) => {
-            scheduler::process::cwd_set(&abs);
-            0
-        }
-        Err(e) => {
-            eprint_line(&format!("cd: {}: {}", target, err_str(e)));
-            1
-        }
+    // readdir first, so that `cd` to a file or a missing directory is reported as
+    // such. cwd_set validates too, but only that the path is well formed -- it has no
+    // opinion on whether it exists.
+    if let Err(e) = vfs::readdir(&abs) {
+        eprint_line(&format!("cd: {}: {}", target, err_str(e)));
+        return 1;
     }
+    // Propagated rather than dropped. It used to return 0 no matter what cwd_set did,
+    // so a `cd` that did not take reported success and the next command silently ran
+    // in the old directory.
+    if let Err(e) = scheduler::process::cwd_set(&abs) {
+        eprint_line(&format!("cd: {}: {}", target, err_str(e)));
+        return 1;
+    }
+    0
 }
 
 fn cmd_pwd() -> i32 {

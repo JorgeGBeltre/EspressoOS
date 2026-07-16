@@ -72,6 +72,7 @@ NO_SPACE = "NoSpace"
 #   (">",)         -> Token::RedirectOut
 #   (">>",)        -> Token::RedirectAppend
 #   ("|",)         -> Token::Pipe
+#   (";",)         -> Token::Semi
 #
 # Representacion de Redirect:
 #   ("none",)          -> Redirect::None
@@ -143,6 +144,12 @@ def tokenize(line: str):
                     current = []
                     has_word = False
                 tokens.append(("|",))
+            elif c == ";":
+                if has_word:
+                    tokens.append(W("".join(current)))
+                    current = []
+                    has_word = False
+                tokens.append((";",))
             elif c == ">":
                 if has_word:
                     tokens.append(W("".join(current)))
@@ -183,9 +190,8 @@ def _build_command(words: List[str], redirect_holder: List) -> Command:
     return Command(name=name, args=args, redirect=redir)
 
 
-def parse_pipeline(line: str) -> List[Command]:
-    """Espeja parser.rs::parse_pipeline."""
-    tokens = tokenize(line)
+def _pipeline_from_tokens(tokens: List) -> List[Command]:
+    """Espeja parser.rs::pipeline_from_tokens."""
     if not tokens:
         return []
 
@@ -213,12 +219,45 @@ def parse_pipeline(line: str) -> List[Command]:
             pending = True
         elif kind == "|":
             commands.append(_build_command(words, redirect_holder))
+        elif kind == ";":
+            # parse_line los quita antes de llamar aqui.
+            raise KError(INVALID_ARGUMENT)
 
     if pending is not None:
         raise KError(INVALID_ARGUMENT)
 
     commands.append(_build_command(words, redirect_holder))
     return commands
+
+
+def parse_line(line: str) -> List[List[Command]]:
+    """Espeja parser.rs::parse_line.
+
+    `;` separa tuberias que corren una detras de otra; `|` separa las etapas de
+    una. Los dos los reconoce el tokenizador, asi que las comillas protegen a los
+    dos: `echo "a;b"` es una sola palabra.
+    """
+    out: List[List[Command]] = []
+    segment: List = []
+
+    for tok in tokenize(line):
+        if tok[0] == ";":
+            # Un segmento vacio no separa nada: `ls ;` es una orden y `ls ;; cat`
+            # son dos. Se salta en vez de ser error de sintaxis, que es lo que hace
+            # cualquier shell y lo que vuelve inofensivo un `;` final.
+            if segment:
+                out.append(_pipeline_from_tokens(segment))
+                segment = []
+        else:
+            segment.append(tok)
+    if segment:
+        out.append(_pipeline_from_tokens(segment))
+    return out
+
+
+def parse_pipeline(line: str) -> List[Command]:
+    """Espeja parser.rs::parse_pipeline. Una sola tuberia; rechaza `;`."""
+    return _pipeline_from_tokens(tokenize(line))
 
 
 def parse(line: str) -> Optional[Command]:
@@ -236,13 +275,30 @@ def parse(line: str) -> Optional[Command]:
 MAX_NAME_LEN = 255
 
 
-def normalize(path: str) -> str:
-    """Espeja mount.rs::normalize."""
-    if not path.startswith("/"):
+def normalize_against(base: str, path: str) -> str:
+    """Espeja mount.rs::normalize_against.
+
+    La mitad PURA de la normalizacion. La otra mitad, `mount::normalize`, resuelve
+    una ruta relativa contra el cwd del proceso llamante consultando la tabla de
+    procesos -- eso no se puede espejar aqui y no se intenta. Lo que se espeja es
+    todo lo que decide QUE significa una ruta; lo que queda fuera es solo QUIEN
+    pregunta, que en el Rust es una sola linea.
+    """
+    # Primero de todo: "" no es una ruta relativa, no nombra nada. Sin esto caeria
+    # al join y saldria como `base`, o sea el cwd del llamante -- y `unlink(x, 0)`
+    # llega hasta aqui como "" sin puntero valido ninguno.
+    if path == "":
         raise KError(INVALID_ARGUMENT)
 
+    # Una ruta absoluta ignora la base. Comprobado aqui y no como precondicion del
+    # llamador, para que la funcion no se pueda llamar mal.
+    if path.startswith("/"):
+        base = ""
+
     comps: List[str] = []
-    for part in path.split("/"):
+    # Los componentes de la base primero, luego los de la ruta: eso es lo que
+    # significa "relativa a", y es lo que deja que ".." cruce la union.
+    for part in base.split("/") + path.split("/"):
         if part == "" or part == ".":
             pass
         elif part == "..":
@@ -714,43 +770,121 @@ class TestShellParser(unittest.TestCase):
         self.assertEqual(cmd, Command("echo", ["hi"], ("trunc", "out")))
 
 
+class TestShellSemi(unittest.TestCase):
+    def test_separa_ordenes(self):
+        pipes = parse_line("mkdir a ; cd a")
+        self.assertEqual(len(pipes), 2)
+        self.assertEqual(pipes[0][0], Command("mkdir", ["a"], ("none",)))
+        self.assertEqual(pipes[1][0], Command("cd", ["a"], ("none",)))
+
+    def test_sin_espacios_alrededor(self):
+        pipes = parse_line("pwd;ls")
+        self.assertEqual(len(pipes), 2)
+        self.assertEqual(pipes[0][0].name, "pwd")
+        self.assertEqual(pipes[1][0].name, "ls")
+
+    def test_las_comillas_protegen_el_punto_y_coma(self):
+        # LA razon de que `;` sea un token y no un line.split(';') previo. Con split
+        # esto se partiria en dos y `echo` recibiria "a como argumento.
+        pipes = parse_line('echo "a;b"')
+        self.assertEqual(len(pipes), 1)
+        self.assertEqual(pipes[0][0], Command("echo", ["a;b"], ("none",)))
+        pipes = parse_line("echo 'x ; y'")
+        self.assertEqual(len(pipes), 1)
+        self.assertEqual(pipes[0][0].args, ["x ; y"])
+
+    def test_punto_y_coma_final_o_repetido_es_inofensivo(self):
+        for linea in ("ls ;", "ls ; ", " ; ls", "ls ;; pwd", ";;;"):
+            parse_line(linea)  # no lanza
+        self.assertEqual(len(parse_line("ls ;")), 1)
+        self.assertEqual(len(parse_line("ls ;; pwd")), 2)
+        self.assertEqual(parse_line(";;;"), [])
+
+    def test_convive_con_tuberias_y_redirecciones(self):
+        pipes = parse_line("ls | cat ; echo hi > f")
+        self.assertEqual(len(pipes), 2)
+        self.assertEqual(len(pipes[0]), 2)  # ls | cat
+        self.assertEqual(pipes[1][0], Command("echo", ["hi"], ("trunc", "f")))
+
+    def test_error_de_sintaxis_en_una_orden_invalida_toda_la_linea(self):
+        # La linea entera se parsea antes de ejecutar nada, asi que `rm x ; echo >`
+        # no debe borrar x y luego quejarse.
+        with self.assertRaises(KError):
+            parse_line("rm x ; echo >")
+
+    def test_parse_pipeline_rechaza_el_punto_y_coma(self):
+        with self.assertRaises(KError) as cm:
+            parse_pipeline("ls ; cat")
+        self.assertEqual(cm.exception.code, INVALID_ARGUMENT)
+
+
 class TestVfsNormalize(unittest.TestCase):
     def test_normaliza_raiz(self):
         for p in ("/", "///", "/.", "/..", "/../.."):
-            self.assertEqual(normalize(p), "/")
+            self.assertEqual(normalize_against("", p), "/")
 
     def test_colapsa_barras_y_puntos(self):
-        self.assertEqual(normalize("/a//b"), "/a/b")
-        self.assertEqual(normalize("/a/./b"), "/a/b")
-        self.assertEqual(normalize("/a/b/"), "/a/b")
-        self.assertEqual(normalize("//a///b////c//"), "/a/b/c")
+        self.assertEqual(normalize_against("", "/a//b"), "/a/b")
+        self.assertEqual(normalize_against("", "/a/./b"), "/a/b")
+        self.assertEqual(normalize_against("", "/a/b/"), "/a/b")
+        self.assertEqual(normalize_against("", "//a///b////c//"), "/a/b/c")
 
     def test_resuelve_punto_punto(self):
-        self.assertEqual(normalize("/a/../b"), "/b")
-        self.assertEqual(normalize("/a/b/../c"), "/a/c")
-        self.assertEqual(normalize("/a/b/../../c"), "/c")
-        self.assertEqual(normalize("/a/../../b"), "/b")
-        self.assertEqual(normalize("/dev/../tmp/./x"), "/tmp/x")
+        self.assertEqual(normalize_against("", "/a/../b"), "/b")
+        self.assertEqual(normalize_against("", "/a/b/../c"), "/a/c")
+        self.assertEqual(normalize_against("", "/a/b/../../c"), "/c")
+        self.assertEqual(normalize_against("", "/a/../../b"), "/b")
+        self.assertEqual(normalize_against("", "/dev/../tmp/./x"), "/tmp/x")
 
     def test_punto_punto_por_encima_de_raiz(self):
-        self.assertEqual(normalize("/a/b/../../../c"), "/c")
+        self.assertEqual(normalize_against("", "/a/b/../../../c"), "/c")
 
-    def test_rechaza_relativas(self):
-        for p in ("a/b", "", "./x"):
+    def test_rechaza_vacias(self):
+        # "" no es una ruta relativa: no nombra nada. Este test se llamaba
+        # `test_rechaza_relativas` y cubria tres cadenas que fallaban por el mismo
+        # motivo accidental (ninguna empieza por "/"). Ya no es el mismo motivo:
+        # "a/b" y "./x" ahora se resuelven contra la base, y solo "" sigue siendo
+        # un error. Es la unica cadena que NO debe recoger la base.
+        for base in ("", "/", "/tmp", "/tmp/x"):
             with self.assertRaises(KError) as cm:
-                normalize(p)
+                normalize_against(base, "")
             self.assertEqual(cm.exception.code, INVALID_ARGUMENT)
+
+    def test_resuelve_relativas_contra_la_base(self):
+        self.assertEqual(normalize_against("/tmp", "x"), "/tmp/x")
+        self.assertEqual(normalize_against("/tmp", "./x"), "/tmp/x")
+        self.assertEqual(normalize_against("/tmp", "a/b"), "/tmp/a/b")
+        self.assertEqual(normalize_against("/", "a/b"), "/a/b")
+
+    def test_relativa_nombra_el_cwd_y_su_padre(self):
+        # Lo que hace que `rm .` sea por fin expresable en la frontera del VFS, en
+        # vez de llegar ya colapsado por el shell.
+        self.assertEqual(normalize_against("/tmp", "."), "/tmp")
+        self.assertEqual(normalize_against("/tmp/x", ".."), "/tmp")
+
+    def test_punto_punto_cruza_la_union(self):
+        # La razon de que la base entre como componentes y no como prefijo de texto.
+        self.assertEqual(normalize_against("/tmp/x", "../y"), "/tmp/y")
+        self.assertEqual(normalize_against("/a/b/c", "../../d"), "/a/d")
+
+    def test_relativa_no_escapa_por_debajo_de_la_raiz(self):
+        self.assertEqual(normalize_against("/", ".."), "/")
+        self.assertEqual(normalize_against("/tmp", "../../.."), "/")
+
+    def test_absoluta_ignora_la_base(self):
+        self.assertEqual(normalize_against("/tmp", "/a/b"), "/a/b")
+        self.assertEqual(normalize_against("/tmp/x", "/"), "/")
 
     def test_nombre_demasiado_largo(self):
         largo = "/" + "a" * (MAX_NAME_LEN + 1)
         with self.assertRaises(KError) as cm:
-            normalize(largo)
+            normalize_against("", largo)
         self.assertEqual(cm.exception.code, NAME_TOO_LONG)
 
     def test_nombre_en_el_limite_ok(self):
         # exactamente MAX_NAME_LEN caracteres: valido.
         justo = "/" + "a" * MAX_NAME_LEN
-        self.assertEqual(normalize(justo), justo)
+        self.assertEqual(normalize_against("", justo), justo)
 
     def test_split_parent(self):
         self.assertEqual(split_parent("/foo/bar"), ("/foo", "bar"))

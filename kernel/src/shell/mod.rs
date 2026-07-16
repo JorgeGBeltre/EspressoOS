@@ -125,17 +125,23 @@ pub(crate) fn execute_line(line: &str) {
 }
 
 fn execute(line: &str) {
-    match parser::parse_pipeline(line) {
-        Ok(pipeline) => {
-            if pipeline.is_empty() {
-                return;
-            }
-            if pipeline.len() > 1 {
-                // Every stage of a pipeline is a /bin program, so this path skips
-                // the built-in table entirely. See commands::run_pipeline.
-                commands::run_pipeline(&pipeline);
-            } else if let Some(cmd) = pipeline.into_iter().next() {
-                run_command(&cmd);
+    match parser::parse_line(line) {
+        Ok(pipelines) => {
+            // `;` separates pipelines that run in sequence. Unconditionally, like sh:
+            // a failing command does not stop the ones after it -- that is what `&&`
+            // would be for, and there is no `&&`.
+            //
+            // The whole line is parsed before any of it runs, so a syntax error in the
+            // third command means the first two do not execute either. That is the
+            // right way round: `rm x ; hcd` should not delete x and then complain.
+            for pipeline in pipelines {
+                if pipeline.len() > 1 {
+                    // Every stage of a pipeline is a /bin program, so this path skips
+                    // the built-in table entirely. See commands::run_pipeline.
+                    commands::run_pipeline(&pipeline);
+                } else if let Some(cmd) = pipeline.into_iter().next() {
+                    run_command(&cmd);
+                }
             }
         }
         Err(e) => {

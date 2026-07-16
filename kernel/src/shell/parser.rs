@@ -27,6 +27,14 @@ pub enum Token {
     RedirectAppend,
 
     Pipe,
+
+    /// `;` -- the boundary between two pipelines that run one after the other.
+    ///
+    /// A token and not a `line.split(';')` before tokenizing, because splitting the
+    /// raw string would cut `echo "a;b"` in half. Protecting a separator inside quotes
+    /// is the entire reason this tokenizer exists; a second separator that ignored it
+    /// would be a hole in the thing it is for.
+    Semi,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -99,6 +107,13 @@ pub fn tokenize(line: &str) -> KResult<Vec<Token>> {
                     }
                     tokens.push(Token::Pipe);
                 }
+                ';' => {
+                    if has_word {
+                        tokens.push(Token::Word(core::mem::take(&mut current)));
+                        has_word = false;
+                    }
+                    tokens.push(Token::Semi);
+                }
                 '>' => {
                     if has_word {
                         tokens.push(Token::Word(core::mem::take(&mut current)));
@@ -143,8 +158,9 @@ fn build_command(words: &mut Vec<String>, redirect: &mut Redirect) -> KResult<Co
     })
 }
 
-pub fn parse_pipeline(line: &str) -> KResult<Vec<Command>> {
-    let tokens = tokenize(line)?;
+/// One pipeline's worth of tokens -> its stages. `Semi` never reaches here; parse_line
+/// is what splits on it.
+fn pipeline_from_tokens(tokens: Vec<Token>) -> KResult<Vec<Command>> {
     if tokens.is_empty() {
         return Ok(Vec::new());
     }
@@ -179,6 +195,10 @@ pub fn parse_pipeline(line: &str) -> KResult<Vec<Command>> {
                 let cmd = build_command(&mut words, &mut redirect)?;
                 commands.push(cmd);
             }
+            // parse_line strips every Semi before calling this, so reaching one means
+            // the two disagree. Report it rather than assume; the arm has to exist
+            // either way.
+            Token::Semi => return Err(KError::InvalidArgument),
         }
     }
 
@@ -189,6 +209,44 @@ pub fn parse_pipeline(line: &str) -> KResult<Vec<Command>> {
     let last = build_command(&mut words, &mut redirect)?;
     commands.push(last);
     Ok(commands)
+}
+
+/// A whole line -> the pipelines it asks for, in order.
+///
+/// This is the entry point the shell uses. `;` separates pipelines that run one after
+/// the other; `|` separates the stages within one. Both are recognized by the
+/// tokenizer, so quoting protects both: `echo "a;b"` is one word and `echo 'a|b'` is
+/// too.
+///
+/// Before this existed, `;` was not a token at all and fell through to the word arm --
+/// so `mkdir a ; cd a` asked mkdir to create three directories, one of them named ";",
+/// and reported nothing. A shell that turns a standard separator into data silently is
+/// worse than one that has never heard of it.
+pub fn parse_line(line: &str) -> KResult<Vec<Vec<Command>>> {
+    let mut out: Vec<Vec<Command>> = Vec::new();
+    let mut segment: Vec<Token> = Vec::new();
+
+    for tok in tokenize(line)? {
+        if tok == Token::Semi {
+            // An empty segment separates nothing: `ls ;` is one command, and `ls ;; cat`
+            // is two. Skipped rather than treated as a syntax error, which is what every
+            // shell does and what makes a trailing `;` harmless.
+            if !segment.is_empty() {
+                out.push(pipeline_from_tokens(core::mem::take(&mut segment))?);
+            }
+        } else {
+            segment.push(tok);
+        }
+    }
+    if !segment.is_empty() {
+        out.push(pipeline_from_tokens(segment)?);
+    }
+    Ok(out)
+}
+
+/// One pipeline, rejecting `;`. Kept for the callers that want exactly one.
+pub fn parse_pipeline(line: &str) -> KResult<Vec<Command>> {
+    pipeline_from_tokens(tokenize(line)?)
 }
 
 pub fn parse(line: &str) -> KResult<Option<Command>> {
@@ -320,6 +378,65 @@ mod tests {
         assert_eq!(stages[0].name, "ls");
         assert_eq!(stages[0].args, vec![String::from("-l")]);
         assert_eq!(stages[1].name, "cat");
+    }
+
+    // These, like every test in this file, never run: the kernel is a no_std binary
+    // with no lib target. tools/tests/logic_tests.py mirrors them and is the one that
+    // actually executes. Keep the two in step.
+
+    #[test]
+    fn semi_separa_ordenes() {
+        let pipes = parse_line("mkdir a ; cd a").unwrap();
+        assert_eq!(pipes.len(), 2);
+        assert_eq!(pipes[0][0].name, "mkdir");
+        assert_eq!(pipes[0][0].args, vec![String::from("a")]);
+        assert_eq!(pipes[1][0].name, "cd");
+    }
+
+    #[test]
+    fn semi_sin_espacios() {
+        let pipes = parse_line("pwd;ls").unwrap();
+        assert_eq!(pipes.len(), 2);
+    }
+
+    /// Why Semi is a token and not a `line.split(';')` before tokenizing. With a split,
+    /// this would become two commands and echo would be handed a stray quote.
+    #[test]
+    fn las_comillas_protegen_el_semi() {
+        let pipes = parse_line("echo \"a;b\"").unwrap();
+        assert_eq!(pipes.len(), 1);
+        assert_eq!(pipes[0][0].args, vec![String::from("a;b")]);
+        let pipes = parse_line("echo 'x ; y'").unwrap();
+        assert_eq!(pipes.len(), 1);
+        assert_eq!(pipes[0][0].args, vec![String::from("x ; y")]);
+    }
+
+    #[test]
+    fn semi_final_o_repetido_es_inofensivo() {
+        assert_eq!(parse_line("ls ;").unwrap().len(), 1);
+        assert_eq!(parse_line("ls ;; pwd").unwrap().len(), 2);
+        assert_eq!(parse_line(" ; ls").unwrap().len(), 1);
+        assert!(parse_line(";;;").unwrap().is_empty());
+    }
+
+    #[test]
+    fn semi_convive_con_tuberias_y_redirecciones() {
+        let pipes = parse_line("ls | cat ; echo hi > f").unwrap();
+        assert_eq!(pipes.len(), 2);
+        assert_eq!(pipes[0].len(), 2);
+        assert_eq!(pipes[1][0].redirect, Redirect::Truncate(String::from("f")));
+    }
+
+    /// The whole line is parsed before any of it runs, so `rm x ; echo >` must not
+    /// delete x and then complain.
+    #[test]
+    fn error_en_una_orden_invalida_toda_la_linea() {
+        assert_eq!(parse_line("rm x ; echo >"), Err(KError::InvalidArgument));
+    }
+
+    #[test]
+    fn parse_pipeline_rechaza_el_semi() {
+        assert_eq!(parse_pipeline("ls ; cat"), Err(KError::InvalidArgument));
     }
 
     #[test]

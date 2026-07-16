@@ -155,6 +155,25 @@ fn main() -> ! {
         println!("[kernel] warning: mount /sys failed: {:?}", e);
     }
 
+    // Every task with no process of its own -- this boot code, the net task, the
+    // heartbeat -- shares pid 0's fd table, via `get_current_pid().unwrap_or(0)` in
+    // vfs. It used to spring into existence on first use, and conjuring it is exactly
+    // what forced the VFS to resolve /dev/console while holding the fd lock. Seeding
+    // it here makes it something that was decided instead of something that happened,
+    // and it must be here: install_userland and init_etc_files below open files, and
+    // a missing table is now BadFd rather than a fresh one.
+    //
+    // The resolve is deliberately out here, not inside seed_fd_table -- resolving a
+    // path is what the fd lock must never be holding.
+    match vfs::mount::resolve("/dev/console") {
+        Ok(console) => {
+            if let Err(e) = vfs::seed_fd_table(0, console) {
+                println!("[kernel] warning: seeding the kernel fd table failed: {:?}", e);
+            }
+        }
+        Err(e) => println!("[kernel] warning: no /dev/console for the kernel fd table: {:?}", e),
+    }
+
     install_userland();
 
     init_etc_files();

@@ -66,23 +66,25 @@ impl FdTable {
     }
 }
 
-impl FdTable {
-    pub fn new_process_table() -> Self {
-        let mut table = Self::new();
-        if let Ok(inode) = mount::resolve("/dev/console") {
-            if let Ok(file_in) = OpenFile::new(inode.clone(), OpenFlags::RDONLY) {
-                let _ = table.insert(file_in);
-            }
-            if let Ok(file_out1) = OpenFile::new(inode.clone(), OpenFlags::WRONLY) {
-                let _ = table.insert(file_out1);
-            }
-            if let Ok(file_out2) = OpenFile::new(inode.clone(), OpenFlags::WRONLY) {
-                let _ = table.insert(file_out2);
-            }
-        }
-        table
-    }
-}
+// FdTable::new_process_table lived here: it built a table with 0/1/2 bound to
+// /dev/console, and eleven fd functions called it through
+// `tables.entry(pid).or_insert_with(...)`.
+//
+// It is gone rather than fixed, because as long as it existed the bug could be
+// written again. It did two bad things at once.
+//
+// It resolved a path with PROCESS_FD_TABLES held -- the only place in the VFS that
+// did. `open` has the right shape: resolve at the top, lock afterwards. That was inert
+// only because "/dev/console" is an absolute literal, and it stops being inert the
+// moment resolution can consult the caller's cwd: it would then take SCHED and
+// PROCESS_TABLE under the fd lock, while register_process already holds PROCESS_TABLE
+// across a call to clone_fd_table, which takes PROCESS_FD_TABLES. That is the cycle,
+// and on this Mutex a cycle is a silent wedge with the interrupts off, not a panic.
+//
+// And it made "this process has no fd table" unrepresentable. A caller with no
+// process, or one already reaped, silently got a brand-new table wired to the serial
+// port instead of an error. seed_fd_table below has carried a comment about that
+// hazard for a while; it is cheaper to delete the hazard than to keep documenting it.
 
 use crate::scheduler::process::Pid;
 use alloc::collections::BTreeMap;
@@ -96,6 +98,21 @@ pub fn init() -> KResult<()> {
 pub fn cleanup_process_fds(pid: Pid) {
     let mut tables = PROCESS_FD_TABLES.lock();
     tables.remove(&pid);
+}
+
+/// `pid`'s fd table, or BadFd if it has none.
+///
+/// A missing table is an error, never something to conjure. Every fd of a process
+/// that has one was put there deliberately: seed_fd_table at session start,
+/// clone_fd_table at fork, or an open. So the only callers that can miss are a task
+/// with no process and no seeded table, or a process already reaped -- and for both,
+/// every fd they could name is invalid, which is exactly what BadFd says.
+///
+/// The kernel's own pidless tasks reach this through `unwrap_or(0)`; pid 0's table is
+/// seeded at boot in main.rs, next to the mounts, so that "no table" cannot mean "not
+/// booted yet".
+fn table_of(tables: &mut BTreeMap<Pid, FdTable>, pid: Pid) -> KResult<&mut FdTable> {
+    tables.get_mut(&pid).ok_or(KError::BadFd)
 }
 
 fn create_path(path: &str, kind: InodeKind) -> KResult<Arc<dyn Inode>> {
@@ -127,14 +144,14 @@ pub fn open(path: &str, flags: OpenFlags) -> KResult<Fd> {
     let open = OpenFile::new(inode, flags)?;
     let pid = crate::scheduler::process::get_current_pid().unwrap_or(0);
     let mut tables = PROCESS_FD_TABLES.lock();
-    let table = tables.entry(pid).or_insert_with(FdTable::new_process_table);
+    let table = table_of(&mut tables, pid)?;
     table.insert(open)
 }
 
 pub fn close(fd: Fd) -> KResult<()> {
     let pid = crate::scheduler::process::get_current_pid().unwrap_or(0);
     let mut tables = PROCESS_FD_TABLES.lock();
-    let table = tables.entry(pid).or_insert_with(FdTable::new_process_table);
+    let table = table_of(&mut tables, pid)?;
     table.remove(fd)
 }
 
@@ -187,7 +204,7 @@ pub fn read(fd: Fd, buf: &mut [u8]) -> KResult<usize> {
 
     let (inode, offset, readable) = {
         let mut tables = PROCESS_FD_TABLES.lock();
-        let table = tables.entry(pid).or_insert_with(FdTable::new_process_table);
+        let table = table_of(&mut tables, pid)?;
         let file = table.get_mut(fd)?;
         (file.inode.clone(), file.offset, file.readable)
     };
@@ -210,7 +227,7 @@ pub fn write(fd: Fd, buf: &[u8]) -> KResult<usize> {
 
     let (inode, offset, writable, append) = {
         let mut tables = PROCESS_FD_TABLES.lock();
-        let table = tables.entry(pid).or_insert_with(FdTable::new_process_table);
+        let table = table_of(&mut tables, pid)?;
         let file = table.get_mut(fd)?;
         (file.inode.clone(), file.offset, file.writable, file.append)
     };
@@ -238,7 +255,7 @@ pub fn write(fd: Fd, buf: &[u8]) -> KResult<usize> {
 pub fn seek(fd: Fd, pos: SeekFrom) -> KResult<u64> {
     let pid = crate::scheduler::process::get_current_pid().unwrap_or(0);
     let mut tables = PROCESS_FD_TABLES.lock();
-    let table = tables.entry(pid).or_insert_with(FdTable::new_process_table);
+    let table = table_of(&mut tables, pid)?;
     let file = table.get_mut(fd)?;
     file.seek(pos)
 }
@@ -292,7 +309,7 @@ pub fn create_pipe() -> KResult<(Fd, Fd)> {
 
     let pid = crate::scheduler::process::get_current_pid().unwrap_or(0);
     let mut tables = PROCESS_FD_TABLES.lock();
-    let table = tables.entry(pid).or_insert_with(FdTable::new_process_table);
+    let table = table_of(&mut tables, pid)?;
 
     let r_fd = table.insert(read_file)?;
     match table.insert(write_file) {
@@ -306,12 +323,12 @@ pub fn create_pipe() -> KResult<(Fd, Fd)> {
 
 /// Installs a fresh fd table for `pid` with 0/1/2 all bound to `inode`.
 ///
-/// This is an unconditional `insert`, deliberately not `entry().or_insert_with`:
-/// every other fd function falls back to `FdTable::new_process_table`, which is
-/// hardcoded to /dev/console. If a session's task reached any of them before it
-/// was seeded, its stdio would silently land on the serial port instead of its
-/// own channel -- and an SSH session would type into the UART. So the task must
-/// be created blocked, seeded here, and only then unblocked.
+/// A session's task must still be created blocked, seeded here, and only then
+/// unblocked -- but the reason has changed, and improved. It used to be that reaching
+/// any other fd function first would silently mint a table hardcoded to /dev/console,
+/// so an SSH session that raced its own seeding would have typed into the UART. That
+/// fallback is gone: the race now yields BadFd, which is loud and harmless. The order
+/// still matters, it just no longer has a wrong answer.
 pub fn seed_fd_table(pid: Pid, inode: Arc<dyn Inode>) -> KResult<()> {
     let stdin = OpenFile::new(inode.clone(), OpenFlags::RDONLY)?;
     let stdout = OpenFile::new(inode.clone(), OpenFlags::WRONLY)?;
@@ -329,14 +346,14 @@ pub fn seed_fd_table(pid: Pid, inode: Arc<dyn Inode>) -> KResult<()> {
 pub fn insert_open_file(open: OpenFile) -> KResult<Fd> {
     let pid = crate::scheduler::process::get_current_pid().unwrap_or(0);
     let mut tables = PROCESS_FD_TABLES.lock();
-    let table = tables.entry(pid).or_insert_with(FdTable::new_process_table);
+    let table = table_of(&mut tables, pid)?;
     table.insert(open)
 }
 
 pub fn get_inode(fd: Fd) -> KResult<Arc<dyn Inode>> {
     let pid = crate::scheduler::process::get_current_pid().unwrap_or(0);
     let mut tables = PROCESS_FD_TABLES.lock();
-    let table = tables.entry(pid).or_insert_with(FdTable::new_process_table);
+    let table = table_of(&mut tables, pid)?;
     let open_file = table.get_mut(fd)?;
     Ok(open_file.inode.clone())
 }
@@ -344,7 +361,7 @@ pub fn get_inode(fd: Fd) -> KResult<Arc<dyn Inode>> {
 pub fn remove_fd(fd: Fd) -> KResult<()> {
     let pid = crate::scheduler::process::get_current_pid().unwrap_or(0);
     let mut tables = PROCESS_FD_TABLES.lock();
-    let table = tables.entry(pid).or_insert_with(FdTable::new_process_table);
+    let table = table_of(&mut tables, pid)?;
     table.remove(fd)?;
     Ok(())
 }
@@ -355,7 +372,7 @@ pub fn dup2(oldfd: Fd, newfd: Fd) -> KResult<Fd> {
     }
     let pid = crate::scheduler::process::get_current_pid().unwrap_or(0);
     let mut tables = PROCESS_FD_TABLES.lock();
-    let table = tables.entry(pid).or_insert_with(FdTable::new_process_table);
+    let table = table_of(&mut tables, pid)?;
 
     let open_file = match table.entries.get(oldfd as usize) {
         Some(Some(f)) => f.clone(),
@@ -381,7 +398,7 @@ pub fn dup(fd: Fd) -> KResult<Fd> {
     }
     let pid = crate::scheduler::process::get_current_pid().unwrap_or(0);
     let mut tables = PROCESS_FD_TABLES.lock();
-    let table = tables.entry(pid).or_insert_with(FdTable::new_process_table);
+    let table = table_of(&mut tables, pid)?;
 
     let open_file = match table.entries.get(fd as usize) {
         Some(Some(f)) => f.clone(),

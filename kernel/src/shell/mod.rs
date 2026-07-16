@@ -22,6 +22,23 @@ pub(crate) const MAX_LINE_LEN: usize = MAX_LINE;
 /// process, seeded before this task was ever unblocked. `\n` goes out bare --
 /// the channel adds the `\r`.
 pub fn run_session(user: Option<&str>) {
+    // A session starts at the root, and it is this function's job to say so because
+    // this function is what a session IS -- the doc above promises the serial console
+    // and SSH are the same thing here, and until now they were not.
+    //
+    // SSH got "/" by accident: ssh/channel.rs registers a new pid per channel, and
+    // register_process falls back to "/" because the net task that calls it has no
+    // process to inherit from. The serial console never got it at all: main.rs runs
+    // `loop { run_session(None) }` over ONE task with ONE pid, so `cd /tmp` then
+    // `exit` reprinted the banner and left the next person at the port sitting in
+    // /tmp. That loop is not the bug -- without it a single `exit` would end the task
+    // and take the board's only local console with it -- but a session boundary that
+    // resets nothing is not a boundary.
+    //
+    // Here rather than in main.rs's loop so that both callers get the contract,
+    // including any future one that forgets to ask for it.
+    commands::cwd_set("/");
+
     out(b"\nEspressoOS shell. Type 'help' to see the commands.\n");
 
     let mut line = String::new();

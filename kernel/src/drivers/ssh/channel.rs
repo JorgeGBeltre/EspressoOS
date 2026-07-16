@@ -29,9 +29,11 @@ pub struct SessionShell {
 impl SessionShell {
     /// Wires up a session and lets it run.
     ///
-    /// Blocked on purpose until seeded: one fd operation before `seed_fd_table`
-    /// and `or_insert_with(new_process_table)` would hand this task /dev/console,
-    /// putting the SSH session's output on the serial port.
+    /// Blocked on purpose until seeded. This used to be the difference between an SSH
+    /// session and a hijacked serial port: an fd operation before `seed_fd_table` got
+    /// a table conjured by `or_insert_with(new_process_table)`, hardcoded to
+    /// /dev/console. That function is gone and the race now yields BadFd, so the order
+    /// is still required but no longer has a silently wrong answer.
     pub fn start(channel_id: u32, user: &str) -> KResult<SessionShell> {
         let chan = session::create(
             ChannelKind::Ssh { channel_id },

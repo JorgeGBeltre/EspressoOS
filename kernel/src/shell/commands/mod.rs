@@ -21,6 +21,13 @@ pub fn cwd_get() -> String {
     scheduler::process::cwd_get()
 }
 
+/// `path` must already be absolute and normalized -- an invariant this does not yet
+/// enforce, and which becomes load-bearing rather than cosmetic once the VFS resolves
+/// relative paths against it.
+pub fn cwd_set(path: &str) {
+    scheduler::process::cwd_set(path);
+}
+
 fn norm_abs(path: &str) -> String {
     let mut comps: Vec<&str> = Vec::new();
     for part in path.split('/') {

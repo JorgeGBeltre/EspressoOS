@@ -358,10 +358,12 @@ impl FsState {
     }
 
     fn compact(&mut self) -> KResult<()> {
-        // Temporary: compaction is the one thing a deploy boot does that a quiet boot
-        // does not, and it only fires when the active half is nearly full -- which is
-        // why the hang was so hard to reproduce. Announce it so the boot log says
-        // whether it ran.
+        // Compaction is rare -- it fires only when the active half fills -- and it is
+        // the heaviest, most intricate thing this filesystem does: it erases a half,
+        // replays the whole live tree into it, and rewrites every extent. A silent hang
+        // that only reproduced after many boots was first suspected here, precisely
+        // because it runs so seldom. Log it: an operator seeing this line right before a
+        // failure knows where to look, and its absence rules the path out.
         crate::println!("[espfs] compacting half {} -> {}", self.active_half, 1 - self.active_half);
         let dst = 1 - self.active_half;
         let dbase = self.geom.half_off[dst];

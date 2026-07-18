@@ -43,6 +43,8 @@ pub fn dispatch(
         Syscall::OtaState => sys_ota_state(args),
         Syscall::Pipe => sys_pipe(args),
         Syscall::Dup2 => sys_dup2(args),
+        Syscall::Chdir => sys_chdir(args),
+        Syscall::Getcwd => sys_getcwd(args),
     }
 }
 
@@ -479,6 +481,47 @@ fn sys_unlink(args: &[usize]) -> isize {
         Err(e) => return e.as_errno(),
     };
     ret_unit(crate::vfs::unlink(path))
+}
+
+fn sys_chdir(args: &[usize]) -> isize {
+    let path = match unsafe { user_str(arg(args, 0), arg(args, 1)) } {
+        Ok(s) => s,
+        Err(e) => return e.as_errno(),
+    };
+    // Existencia + que sea directorio, ANTES de fijar el cwd. cwd_set sólo valida
+    // sintácticamente (que normalize devuelva una ruta absoluta); sin este paso,
+    // `cd /noexiste` "tendría éxito" y toda ruta relativa posterior resolvería contra
+    // un directorio que no está. POSIX chdir falla ENOENT/ENOTDIR; esto lo replica.
+    // resolve() ya resuelve la ruta contra el cwd del que llama, igual que cwd_set la
+    // normalizará después: las dos ven la misma ruta.
+    match crate::vfs::mount::resolve(path) {
+        Ok(inode) => {
+            if inode.kind() != crate::vfs::InodeKind::Dir {
+                return KError::NotADirectory.as_errno();
+            }
+        }
+        Err(e) => return e.as_errno(),
+    }
+    ret_unit(crate::scheduler::process::cwd_set(path))
+}
+
+fn sys_getcwd(args: &[usize]) -> isize {
+    let buf = match unsafe { user_slice_mut(arg(args, 0), arg(args, 1)) } {
+        Ok(b) => b,
+        Err(e) => return e.as_errno(),
+    };
+    let cwd = crate::scheduler::process::cwd_get();
+    let bytes = cwd.as_bytes();
+    // Este kernel no tiene ERANGE en su set de errno; un buffer demasiado pequeño es
+    // un bug del que llama y se mapea a InvalidArgument. El wrapper de userland
+    // dimensiona su buffer muy por encima de cualquier ruta real (rutas cortas y
+    // absolutas), así que esto no dispara en la práctica. (Desviación consciente del
+    // spec, que dice -ERANGE.)
+    if bytes.len() > buf.len() {
+        return KError::InvalidArgument.as_errno();
+    }
+    buf[..bytes.len()].copy_from_slice(bytes);
+    bytes.len() as isize
 }
 
 fn sys_readdir(args: &[usize]) -> isize {

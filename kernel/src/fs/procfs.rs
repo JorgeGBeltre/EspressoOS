@@ -66,6 +66,14 @@ impl Inode for ProcFsRoot {
         if name == "meminfo" {
             return Ok(Arc::new(ProcFsFile::MemInfo));
         }
+        if name == "stacks" {
+            return Ok(Arc::new(ProcFsFile::Stacks));
+        }
+        if name == "tasks" {
+            // Misma tabla enriquecida (tid/name/state/used/size/free) que /proc/stacks:
+            // enumera TODAS las tasks (arregla la limitación del `ps` del kernel).
+            return Ok(Arc::new(ProcFsFile::Stacks));
+        }
         if name == "net" {
             return Ok(Arc::new(ProcFsNetDir));
         }
@@ -114,16 +122,30 @@ impl Inode for ProcFsRoot {
                 ino: 4,
             }));
         }
+        if index == 5 {
+            return Ok(Some(DirEntry {
+                name: "stacks".to_string(),
+                kind: InodeKind::File,
+                ino: 5,
+            }));
+        }
+        if index == 6 {
+            return Ok(Some(DirEntry {
+                name: "tasks".to_string(),
+                kind: InodeKind::File,
+                ino: 6,
+            }));
+        }
 
         let pids: Vec<u32> = {
             let pt = crate::scheduler::process::PROCESS_TABLE.lock();
             pt.table.keys().copied().collect()
         };
 
-        if index < 5 {
+        if index < 7 {
             return Ok(None);
         }
-        let pid_idx = index - 5;
+        let pid_idx = index - 7;
         if pid_idx < pids.len() {
             let pid = pids[pid_idx];
             return Ok(Some(DirEntry {
@@ -246,6 +268,7 @@ impl Inode for ProcFsNetDir {
 enum ProcFsFile {
     Uptime,
     MemInfo,
+    Stacks,
     PidStatus(u32),
     NetSockets,
 }
@@ -268,12 +291,15 @@ impl Inode for ProcFsFile {
             ProcFsFile::MemInfo => {
                 let s = crate::mm::heap::stats();
                 alloc::format!(
-                    "MemTotal: {} bytes\nMemUsed: {} bytes\nMemFree: {} bytes\n",
+                    "MemTotal: {} bytes\nMemUsed: {} bytes\nMemFree: {} bytes\nSlotsTotal: {}\nSlotsUsed: {}\n",
                     s.total,
                     s.used,
-                    s.free
+                    s.free,
+                    crate::mm::psram_exec::SLOT_COUNT,
+                    crate::mm::psram_exec::slots_in_use()
                 )
             }
+            ProcFsFile::Stacks => crate::scheduler::stacks_report(),
             ProcFsFile::PidStatus(pid) => {
                 let pt = crate::scheduler::process::PROCESS_TABLE.lock();
                 if let Some(proc) = pt.table.get(pid) {

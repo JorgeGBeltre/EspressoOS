@@ -143,6 +143,13 @@ fn try_exec(name: &str, args: &[&str]) -> i32 {
     }
 }
 
+/// Corre `/bin/<name>` (o una ruta con barra) hasta que termina, devolviendo su código
+/// de salida. Entrada pública que usa el supervisor de arranque; envuelve el mismo
+/// spawn+wait que el shell usa para comandos externos.
+pub fn run_program(name: &str, args: &[&str]) -> i32 {
+    try_exec(name, args)
+}
+
 /// Loads a program and arranges its stdio, without running it.
 ///
 /// `stdin`/`stdout` are fds in THIS shell's table; the child inherits a copy of the

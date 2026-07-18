@@ -43,3 +43,41 @@ pub fn enter_deep_sleep(seconds: u64) -> ! {
         core::hint::spin_loop();
     }
 }
+
+// ---- /dev/power: sleep / deep-sleep / reboot por ioctl (SP2 R5). D-5: cero syscalls. ----
+
+pub const POWER_SLEEP: u32 = 0;
+pub const POWER_DEEP_SLEEP: u32 = 1;
+pub const POWER_REBOOT: u32 = 2;
+
+struct PowerDevice;
+
+impl crate::vfs::devfs::Device for PowerDevice {
+    fn read(&self, _off: u64, _buf: &mut [u8]) -> KResult<usize> {
+        Err(KError::NotSupported)
+    }
+    fn write(&self, _off: u64, _buf: &[u8]) -> KResult<usize> {
+        Err(KError::NotSupported)
+    }
+    fn ioctl(&self, cmd: u32, arg: usize) -> KResult<usize> {
+        match cmd {
+            // `arg` = segundos. sleep vuelve; deep-sleep y reboot no (la placa reinicia).
+            POWER_SLEEP => {
+                enter_light_sleep(arg as u64);
+                Ok(0)
+            }
+            POWER_DEEP_SLEEP => enter_deep_sleep(arg as u64),
+            POWER_REBOOT => {
+                esp_hal::reset::software_reset();
+                loop {
+                    core::hint::spin_loop();
+                }
+            }
+            _ => Err(KError::InvalidArgument),
+        }
+    }
+}
+
+pub fn devfs_device() -> Arc<dyn crate::vfs::devfs::Device> {
+    Arc::new(PowerDevice)
+}

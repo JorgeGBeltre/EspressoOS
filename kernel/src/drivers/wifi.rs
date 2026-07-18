@@ -116,6 +116,132 @@ pub fn current_ssid() -> Option<String> {
     CURRENT_SSID.lock().clone()
 }
 
+// ---- /dev/wlan0: control de wifi por ioctl + estado por read() (SP2, R2) ----
+
+/// ioctl cmds de `/dev/wlan0` (espejados en `/bin/wifi`). D-3: ioctl = órdenes, read =
+/// estado. `connect` auto-persiste en NVS (lo hace `process_wifi_cmd`), como el builtin.
+/// No-op: valida el camino "ioctl aceptado" sin efectos (para `/bin/ioctltest`), sin
+/// tener que disparar un connect/scan real que tiraría la red.
+pub const WLAN_NOP: u32 = 0;
+pub const WLAN_CONNECT: u32 = 1;
+pub const WLAN_DISCONNECT: u32 = 2;
+pub const WLAN_SCAN: u32 = 3;
+
+/// Límites de campo (D-2), impuestos aquí en el kernel: SSID ≤ 32 (802.11), pass WPA ≤ 64.
+const WLAN_SSID_MAX: usize = 32;
+const WLAN_PASS_MAX: usize = 64;
+
+/// Struct que userland pasa por `arg` del ioctl CONNECT (D-1, struct tipado). Campos en
+/// `usize` (32-bit en Xtensa): `{ssid_ptr, ssid_len, pass_ptr, pass_len}`. El kernel valida
+/// el struct Y cada puntero interno con `validate_user`.
+#[repr(C)]
+struct WlanConnectReq {
+    ssid_ptr: usize,
+    ssid_len: usize,
+    pass_ptr: usize,
+    pass_len: usize,
+}
+
+struct WlanDevice;
+
+impl crate::vfs::devfs::Device for WlanDevice {
+    fn read(&self, off: u64, buf: &mut [u8]) -> KResult<usize> {
+        let snap = wlan_snapshot();
+        let bytes = snap.as_bytes();
+        let start = off as usize;
+        if start >= bytes.len() {
+            return Ok(0);
+        }
+        let n = core::cmp::min(bytes.len() - start, buf.len());
+        buf[..n].copy_from_slice(&bytes[start..start + n]);
+        Ok(n)
+    }
+
+    fn write(&self, _off: u64, _buf: &[u8]) -> KResult<usize> {
+        Err(KError::NotSupported)
+    }
+
+    fn ioctl(&self, cmd: u32, arg: usize) -> KResult<usize> {
+        match cmd {
+            WLAN_NOP => Ok(0),
+            WLAN_CONNECT => {
+                // D-1: valida el struct Y cada puntero interno antes de leer memoria de
+                // usuario. `validate_user` es la misma barrera que usan read/write/spawn.
+                crate::syscall::handler::validate_user(
+                    arg,
+                    core::mem::size_of::<WlanConnectReq>(),
+                )?;
+                let req = unsafe { &*(arg as *const WlanConnectReq) };
+                if req.ssid_len == 0
+                    || req.ssid_len > WLAN_SSID_MAX
+                    || req.pass_len > WLAN_PASS_MAX
+                {
+                    return Err(KError::InvalidArgument);
+                }
+                crate::syscall::handler::validate_user(req.ssid_ptr, req.ssid_len)?;
+                crate::syscall::handler::validate_user(req.pass_ptr, req.pass_len)?;
+                let ssid_bytes =
+                    unsafe { core::slice::from_raw_parts(req.ssid_ptr as *const u8, req.ssid_len) };
+                let pass_bytes =
+                    unsafe { core::slice::from_raw_parts(req.pass_ptr as *const u8, req.pass_len) };
+                let ssid = core::str::from_utf8(ssid_bytes).map_err(|_| KError::InvalidArgument)?;
+                let pass = core::str::from_utf8(pass_bytes).map_err(|_| KError::InvalidArgument)?;
+                request_connect(String::from(ssid), String::from(pass));
+                Ok(0)
+            }
+            WLAN_DISCONNECT => {
+                request_disconnect();
+                Ok(0)
+            }
+            WLAN_SCAN => {
+                request_scan();
+                Ok(0)
+            }
+            _ => Err(KError::InvalidArgument),
+        }
+    }
+}
+
+/// Snapshot legible de wlan0 + último scan (D-3). Formato estable que leen `/bin/wifi`,
+/// `/bin/ip` y `/bin/nmcli`.
+fn wlan_snapshot() -> String {
+    let st = match status() {
+        WifiStatus::Down => "Down",
+        WifiStatus::Connecting => "Connecting",
+        WifiStatus::Connected => "Connected",
+        WifiStatus::Failed => "Failed",
+    };
+    let ssid = current_ssid().unwrap_or_else(|| String::from("-"));
+    let ip = match current_ip() {
+        Some(a) => alloc::format!("{}.{}.{}.{}", a[0], a[1], a[2], a[3]),
+        None => String::from("0.0.0.0"),
+    };
+    let ss = scan_state();
+    let scan = match ss {
+        SCAN_IDLE => "idle",
+        SCAN_RUNNING => "running",
+        SCAN_DONE => "done",
+        _ => "error",
+    };
+    let mut out = alloc::format!("state: {}\nssid: {}\nip: {}\nscan: {}\n", st, ssid, ip, scan);
+    if ss == SCAN_DONE {
+        for ap in scan_results() {
+            out.push_str(&alloc::format!(
+                "ap: {}\t{}\t{}\t{}\n",
+                ap.ssid,
+                ap.rssi,
+                ap.channel,
+                if ap.secured { "secure" } else { "open" }
+            ));
+        }
+    }
+    out
+}
+
+pub fn wlan_devfs_device() -> Arc<dyn crate::vfs::devfs::Device> {
+    Arc::new(WlanDevice)
+}
+
 struct TcpTransport<'s> {
     sock: &'s mut tcp::Socket<'static>,
 }
@@ -538,6 +664,12 @@ pub fn net_task(_arg: usize) {
                     }
                 }
             }
+
+            // D-4 (BLE advertise): si el ioctl `/dev/ble0` encoló una petición, se ejecuta
+            // AQUÍ, en el net_task (donde el runtime esp-wifi está activo), no síncrono en el
+            // task del llamador (que colgaba). Si esto bloqueara, tumbaría el net_task
+            // (wifi/SSH) — la matriz R5 lo verifica con SSH activo durante el advertise.
+            crate::drivers::ble::poll_advertise();
 
             let mut cmds = Vec::new();
             {

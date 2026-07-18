@@ -16,6 +16,12 @@ path = "src/main.rs"
 #                 software directa al despachador (misma ABI, sin trap de CPU).
 #   smp:          arranca el segundo núcleo (APP_CPU) y planifica en ambos.
 #   pms:          configura la protección de memoria PMS/World-Controller.
+#   diag-ble-sync: DIAGNÓSTICO. Expone el ioctl BLE_ADVERTISE_SYNC_DIAG que corre
+#                 start_advertising SÍNCRONO en la pila del llamador — el camino que
+#                 CUELGA el board. Existe solo para el experimento de la hipótesis de
+#                 desbordamiento de pila. NUNCA en un build por defecto; sin la
+#                 feature, 0xD1A6 devuelve InvalidArgument (no hay mina). Borrar el
+#                 código tras cerrar el experimento (ver DECISIONES.md).
 # Todas requieren validación en hardware; ver docs/design/remaining-phases.md.
 # ============================================================================
 [features]
@@ -23,6 +29,8 @@ default = ["syscall-trap"]
 syscall-trap = []
 smp = []
 pms = []
+diag-ble-sync = []
+diag-32k-stack = []
 
 # ============================================================================
 # Dependencias externas — CONSOLIDADAS por el agente de integración a partir de

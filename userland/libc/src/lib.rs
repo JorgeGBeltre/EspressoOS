@@ -132,6 +132,45 @@ pub fn spawn(path: &str, argv: *const *const u8) -> isize {
     unsafe { syscall(6, path.as_ptr() as usize, path.len(), argv as usize, 0, 0, 0) }
 }
 
+/// ioctl(fd, cmd, arg) -> resultado | -errno. `arg` es un `usize` opaco: para órdenes con
+/// datos variables, un puntero a un struct que el kernel valida campo a campo (D-1). Es la
+/// puerta de userland a los drivers en SP2 (`/dev/wlan0`, i2c, spi, …) — syscall 4, ya
+/// existente, así que no toca la tabla congelada.
+pub fn ioctl(fd: i32, cmd: u32, arg: usize) -> isize {
+    unsafe { syscall(4, fd as usize, cmd as usize, arg, 0, 0, 0) }
+}
+
+/// Cambia el directorio de trabajo del proceso llamante. 0 en éxito, -errno si el
+/// destino no existe o no es un directorio.
+pub fn chdir(path: &str) -> isize {
+    unsafe { syscall(28, path.as_ptr() as usize, path.len(), 0, 0, 0, 0) }
+}
+
+/// Escribe la ruta absoluta del cwd en `buf` (sin NUL, sin newline) y devuelve su
+/// longitud, o -errno. Misma convención de buffer que `readdir`.
+pub fn getcwd(buf: &mut [u8]) -> isize {
+    unsafe { syscall(29, buf.as_mut_ptr() as usize, buf.len(), 0, 0, 0, 0) }
+}
+
+/// Longitud de buffer que alcanza para cualquier cwd real de este sistema (rutas
+/// cortas y absolutas). NOTA: el kernel no impone hoy una cota `PATH_MAX` en `chdir`,
+/// así que esto es un tamaño práctico, no un invariante garantizado por construcción.
+pub const PATH_MAX: usize = 128;
+
+/// Conveniencia: `getcwd` como `&str`. Evita que cada consumidor (`sh`, `cwdtest`)
+/// repita la danza longitud-negativa → slice → `from_utf8`.
+///
+/// Usa `core::result::Result` cualificado a propósito: este crate define
+/// `type Result = result::Result<(), Error>` (0 argumentos), que ensombrecería el
+/// `Result` genérico de aquí.
+pub fn getcwd_str(buf: &mut [u8]) -> core::result::Result<&str, isize> {
+    let n = getcwd(buf);
+    if n < 0 {
+        return Err(n);
+    }
+    core::str::from_utf8(&buf[..n as usize]).map_err(|_| -1)
+}
+
 pub fn wait(status: &mut i32) -> isize {
     unsafe { syscall(7, status as *mut i32 as usize, 0, 0, 0, 0, 0) }
 }

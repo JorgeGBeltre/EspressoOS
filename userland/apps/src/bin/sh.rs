@@ -1,7 +1,7 @@
 #![no_std]
 #![no_main]
 
-use libc::{close, dup2, print, println, read, readdir, spawn, wait, yield_now, pipe};
+use libc::{arg, chdir, close, dup2, getcwd_str, open, print, println, read, readdir, spawn, wait, yield_now, pipe, PATH_MAX};
 
 /// Most tokens one command can have, counting argv[0] and the trailing NULL.
 const MAX_ARGV: usize = 16;
@@ -10,36 +10,268 @@ const MAX_ARGV: usize = 16;
 /// last token's NUL one past the end of the range it is given.
 const LINE: usize = 64;
 
+const O_RDONLY: u32 = 1;
+const O_WRONLY: u32 = 0x0002;
+const O_CREATE: u32 = 0x0100;
+const O_APPEND: u32 = 0x0200;
+const O_TRUNC: u32 = 0x0400;
+
+/// Máximo de etapas en un pipeline (`a | b | c | ...`).
+const MAX_STAGES: usize = 8;
+
 #[no_mangle]
-pub extern "C" fn main(_argc: i32, _argv: *const *const u8) -> i32 {
+pub extern "C" fn main(argc: i32, argv: *const *const u8) -> i32 {
+    // Modo-script: `sh <fichero>` corre el fichero y sale. Sin argumentos = interactivo.
+    if argc > 1 {
+        let path = unsafe { arg(argv, 1) };
+        return run_script(path);
+    }
+
     println!("--- EspressoOS Shell (Userland) ---");
     let mut buf = [0u8; LINE + 1];
     loop {
-        print!("EspressoOS:~$ ");
+        print_prompt();
         let len = read_line(&mut buf[..LINE]);
         let (s, e) = trim(&buf, 0, len);
-        if s == e {
-            continue;
-        }
-
-        if &buf[s..e] == b"exit" {
+        if !run_line(&mut buf, s, e) {
             println!("Exiting the shell...");
             break;
-        }
-        if &buf[s..e] == b"help" {
-            print_help();
-            continue;
-        }
-
-        match buf[s..e].iter().position(|&c| c == b'|') {
-            Some(k) => run_pipeline(&mut buf, (s, s + k), (s + k + 1, e)),
-            None => run_single(&mut buf, (s, e)),
         }
     }
     0
 }
 
+/// Tamaño máximo de script. Vive en la pila de `sh` y sigue vivo A TRAVÉS de `spawn`
+/// (la syscall más profunda — la que desbordó los 8K originales). Si `/etc/rc` crece,
+/// mover el buffer a `static`, NO agrandarlo aquí en pila.
+const SCRIPT_MAX: usize = 1024;
+
+/// Ejecuta cada línea del fichero en `path` y retorna. Semántica DELIBERADA (no
+/// "arreglar" hacia abort-on-error): una línea que falla se reporta y el script
+/// CONTINÚA — un `ls` roto en `/etc/rc` no debe impedir llegar a la consola. Salta
+/// vacías y comentarios ('#'), recorta '\r' final (CRLF de hosts Windows), honra
+/// `exit`, y NUNCA trunca en silencio: fichero sobredimensionado = error ruidoso y
+/// exit 1; línea más larga que `LINE` = se reporta y se salta entera.
+///
+/// Enruta por `run_line` (NO `exec_line`) para conservar la paridad de `;` que el
+/// modo interactivo ya tiene: `echo uno ; echo dos` en un script se comporta igual.
+fn run_script(path: &str) -> i32 {
+    let fd = open(path, O_RDONLY);
+    if fd < 0 {
+        println!("sh: cannot open {}", path);
+        return 1;
+    }
+    let mut file = [0u8; SCRIPT_MAX];
+    // Bucle de lectura: un solo `read` puede devolver corto sin ser EOF.
+    let mut total = 0usize;
+    loop {
+        if total == file.len() {
+            // El buffer se llenó. ¿Queda más fichero? Un byte de sonda lo decide: si lo
+            // hay, el script no cabe y NO se ejecuta medio — error ruidoso y exit 1.
+            let mut probe = [0u8; 1];
+            if read(fd as i32, &mut probe) > 0 {
+                close(fd as i32);
+                println!(
+                    "sh: {}: larger than {} bytes; refusing to run a truncated script",
+                    path, SCRIPT_MAX
+                );
+                return 1;
+            }
+            break;
+        }
+        let n = read(fd as i32, &mut file[total..]);
+        if n < 0 {
+            close(fd as i32);
+            println!("sh: read error on {}: {}", path, n);
+            return 1;
+        }
+        if n == 0 {
+            break;
+        }
+        total += n as usize;
+    }
+    close(fd as i32);
+
+    let end = total;
+    let mut buf = [0u8; LINE + 1];
+    let mut start = 0usize;
+    let mut i = 0usize;
+    while i <= end {
+        if i == end || file[i] == b'\n' {
+            let mut line: &[u8] = &file[start..i];
+            // CRLF: recorta el '\r' final antes de tokenizar (o "ls\r" no casaría).
+            if line.last() == Some(&b'\r') {
+                line = &line[..line.len() - 1];
+            }
+            if line.len() > LINE {
+                // Nunca ejecutar un comando cortado: la línea se reporta y se salta.
+                println!("sh: {}: line longer than {} bytes, skipped", path, LINE);
+            } else {
+                let m = line.len();
+                buf[..m].copy_from_slice(line);
+                let (s, e) = trim(&buf, 0, m);
+                // Salta vacías y comentarios; run_line hace el resto (incluido `;`), y
+                // su `false` (un `exit` en el script) detiene el script, igual que en
+                // interactivo.
+                if s < e && buf[s] != b'#' && !run_line(&mut buf, s, e) {
+                    return 0;
+                }
+            }
+            start = i + 1;
+        }
+        i += 1;
+    }
+    0
+}
+
+/// Ejecuta una línea ya recortada a `buf[s..e]`. Devuelve false si el usuario pidió
+/// salir, true en caso contrario. Interactivo y modo-script comparten esta función.
+///
+/// DEUDA (`&`, background): no se soporta en SP1. Sin reparentado-a-init, un daemon
+/// lanzado con `&` desde `sh /etc/rc` queda huérfano al terminar el script y su entrada
+/// de proceso se fuga. El reparentado-a-PID-1 es SP4; el `&` llega entonces.
+fn exec_line(buf: &mut [u8], s: usize, e: usize) -> bool {
+    if s == e {
+        return true;
+    }
+    if &buf[s..e] == b"exit" {
+        return false;
+    }
+    if &buf[s..e] == b"help" {
+        print_help();
+        return true;
+    }
+    if &buf[s..e] == b"clear" {
+        // Limpia pantalla (ANSI) + cursor al origen, igual que el builtin del kernel.
+        print!("\x1b[2J\x1b[H");
+        return true;
+    }
+    // sudo es un no-op: EspressoOS no tiene separación de privilegios (README §5). Se
+    // ejecuta el resto de la línea como si el prefijo no estuviera.
+    if buf[s..e].starts_with(b"sudo ") {
+        let (ss, se) = trim(buf, s + 5, e);
+        if ss < se {
+            return exec_line(buf, ss, se);
+        }
+        return true;
+    }
+    // cd/pwd son builtins obligatoriamente: un hijo spawneado no puede cambiar el cwd
+    // de este proceso.
+    if &buf[s..e] == b"pwd" || buf[s..e].starts_with(b"pwd ") {
+        builtin_pwd();
+        return true;
+    }
+    if &buf[s..e] == b"cd" || buf[s..e].starts_with(b"cd ") {
+        builtin_cd(&buf[s..e]);
+        return true;
+    }
+    // Pipeline de N etapas, partiendo por `|` top-level (`echo "a|b"` es una etapa).
+    let mut stages = [(0usize, 0usize); MAX_STAGES];
+    let mut nst = 0usize;
+    let mut a = s;
+    loop {
+        let cut = find_top(buf, a, e, b'|');
+        let b = cut.unwrap_or(e);
+        if nst >= MAX_STAGES {
+            println!("sh: too many pipeline stages (max {})", MAX_STAGES);
+            return true;
+        }
+        stages[nst] = (a, b);
+        nst += 1;
+        match cut {
+            Some(k) => a = k + 1,
+            None => break,
+        }
+    }
+    if nst == 1 {
+        run_single(buf, stages[0]);
+    } else {
+        run_pipeline_n(buf, &stages[..nst]);
+    }
+    true
+}
+
+/// Ejecuta una línea que puede tener varios comandos separados por `;`, en orden.
+/// Devuelve false si algún comando fue `exit`.
+///
+/// `;` se reconoce aquí (partiendo la línea), no en el tokenizador, por la misma razón
+/// que en el shell del kernel: partir la cadena cruda cortaría `echo "a;b"` por la
+/// mitad, así que las comillas lo protegen. Un `;` de sobra o final es inofensivo (el
+/// segmento vacío se salta). NO hay `&&`/`||`/`&` -- sólo el separador secuencial, que
+/// es la paridad que el shell del kernel ya tiene.
+fn run_line(buf: &mut [u8], s: usize, e: usize) -> bool {
+    let mut seg_start = s;
+    let mut i = s;
+    let mut quote: u8 = 0; // 0 = fuera de comillas; si no, b'\'' o b'"'
+    while i < e {
+        let c = buf[i];
+        if quote != 0 {
+            if c == quote {
+                quote = 0;
+            }
+        } else if c == b'\'' || c == b'"' {
+            quote = c;
+        } else if c == b';' {
+            let (ss, se) = trim(buf, seg_start, i);
+            // exec_line muta buf[ss..se] (tokenize mete NULs), pero eso queda detrás de
+            // `i`; el resto de la línea (los segmentos por venir) no se toca.
+            if ss < se && !exec_line(buf, ss, se) {
+                return false;
+            }
+            seg_start = i + 1;
+        }
+        i += 1;
+    }
+    let (ss, se) = trim(buf, seg_start, e);
+    if ss < se {
+        return exec_line(buf, ss, se);
+    }
+    true
+}
+
+fn builtin_pwd() {
+    let mut cwd = [0u8; PATH_MAX];
+    match getcwd_str(&mut cwd) {
+        Ok(s) => println!("{}", s),
+        Err(n) => println!("pwd: error {}", n),
+    }
+}
+
+/// Prompt con el cwd, como el shell del kernel ('/' se muestra como '~'). Efecto
+/// lateral valioso: `getcwd` se verifica en CADA interacción, gratis.
+fn print_prompt() {
+    let mut cwd = [0u8; PATH_MAX];
+    match getcwd_str(&mut cwd) {
+        Ok("/") => print!("EspressoOS:~$ "),
+        Ok(s) => print!("EspressoOS:{}$ ", s),
+        Err(_) => print!("EspressoOS:?$ "),
+    }
+}
+
+fn builtin_cd(line: &[u8]) {
+    // El argumento tras "cd", recortado. Vacío -> "/" (no hay $HOME en este sistema).
+    let target = core::str::from_utf8(&line[2..]).unwrap_or("").trim();
+    let target = if target.is_empty() { "/" } else { target };
+    let r = chdir(target);
+    if r < 0 {
+        // Distingue no-existe de no-es-directorio: el mensaje único "no such directory"
+        // mentía sobre un fichero que SÍ existe (p. ej. `cd /etc/rc`). Errnos del kernel:
+        // ENOENT=-2, ENOTDIR=-20.
+        let reason = match r {
+            -2 => "no such file or directory",
+            -20 => "not a directory",
+            _ => "cannot change directory",
+        };
+        println!("cd: {}: {}", target, reason);
+    }
+}
+
 /// Reads one line into `buf`, echoing as it goes. Returns its length.
+///
+/// Isomorfo con el lector del shell del kernel (`shell/mod.rs`): backspace/DEL borran
+/// el último carácter y **nunca** pasan del inicio del input -- por eso no se puede
+/// comer el prompt. Sólo se aceptan imprimibles `0x20..0x7f`; el resto de controles
+/// (flechas, Ctrl-*, etc.) se ignoran en vez de ensuciar el buffer y la pantalla.
 fn read_line(buf: &mut [u8]) -> usize {
     let mut len = 0;
     loop {
@@ -48,14 +280,32 @@ fn read_line(buf: &mut [u8]) -> usize {
             yield_now();
             continue;
         }
-        if c[0] == b'\n' || c[0] == b'\r' {
-            println!("");
-            return len;
-        }
-        let _ = libc::write(1, &c);
-        if len < buf.len() {
-            buf[len] = c[0];
-            len += 1;
+        let ch = c[0];
+        match ch {
+            b'\n' | b'\r' => {
+                println!("");
+                return len;
+            }
+            0x08 | 0x7f => {
+                // Backspace/DEL: retrocede un carácter en pantalla y en el buffer,
+                // pero sólo si hay algo que borrar. Con len==0 no se emite nada, así
+                // que el cursor no puede retroceder sobre el prompt.
+                if len > 0 {
+                    len -= 1;
+                    let _ = libc::write(1, b"\x08 \x08");
+                }
+            }
+            _ if (0x20..0x7f).contains(&ch) => {
+                if len < buf.len() {
+                    buf[len] = ch;
+                    len += 1;
+                    let _ = libc::write(1, &c);
+                }
+                // Buffer lleno: no eco -- la línea no puede crecer más.
+            }
+            _ => {
+                // Control no manejado: ignorar.
+            }
         }
     }
 }
@@ -89,30 +339,58 @@ fn tokenize(
     end: usize,
     argv: &mut [*const u8; MAX_ARGV],
 ) -> Option<usize> {
-    buf[end] = 0;
-
+    // Respeta comillas simples y dobles: un span entre comillas es UN token y las
+    // comillas se eliminan (necesario para `wifi connect "Familia beltre"`). Quitar
+    // comillas solo ENCOGE, así que la compactación in-place es segura: el cursor de
+    // escritura `write` nunca adelanta al de lectura `read`, así que nunca pisa bytes
+    // sin leer. Los tokens quedan NUL-separados dentro de [start..write).
     let mut offs = [0usize; MAX_ARGV];
     let mut n = 0;
-    let mut i = start;
-    while i < end {
-        while i < end && buf[i] == b' ' {
-            i += 1;
+    let mut read = start;
+    let mut write = start;
+    while read < end {
+        while read < end && buf[read] == b' ' {
+            read += 1;
         }
-        if i >= end {
+        if read >= end {
             break;
         }
         // argv[n] takes the token, so argv[n + 1] has to be free for the NULL.
         if n + 1 >= MAX_ARGV {
             return None;
         }
-        offs[n] = i;
+        offs[n] = write;
         n += 1;
-        while i < end && buf[i] != b' ' {
-            i += 1;
+        let mut quote: u8 = 0;
+        while read < end {
+            let c = buf[read];
+            if quote != 0 {
+                if c == quote {
+                    quote = 0;
+                } else {
+                    buf[write] = c;
+                    write += 1;
+                }
+                read += 1;
+            } else if c == b'"' || c == b'\'' {
+                quote = c;
+                read += 1;
+            } else if c == b' ' {
+                break;
+            } else {
+                buf[write] = c;
+                write += 1;
+                read += 1;
+            }
         }
-        if i < end {
-            buf[i] = 0;
-            i += 1;
+        buf[write] = 0;
+        write += 1;
+        // El token terminó en un espacio en `read` (o en `end`). Consúmelo: si
+        // write==read (sin comillas), el NUL de arriba PISÓ ese espacio, así que el
+        // skip de espacios del tope lo vería como 0 y se atascaría leyendo un token
+        // vacío. Avanzar `read` aquí lo evita; el skip del tope cubre espacios extra.
+        if read < end {
+            read += 1;
         }
     }
 
@@ -124,6 +402,26 @@ fn tokenize(
     }
     argv[n] = core::ptr::null();
     Some(n)
+}
+
+/// Primera aparición top-level (fuera de comillas) de `delim` en `buf[from..to]`.
+fn find_top(buf: &[u8], from: usize, to: usize, delim: u8) -> Option<usize> {
+    let mut i = from;
+    let mut quote: u8 = 0;
+    while i < to {
+        let c = buf[i];
+        if quote != 0 {
+            if c == quote {
+                quote = 0;
+            }
+        } else if c == b'\'' || c == b'"' {
+            quote = c;
+        } else if c == delim {
+            return Some(i);
+        }
+        i += 1;
+    }
+    None
 }
 
 /// Tokenizes a command and resolves its program, reporting why if it cannot.
@@ -157,84 +455,201 @@ fn prepare<'a>(
     Some(path)
 }
 
+/// Separa el rango de un stage en (rango_comando, redirección opcional). La redirección
+/// es el primer `>` (o `>>` = append) top-level y su fichero destino (un token).
+fn parse_redirect(
+    buf: &[u8],
+    a: usize,
+    b: usize,
+) -> ((usize, usize), Option<(usize, usize, bool)>) {
+    match find_top(buf, a, b, b'>') {
+        None => ((a, b), None),
+        Some(i) => {
+            let append = i + 1 < b && buf[i + 1] == b'>';
+            let after = if append { i + 2 } else { i + 1 };
+            let (ts, te0) = trim(buf, after, b);
+            // El destino es un solo token: hasta el siguiente espacio top-level.
+            let te = find_top(buf, ts, te0, b' ').unwrap_or(te0);
+            ((a, i), Some((ts, te, append)))
+        }
+    }
+}
+
+/// Abre el fichero destino de una redirección y devuelve su fd (<0 en error). Recorta
+/// comillas envolventes. `open` toma ptr+len, así que no hace falta NUL-terminar.
+fn redir_open(buf: &[u8], ts: usize, te: usize, append: bool) -> isize {
+    let (mut a, mut b) = (ts, te);
+    if b > a + 1 && (buf[a] == b'"' || buf[a] == b'\'') && buf[b - 1] == buf[a] {
+        a += 1;
+        b -= 1;
+    }
+    let path = match core::str::from_utf8(&buf[a..b]) {
+        Ok(p) => p,
+        Err(_) => return -1,
+    };
+    let flags = if append {
+        O_WRONLY | O_CREATE | O_APPEND
+    } else {
+        O_WRONLY | O_CREATE | O_TRUNC
+    };
+    open(path, flags)
+}
+
 fn run_single(buf: &mut [u8], range: (usize, usize)) {
+    let (cmd, redir) = parse_redirect(buf, range.0, range.1);
+
+    // La redirección se abre ANTES de tokenizar el comando: `redir_open` lee bytes del
+    // destino, que están detrás del `>` y no los toca la compactación de `tokenize`.
+    let mut rfd = -1i32;
+    if let Some((ts, te, append)) = redir {
+        let fd = redir_open(buf, ts, te, append);
+        if fd < 0 {
+            println!("sh: cannot open redirection target");
+            return;
+        }
+        rfd = fd as i32;
+    }
+
     let mut argv = [core::ptr::null(); MAX_ARGV];
     let mut path_buf = [0u8; LINE + 8];
-    let path = match prepare(buf, range, &mut argv, &mut path_buf) {
+    let path = match prepare(buf, cmd, &mut argv, &mut path_buf) {
         Some(p) => p,
-        None => return,
+        None => {
+            if rfd >= 0 {
+                close(rfd);
+            }
+            return;
+        }
     };
+
+    // Redirección = dup2 sobre fd 1, guardando el original en fd 12. El hijo nunca sabe
+    // que se movió (misma semántica documentada en el README §6).
+    let mut saved = -1i32;
+    if rfd >= 0 {
+        saved = dup2(1, 12) as i32;
+        dup2(rfd, 1);
+        close(rfd);
+    }
 
     if spawn(path, argv.as_ptr()) < 0 {
         println!("Error executing: {}", path);
-        return;
-    }
-    let mut status = 0;
-    let _ = wait(&mut status);
-}
-
-fn run_pipeline(buf: &mut [u8], left: (usize, usize), right: (usize, usize)) {
-    let mut argv1 = [core::ptr::null(); MAX_ARGV];
-    let mut argv2 = [core::ptr::null(); MAX_ARGV];
-    let mut path_buf1 = [0u8; LINE + 8];
-    let mut path_buf2 = [0u8; LINE + 8];
-
-    // Both stages are prepared before a single fd is touched. The two ranges are
-    // disjoint so neither pass disturbs the other's tokens, and a command that cannot
-    // run is reported while there is still nothing to unwind.
-    let path1 = match prepare(buf, left, &mut argv1, &mut path_buf1) {
-        Some(p) => p,
-        None => return,
-    };
-    let path2 = match prepare(buf, right, &mut argv2, &mut path_buf2) {
-        Some(p) => p,
-        None => return,
-    };
-
-    let mut p = [0i32; 2];
-    if pipe(&mut p) < 0 {
-        println!("Error creating pipe");
-        return;
-    }
-
-    let saved_stdout = dup2(1, 10);
-    let saved_stdin = dup2(0, 11);
-
-    // Stage 1 writes into the pipe.
-    dup2(p[1], 1);
-    let pid1 = spawn(path1, argv1.as_ptr());
-
-    // Every copy of the write end has to leave THIS table before stage 2 is spawned.
-    // spawn hands a child a clone of the whole fd table, and the pipe reports EOF
-    // only once the last reference to its write inode is dropped -- by anyone, in any
-    // process, since they all share one. A stage 2 that inherits one is a writer to
-    // the pipe it is reading, and its read blocks forever however promptly stage 1
-    // exits. Closing these after both spawns, which is where they used to be, is too
-    // late by exactly one clone.
-    dup2(saved_stdout as i32, 1);
-    close(p[1]);
-
-    // Stage 2 reads from it.
-    dup2(p[0], 0);
-    let pid2 = spawn(path2, argv2.as_ptr());
-
-    dup2(saved_stdin as i32, 0);
-    close(p[0]);
-    close(10);
-    close(11);
-
-    if pid1 >= 0 && pid2 >= 0 {
+    } else {
         let mut status = 0;
         let _ = wait(&mut status);
+    }
+
+    if saved >= 0 {
+        dup2(saved, 1);
+        close(saved);
+    }
+}
+
+/// Pipeline de N etapas (`a | b | c | ...`). Crea N-1 pipes y encadena stdin/stdout de
+/// cada etapa; una etapa con redirección `>` propia manda su stdout al fichero en vez del
+/// pipe (gana al pipe, como el shell del kernel — README §6). Prepara y lanza cada etapa
+/// incrementalmente con la MISMA disciplina de fds que la versión de 2 etapas: el
+/// write-end de cada pipe sale de ESTA tabla (lo reasigna el `dup2` de la etapa siguiente)
+/// antes de lanzar la etapa que lo lee, así ninguna etapa hereda un escritor del pipe que
+/// va a leer y se cuelga esperando un EOF que no llega.
+fn run_pipeline_n(buf: &mut [u8], stages: &[(usize, usize)]) {
+    let n = stages.len();
+    let saved_out = dup2(1, 10) as i32;
+    let saved_in = dup2(0, 11) as i32;
+
+    let mut prev_read = -1i32; // read-end del pipe anterior = stdin de esta etapa
+    let mut nspawned = 0usize;
+
+    for i in 0..n {
+        let (a, b) = stages[i];
+        let (cmd, redir) = parse_redirect(buf, a, b);
+
+        let mut rfd = -1i32;
+        if let Some((ts, te, append)) = redir {
+            let fd = redir_open(buf, ts, te, append);
+            if fd >= 0 {
+                rfd = fd as i32;
+            }
+        }
+
+        let mut argv = [core::ptr::null(); MAX_ARGV];
+        let mut path_buf = [0u8; LINE + 8];
+        let path = match prepare(buf, cmd, &mut argv, &mut path_buf) {
+            Some(p) => p,
+            None => {
+                if rfd >= 0 {
+                    close(rfd);
+                }
+                break;
+            }
+        };
+
+        // Pipe hacia la siguiente etapa (salvo la última).
+        let mut next_read = -1i32;
+        let mut this_write = -1i32;
+        if i + 1 < n {
+            let mut pp = [0i32; 2];
+            if pipe(&mut pp) < 0 {
+                println!("sh: pipe error");
+                if rfd >= 0 {
+                    close(rfd);
+                }
+                break;
+            }
+            next_read = pp[0];
+            this_write = pp[1];
+        }
+
+        // stdin de esta etapa: del pipe anterior, o el stdin original en la primera.
+        if prev_read >= 0 {
+            dup2(prev_read, 0);
+        } else {
+            dup2(saved_in, 0);
+        }
+        // stdout: redirección propia (gana) > pipe siguiente > stdout original.
+        if rfd >= 0 {
+            dup2(rfd, 1);
+        } else if this_write >= 0 {
+            dup2(this_write, 1);
+        } else {
+            dup2(saved_out, 1);
+        }
+
+        let pid = spawn(path, argv.as_ptr());
+        if pid >= 0 {
+            nspawned += 1;
+        }
+
+        // El hijo ya clonó la tabla; suelta en ESTA los fds que no necesita.
+        if rfd >= 0 {
+            close(rfd);
+        }
+        if prev_read >= 0 {
+            close(prev_read);
+        }
+        if this_write >= 0 {
+            close(this_write);
+        }
+        prev_read = next_read;
+    }
+    if prev_read >= 0 {
+        close(prev_read);
+    }
+
+    // Restaura stdio y espera a las etapas lanzadas.
+    dup2(saved_out, 1);
+    dup2(saved_in, 0);
+    close(saved_out);
+    close(saved_in);
+    for _ in 0..nspawned {
+        let mut status = 0;
         let _ = wait(&mut status);
-    } else {
-        println!("Error spawning pipeline processes");
     }
 }
 
 fn print_help() {
     println!("EspressoOS userland shell -- built-in commands:");
     println!("  help                 show this help");
+    println!("  clear                clear the screen");
     println!("  exit                 exit the shell");
     println!("  <cmd> | <cmd>        pipe one command's output into another");
     println!("");

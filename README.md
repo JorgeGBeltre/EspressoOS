@@ -92,6 +92,7 @@ EspressoOS **boots and runs on a physical ESP32-S3**, is reachable over SSH, and
 > - If an SSH client stops reading, the shell task spins yielding until it drains — a livelock, not a hang: the scheduler is round-robin, so the drain task still runs.
 > - `scan` disconnects, scans and reconnects, so it drops any SSH session over Wi-Fi (§4).
 > - OTA is built into the default image and has never been verified end to end against the stock bootloader.
+> - **Userland i2c/spi (SP2 · R4):** the ioctl validation frontier (EFAULT on bad pointers, size limits) and byte-for-byte parity with the kernel builtin are verified on hardware — but only against an **empty bus** (both return zeros). The data path has **not** been confirmed against a live device; an SSD1306 at `0x3c` (the README example address) is the test that would close it.
 
 ---
 

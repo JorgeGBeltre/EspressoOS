@@ -69,6 +69,36 @@ pub fn read_bytes(rx: &mut [u8]) -> KResult<()> {
     SpiBus::read(spi, rx).map_err(|_| KError::IoError)
 }
 
+pub const SPI_TRANSFER: u32 = 0;
+const SPI_MAX: usize = 64; // D-2.
+
+/// Struct D-1 para `spi transfer`: `{buf_ptr, len}`. Full-duplex in-place: el buffer trae
+/// los bytes TX a la entrada y recibe los RX a la salida (D-3: datos de bus por el struct).
+#[repr(C)]
+struct SpiReq {
+    buf_ptr: usize,
+    len: usize,
+}
+
+fn spi_transfer(arg: usize) -> KResult<usize> {
+    crate::syscall::handler::validate_user(arg, core::mem::size_of::<SpiReq>())?;
+    let req = unsafe { &*(arg as *const SpiReq) };
+    if req.len == 0 || req.len > SPI_MAX {
+        return Err(KError::InvalidArgument);
+    }
+    crate::syscall::handler::validate_user(req.buf_ptr, req.len)?;
+    let mut tx = [0u8; SPI_MAX];
+    let mut rx = [0u8; SPI_MAX];
+    unsafe {
+        core::ptr::copy_nonoverlapping(req.buf_ptr as *const u8, tx.as_mut_ptr(), req.len);
+    }
+    transfer(&tx[..req.len], &mut rx[..req.len])?;
+    unsafe {
+        core::ptr::copy_nonoverlapping(rx.as_ptr(), req.buf_ptr as *mut u8, req.len);
+    }
+    Ok(req.len)
+}
+
 pub struct Spi0Device;
 
 impl Device for Spi0Device {
@@ -79,6 +109,12 @@ impl Device for Spi0Device {
     fn write(&self, _off: u64, buf: &[u8]) -> KResult<usize> {
         write_bytes(buf)?;
         Ok(buf.len())
+    }
+    fn ioctl(&self, cmd: u32, arg: usize) -> KResult<usize> {
+        match cmd {
+            SPI_TRANSFER => spi_transfer(arg),
+            _ => Err(KError::NotSupported),
+        }
     }
 }
 

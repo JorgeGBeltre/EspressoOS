@@ -21,7 +21,8 @@ __pycache__/
 # IDE
 .idea/
 .vscode/
-
+docs/
+docs/superpowers/
 # Logs de build transitorios
 *.log
 

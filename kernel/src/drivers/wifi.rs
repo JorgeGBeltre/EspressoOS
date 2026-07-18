@@ -349,7 +349,6 @@ fn process_wifi_cmd(controller: &mut WifiController<'static>, wc: WifiCmd) -> bo
             // reanudamos la conexión. `scan_n` se reintenta un par de veces por si
             // el `disconnect` aún no ha asentado el estado.
             *SCAN_DIAG.lock() = String::from("started");
-            println!("[net] scan: starting...");
             let _ = controller.disconnect();
             *CURRENT_IP.lock() = None;
             let t0 = uptime_ms();
@@ -371,9 +370,8 @@ fn process_wifi_cmd(controller: &mut WifiController<'static>, wc: WifiCmd) -> bo
                 }
             };
             match scan {
-                Ok((aps, n)) => {
+                Ok((aps, _n)) => {
                     let ms = uptime_ms().saturating_sub(t0);
-                    println!("[net] scan: {} APs in {} ms", n, ms);
                     let mut out = Vec::new();
                     for ap in aps.iter() {
                         out.push(ApInfo {
@@ -390,12 +388,10 @@ fn process_wifi_cmd(controller: &mut WifiController<'static>, wc: WifiCmd) -> bo
                 }
                 Err(e) => {
                     let ms = uptime_ms().saturating_sub(t0);
-                    println!("[net] scan: error {:?} after {} ms", e, ms);
                     *SCAN_DIAG.lock() = alloc::format!("error {:?} after {} ms", e, ms);
                     SCAN_STATE.store(SCAN_ERROR, Ordering::Release);
                 }
             }
-            println!("[net] scan: reconnecting...");
             let _ = controller.connect();
             true
         }
@@ -403,14 +399,12 @@ fn process_wifi_cmd(controller: &mut WifiController<'static>, wc: WifiCmd) -> bo
             let ssid_h = match ssid.as_str().try_into() {
                 Ok(s) => s,
                 Err(_) => {
-                    println!("[net] ERROR: SSID too long (>32)");
                     return false;
                 }
             };
             let pass_h = match password.as_str().try_into() {
                 Ok(p) => p,
                 Err(_) => {
-                    println!("[net] ERROR: password too long (>64)");
                     return false;
                 }
             };
@@ -425,30 +419,21 @@ fn process_wifi_cmd(controller: &mut WifiController<'static>, wc: WifiCmd) -> bo
                 ..Default::default()
             };
             let _ = controller.disconnect();
-            if let Err(e) = controller.set_configuration(&Configuration::Client(cfg)) {
-                println!("[net] ERROR set_configuration: {:?}", e);
+            if controller.set_configuration(&Configuration::Client(cfg)).is_err() {
                 return false;
             }
             // Persistir en flash para que sobreviva a reinicios.
-            match crate::drivers::wifi_store::save(&ssid, &password) {
-                Ok(()) => println!("[net] saved Wi-Fi credentials to flash"),
-                Err(e) => println!("[net] warning: could not save credentials: {:?}", e),
-            }
+            let _ = crate::drivers::wifi_store::save(&ssid, &password);
             *CURRENT_SSID.lock() = Some(ssid.clone());
             *CURRENT_IP.lock() = None;
             set_status(WifiStatus::Connecting);
-            println!("[net] switching to SSID '{}'...", ssid);
-            match controller.connect() {
-                Ok(()) => println!("[net] connect() issued for '{}'", ssid),
-                Err(e) => println!("[net] connect() error: {:?}", e),
-            }
+            let _ = controller.connect();
             true
         }
         WifiCmd::Disconnect => {
             let _ = controller.disconnect();
             *CURRENT_IP.lock() = None;
             set_status(WifiStatus::Down);
-            println!("[net] disconnected by user");
             true
         }
     }
@@ -461,7 +446,6 @@ pub fn net_task(_arg: usize) {
     let periph = match periph {
         Some(p) => p,
         None => {
-            println!("[net] ERROR: peripherals not provided (was provide_peripherals missing?)");
             set_status(WifiStatus::Failed);
             return;
         }
@@ -472,8 +456,7 @@ pub fn net_task(_arg: usize) {
 
     let init = match esp_wifi::init(timg0.timer0, rng, periph.radio_clk) {
         Ok(c) => c,
-        Err(e) => {
-            println!("[net] ERROR esp_wifi::init: {:?}", e);
+        Err(_) => {
             set_status(WifiStatus::Failed);
             return;
         }
@@ -488,8 +471,7 @@ pub fn net_task(_arg: usize) {
         WifiController<'static>,
     ) = match wifi::new_with_mode(init, periph.wifi, WifiStaDevice) {
         Ok(v) => v,
-        Err(e) => {
-            println!("[net] ERROR new_with_mode: {:?}", e);
+        Err(_) => {
             set_status(WifiStatus::Failed);
             return;
         }
@@ -498,20 +480,13 @@ pub fn net_task(_arg: usize) {
     // Preferir credenciales GUARDADAS en flash (de un `wifi connect` anterior);
     // si no hay ninguna, usar las de compilación (wifi_credentials.rs).
     let (boot_ssid, boot_pass) = match crate::drivers::wifi_store::load() {
-        Some((s, p)) => {
-            println!("[net] using saved Wi-Fi credentials for '{}'", s);
-            (s, p)
-        }
-        None => {
-            println!("[net] no saved Wi-Fi credentials; using compiled defaults");
-            (String::from(WIFI_SSID), String::from(WIFI_PASSWORD))
-        }
+        Some((s, p)) => (s, p),
+        None => (String::from(WIFI_SSID), String::from(WIFI_PASSWORD)),
     };
 
     let ssid_h = match boot_ssid.as_str().try_into() {
         Ok(s) => s,
         Err(_) => {
-            println!("[net] ERROR: SSID too long (>32)");
             set_status(WifiStatus::Failed);
             return;
         }
@@ -519,7 +494,6 @@ pub fn net_task(_arg: usize) {
     let pass_h = match boot_pass.as_str().try_into() {
         Ok(p) => p,
         Err(_) => {
-            println!("[net] ERROR: password too long (>64)");
             set_status(WifiStatus::Failed);
             return;
         }
@@ -534,20 +508,17 @@ pub fn net_task(_arg: usize) {
         },
         ..Default::default()
     };
-    if let Err(e) = controller.set_configuration(&Configuration::Client(client)) {
-        println!("[net] ERROR set_configuration: {:?}", e);
+    if controller.set_configuration(&Configuration::Client(client)).is_err() {
         set_status(WifiStatus::Failed);
         return;
     }
 
-    if let Err(e) = controller.start() {
-        println!("[net] ERROR controller.start: {:?}", e);
+    if controller.start().is_err() {
         set_status(WifiStatus::Failed);
         return;
     }
     set_status(WifiStatus::Connecting);
     *CURRENT_SSID.lock() = Some(boot_ssid.clone());
-    println!("[net] connecting to SSID '{}'...", boot_ssid);
     let _ = controller.connect();
 
     // Esperar la asociación con las credenciales de arranque ANTES de montar la
@@ -561,10 +532,6 @@ pub fn net_task(_arg: usize) {
     // hasta asociarse. Así el sistema ARRANCA aunque las credenciales de arranque
     // fallen o la red no esté; el usuario se conecta con `wifi connect`.
     let mut next_retry = uptime_ms().saturating_add(3_000);
-    // Aviso UNA sola vez si no asocia en ~5s (en un arranque normal, que asocia
-    // antes, no se imprime nada — sin inundar la consola).
-    let warn_at = uptime_ms().saturating_add(5_000);
-    let mut warned = false;
     loop {
         let mut wcmds = Vec::new();
         {
@@ -582,15 +549,8 @@ pub fn net_task(_arg: usize) {
             next_retry = uptime_ms().saturating_add(3_000);
             let _ = controller.connect();
         }
-        if !warned && uptime_ms() >= warn_at {
-            warned = true;
-            println!(
-                "[net] no Wi-Fi yet; system is up. Join with: wifi connect \"SSID\" \"password\""
-            );
-        }
         scheduler::yield_now();
     }
-    println!("[net] associated with AP; negotiating DHCP...");
 
     let mac = device.mac_address();
     let mut if_cfg = IfaceConfig::new(HardwareAddress::Ethernet(EthernetAddress::from_bytes(&mac)));
@@ -604,8 +564,7 @@ pub fn net_task(_arg: usize) {
     let echo_rx = tcp::SocketBuffer::new(alloc::vec![0u8; ECHO_RX_SIZE]);
     let echo_tx = tcp::SocketBuffer::new(alloc::vec![0u8; ECHO_TX_SIZE]);
     let mut echo = tcp::Socket::new(echo_rx, echo_tx);
-    if let Err(e) = echo.listen(ECHO_PORT) {
-        println!("[net] ERROR listen({}): {:?}", ECHO_PORT, e);
+    if echo.listen(ECHO_PORT).is_err() {
         set_status(WifiStatus::Failed);
         return;
     }
@@ -722,11 +681,6 @@ pub fn net_task(_arg: usize) {
                     if !have_ip {
                         if let Some(ip) = iface.ipv4_addr() {
                             *CURRENT_IP.lock() = Some(ip.octets());
-                            println!("[net] IP = {}", ip);
-                            println!(
-                                "[net] SSH listening on port {}, ECHO on {}, OTA on {}",
-                                SSH_PORT, ECHO_PORT, OTA_PORT
-                            );
                             set_status(WifiStatus::Connected);
                         }
                         have_ip = true;
@@ -860,7 +814,6 @@ pub fn net_task(_arg: usize) {
                         // El enlace acaba de subir: pedir un DHCP fresco.
                         associated = true;
                         dhcp_reset_pending = true;
-                        println!("[net] associated with AP; negotiating DHCP...");
                     }
                 } else {
                     if associated {

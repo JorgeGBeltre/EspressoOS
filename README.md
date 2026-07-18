@@ -38,8 +38,9 @@ The project is mid-way through the **SP2→SP4 "total parity" mandate** (§7): s
 - [9. Operational Notes](#9-operational-notes)
 - [Repository Structure](#repository-structure)
 - [Memory Map & Partition Table](#memory-map--partition-table)
-- [License · Contact · Support](#license)
-
+- [License](#license)
+- [Contact](#contact)
+- [Support](#support)
 ---
 
 ## 1. Hardware Target

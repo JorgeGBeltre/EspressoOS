@@ -17,6 +17,10 @@ pub enum TaskState {
 
 const STACK_ALIGN: usize = 16;
 
+/// Patrón de pintado de pila para el watermark (D-10). La pila sin usar conserva este
+/// valor tras `Task::new`; `stack_high_water` lo escanea para medir el uso máximo.
+const STACK_PAINT: u32 = 0xDEAD_BEEF;
+
 const fn align_up(n: usize, align: usize) -> usize {
     n.saturating_add(align - 1) & !(align - 1)
 }
@@ -64,6 +68,14 @@ impl Task {
             return Err(KError::NoMem);
         }
 
+        // D-10 (watermark): pinta toda la pila con STACK_PAINT ANTES de escribir el frame
+        // inicial. La pila crece hacia abajo desde stack_top; la zona baja (en la base)
+        // que el task nunca toca conserva el patrón, y stack_high_water() lo escanea para
+        // medir el uso. init_task_stack (justo debajo) sobrescribe el tope con el frame.
+        unsafe {
+            core::slice::from_raw_parts_mut(base as *mut u32, size / 4).fill(STACK_PAINT);
+        }
+
         let stack_top = unsafe { base.add(size) };
 
         let context =
@@ -83,6 +95,25 @@ impl Task {
             start_entry: entry,
             start_arg: arg,
         }))
+    }
+
+    /// Uso máximo (high-water) de esta pila en bytes, midiendo cuánto del patrón
+    /// STACK_PAINT (pintado en `new`) sigue intacto desde `stack_base` hacia arriba. La
+    /// pila crece hacia abajo, así que la zona intacta está en la base. Caveat: si el
+    /// task escribió el patrón como dato, subestima — suficiente para un margen (D-10).
+    pub fn stack_high_water(&self) -> usize {
+        if self.stack_base.is_null() || self.stack_size == 0 {
+            return 0;
+        }
+        let words = self.stack_size / 4;
+        let p = self.stack_base as *const u32;
+        let mut untouched = 0usize;
+        unsafe {
+            while untouched < words && p.add(untouched).read_volatile() == STACK_PAINT {
+                untouched += 1;
+            }
+        }
+        self.stack_size - untouched * 4
     }
 }
 

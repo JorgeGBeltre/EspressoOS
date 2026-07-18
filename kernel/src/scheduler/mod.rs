@@ -116,6 +116,39 @@ fn with_sched<R>(f: impl FnOnce(&mut Scheduler) -> R) -> Option<R> {
     })
 }
 
+/// Reporte de watermark de pila de todas las tasks (D-10), como texto para /proc/stacks.
+/// Recoge los datos bajo el lock SCHED (solo lecturas de memoria + clones de nombre) y
+/// formatea FUERA del lock, para minimizar el tiempo con interrupciones apagadas.
+pub fn stacks_report() -> String {
+    let rows: Vec<(Tid, String, TaskState, usize, usize)> = with_sched(|s| {
+        s.tasks
+            .iter()
+            .map(|(tid, t)| (*tid, t.name.clone(), t.state, t.stack_high_water(), t.stack_size))
+            .collect()
+    })
+    .unwrap_or_default();
+
+    let mut out = String::from("tid\tname\tstate\tused\tsize\tfree\n");
+    for (tid, name, state, used, size) in rows {
+        let st = match state {
+            TaskState::Ready => "ready",
+            TaskState::Running => "run",
+            TaskState::Blocked => "blocked",
+            TaskState::Zombie => "zombie",
+        };
+        out.push_str(&alloc::format!(
+            "{}\t{}\t{}\t{}\t{}\t{}\n",
+            tid,
+            name,
+            st,
+            used,
+            size,
+            size.saturating_sub(used)
+        ));
+    }
+    out
+}
+
 pub fn init() {
     interrupts::critical_section(|| {
         let mut guard = SCHED.lock();

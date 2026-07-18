@@ -36,7 +36,11 @@ const PRIO_DEFAULT: u8 = 1;
 
 const HEARTBEAT_MS: u64 = 500;
 
-const NET_STACK_SIZE: usize = 16 * 1024;
+// El `net` task es el más profundo del sistema: hace el trabajo de radio bloqueante
+// (scan_n / connect / DHCP) Y ahora, tras R2, drena la cola de ioctls de wifi (D-4). El
+// watermark (D-10) lo midió en 12960/16384 = 21% libre bajo scan/connect — por debajo del
+// umbral del 25% (ver DECISIONES.md, invariante de margen). Subido a 24K: ~47% libre.
+const NET_STACK_SIZE: usize = 24 * 1024;
 
 #[main]
 fn main() -> ! {
@@ -202,22 +206,22 @@ fn main() -> ! {
     // SessionChannel::write runs.
     let uart_chan = session::create(session::ChannelKind::Uart, None);
     match scheduler::spawn_blocked(
-        "shell",
-        shell_task,
+        "init-sup",
+        init_supervisor_task,
         uart_chan.id as usize,
         layout::DEFAULT_STACK_SIZE,
         PRIO_DEFAULT,
         false,
     ) {
         Ok(tid) => {
-            let pid = scheduler::process::register_process("shell", tid, false, None);
+            let pid = scheduler::process::register_process("init-sup", tid, false, None);
             if let Err(e) = vfs::seed_fd_table(pid, session::SessionConsole::new(uart_chan)) {
-                println!("[kernel] warning: could not seed shell fd table: {:?}", e);
+                println!("[kernel] warning: could not seed supervisor fd table: {:?}", e);
             }
             scheduler::unblock_task(tid);
-            println!("[kernel] task 'shell' created (tid={}, pid={})", tid, pid);
+            println!("[kernel] task 'init-sup' created (tid={}, pid={})", tid, pid);
         }
-        Err(e) => println!("[kernel] ERROR: could not create shell: {:?}", e),
+        Err(e) => println!("[kernel] ERROR: could not create init supervisor: {:?}", e),
     }
 
     match scheduler::spawn(
@@ -280,15 +284,15 @@ fn banner() {
     println!("========================================");
 }
 
-fn shell_task(_arg: usize) {
-    // `exit` at the prompt makes run_session return: it breaks out before read_line
-    // is ever consulted, so "the UART never reports EOF" does not cover that path.
-    // Without this loop one `exit` ends the task, reap_orphans tears down pid 1,
-    // and the console is gone until a hardware reset -- on a board whose only local
-    // way in is this port. Looping gives back what it did before: log out, print
-    // the banner, start over. No spin risk: the UART channel never reports EOF, so
-    // the only way round the loop is a deliberate `exit`.
+fn init_supervisor_task(_arg: usize) {
+    // La consola de arranque, al estilo PID 1. Corre /bin/init como hijo (que hereda los
+    // fds 0/1/2→UART de esta tarea vía clone_fd_table) y espera. En el caso normal init
+    // no sale nunca -- hace bucle lanzando el sh interactivo -- así que esto sólo retorna
+    // si init no arranca o revienta. En cualquier caso, cae al shell del kernel para que
+    // la placa nunca quede sin consola durante SP1-SP3. SP4 borra este fallback cuando
+    // init sea PID 1 de verdad. SSH sigue en el shell del kernel a propósito (spec §9).
     loop {
+        let _ = shell::commands::run_program("init", &[]);
         shell::run_session(None);
     }
 }
@@ -458,16 +462,23 @@ fn install_userland() {
 fn init_etc_files() {
     let _ = vfs::mkdir("/etc");
 
-    if let Err(_) = vfs::mount::resolve("/etc/rc") {
-        if let Ok(fd) = vfs::open(
-            "/etc/rc",
-            vfs::OpenFlags(vfs::OpenFlags::CREATE.0 | vfs::OpenFlags::WRONLY.0),
-        ) {
-            let rc_content =
-                b"# EspressoOS Startup Script\n/bin/echo [rc] System started!\n/bin/ls\n";
-            let _ = vfs::write(fd, rc_content);
-            let _ = vfs::close(fd);
-        }
+    // /etc/rc es PROPIEDAD DEL SISTEMA: se REESCRIBE en cada boot (CREATE|WRONLY|TRUNC),
+    // versionado con la imagen. La lección de /etc/passwd fue que seed-if-absent deja
+    // copias obsoletas vivas tras el reflasheo (aquella traía root:root); por eso el rc
+    // del sistema se sobreescribe, no se siembra-si-falta. El hook editable del usuario
+    // es /etc/rc.local, que este kernel NUNCA escribe: si existe, es porque el usuario
+    // lo creó (mismo principio que /etc/passwd). La última línea del rc lo invoca; si no
+    // existe, sh imprime "sh: cannot open /etc/rc.local" y el arranque sigue — esa línea
+    // es, de paso, cómo el usuario descubre que el hook existe.
+    if let Ok(fd) = vfs::open(
+        "/etc/rc",
+        vfs::OpenFlags(
+            vfs::OpenFlags::CREATE.0 | vfs::OpenFlags::WRONLY.0 | vfs::OpenFlags::TRUNC.0,
+        ),
+    ) {
+        let rc_content = b"# EspressoOS Startup Script (system-owned, rewritten every boot)\n/bin/echo [rc] System started!\n/bin/ls\nsh /etc/rc.local\n";
+        let _ = vfs::write(fd, rc_content);
+        let _ = vfs::close(fd);
     }
 
     // Never seed /etc/passwd. drivers/ssh/auth.rs consults it BEFORE the compiled

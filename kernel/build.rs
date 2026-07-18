@@ -7,6 +7,9 @@ use std::process::Command;
 
 const APPS: &[&str] = &[
     "init", "sh", "cat", "echo", "ls", "ota", "ping", "sntp", "netstat", "httpd", "sleep", "badptr",
+    "cwdtest", "mkdir", "touch", "rm", "write", "wifi", "ip", "nmcli", "ioctltest",
+    "uptime", "free", "ps", "smp", "pms", "i2c", "spi",
+    "sha256", "power", "ble", "reboot",
 ];
 
 // Every binary links at the same address and the loader relocates it into whatever

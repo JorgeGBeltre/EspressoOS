@@ -62,6 +62,12 @@ impl Inode for SysFsRoot {
         if name == "kernel" {
             return Ok(Arc::new(SysFsFile::KernelInfo));
         }
+        if name == "smp" {
+            return Ok(Arc::new(SysFsFile::Smp));
+        }
+        if name == "pms" {
+            return Ok(Arc::new(SysFsFile::Pms));
+        }
         Err(KError::NotFound)
     }
 
@@ -87,12 +93,28 @@ impl Inode for SysFsRoot {
                 ino: 2,
             }));
         }
+        if index == 3 {
+            return Ok(Some(DirEntry {
+                name: "smp".to_string(),
+                kind: InodeKind::File,
+                ino: 3,
+            }));
+        }
+        if index == 4 {
+            return Ok(Some(DirEntry {
+                name: "pms".to_string(),
+                kind: InodeKind::File,
+                ino: 4,
+            }));
+        }
         Ok(None)
     }
 }
 
 enum SysFsFile {
     KernelInfo,
+    Smp,
+    Pms,
 }
 
 impl Inode for SysFsFile {
@@ -105,8 +127,33 @@ impl Inode for SysFsFile {
     }
 
     fn read_at(&self, off: u64, buf: &mut [u8]) -> KResult<usize> {
-        let content = match self {
-            SysFsFile::KernelInfo => "EspressoOS Kernel v0.1.0\n",
+        // Estado por lectura (D-8). Las ACCIONES feature-gated (`pms world1`) siguen en el
+        // shell del kernel hasta SP4; aquí solo se expone el estado.
+        let content: String = match self {
+            SysFsFile::KernelInfo => String::from("EspressoOS Kernel v0.1.0\n"),
+            SysFsFile::Smp => {
+                let core = crate::scheduler::core_sync::current_core_id();
+                if cfg!(feature = "smp") {
+                    let running = crate::scheduler::core_sync::is_running();
+                    alloc::format!(
+                        "smp: enabled\ncore: {}\napp_cpu: {}\n",
+                        core,
+                        if running { "active" } else { "not started" }
+                    )
+                } else {
+                    alloc::format!("smp: disabled (build --features smp)\ncore: {}\n", core)
+                }
+            }
+            SysFsFile::Pms => {
+                if cfg!(feature = "pms") {
+                    match crate::mm::mpu::report() {
+                        Some(s) => alloc::format!("pms: enabled\n{}\n", s),
+                        None => String::from("pms: enabled but unavailable\n"),
+                    }
+                } else {
+                    String::from("pms: disabled (build --features pms)\n")
+                }
+            }
         };
 
         let bytes = content.as_bytes();

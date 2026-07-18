@@ -58,6 +58,10 @@ pub enum Syscall {
     Pipe = 26,
 
     Dup2 = 27,
+
+    Chdir = 28,
+
+    Getcwd = 29,
 }
 
 impl Syscall {
@@ -91,6 +95,8 @@ impl Syscall {
             25 => Syscall::OtaState,
             26 => Syscall::Pipe,
             27 => Syscall::Dup2,
+            28 => Syscall::Chdir,
+            29 => Syscall::Getcwd,
             _ => return None,
         };
         Some(sc)

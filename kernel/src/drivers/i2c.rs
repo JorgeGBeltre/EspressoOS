@@ -68,6 +68,45 @@ pub fn probe(addr: u8) -> bool {
     }
 }
 
+pub const I2C_PROBE: u32 = 0;
+pub const I2C_READ: u32 = 1;
+pub const I2C_WRITE: u32 = 2;
+const I2C_MAX: usize = 64; // D-2: transferencias 1..64 (como documenta el builtin).
+
+/// Struct D-1 para `i2c read`/`i2c write`: `{addr, buf_ptr, len}`. Todos `usize`.
+#[repr(C)]
+struct I2cReq {
+    addr: usize,
+    buf_ptr: usize,
+    len: usize,
+}
+
+/// Camino común read/write con validación D-1 (struct + puntero interno) y límite D-2.
+/// `is_write=true` copia user→bus; false lee bus→user (D-3: los bytes del bus viajan por el
+/// struct del ioctl porque son datos, no estado del driver).
+fn i2c_xfer(arg: usize, is_write: bool) -> KResult<usize> {
+    crate::syscall::handler::validate_user(arg, core::mem::size_of::<I2cReq>())?;
+    let req = unsafe { &*(arg as *const I2cReq) };
+    if req.len == 0 || req.len > I2C_MAX {
+        return Err(KError::InvalidArgument);
+    }
+    crate::syscall::handler::validate_user(req.buf_ptr, req.len)?;
+    let addr = req.addr as u8;
+    let mut kbuf = [0u8; I2C_MAX];
+    if is_write {
+        unsafe {
+            core::ptr::copy_nonoverlapping(req.buf_ptr as *const u8, kbuf.as_mut_ptr(), req.len);
+        }
+        write(addr, &kbuf[..req.len])?;
+    } else {
+        read(addr, &mut kbuf[..req.len])?;
+        unsafe {
+            core::ptr::copy_nonoverlapping(kbuf.as_ptr(), req.buf_ptr as *mut u8, req.len);
+        }
+    }
+    Ok(req.len)
+}
+
 pub struct I2c0Device;
 
 impl Device for I2c0Device {
@@ -81,7 +120,9 @@ impl Device for I2c0Device {
     }
     fn ioctl(&self, cmd: u32, arg: usize) -> KResult<usize> {
         match cmd {
-            0 => Ok(probe(arg as u8) as usize),
+            I2C_PROBE => Ok(probe(arg as u8) as usize),
+            I2C_READ => i2c_xfer(arg, false),
+            I2C_WRITE => i2c_xfer(arg, true),
             _ => Err(KError::NotSupported),
         }
     }

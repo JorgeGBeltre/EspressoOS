@@ -92,5 +92,21 @@ pub mod layout {
 
     pub const KERNEL_HEAP_SIZE: usize = 128 * 1024;
     pub const PSRAM_SIZE: usize = 8 * 1024 * 1024;
-    pub const DEFAULT_STACK_SIZE: usize = 8 * 1024;
+    // 16K, no 8K. En Xtensa la excepción/syscall corre sobre la pila de la tarea
+    // interrumpida, así que la pila de una tarea de usuario sostiene sus frames MÁS los
+    // del kernel durante un syscall -- y `spawn` (load_elf + relocación + write_argv +
+    // register_process) es el camino más profundo. Con 8K, init desbordaba justo ahí,
+    // pisaba sus propios slots de spill de registros, y el crash parecía un bug de
+    // context-switch (no lo era: el scheduler preserva registros, verificado en hardware).
+    // 16K iguala la pila del net task y cubre el path de spawn con margen razonable.
+    #[cfg(not(feature = "diag-32k-stack"))]
+    pub const DEFAULT_STACK_SIZE: usize = 16 * 1024;
+    // DIAGNÓSTICO (experimento de pila BLE): solo bajo la feature `diag-32k-stack`, sube la
+    // pila de userland a 32K para el brazo B del A/B. El `default` NO la activa → 16K queda
+    // garantizado por el compilador; el 32K no puede viajar a una imagen de ship (invariante
+    // estructural, no "acordarse de revertir"). Afecta a TODOS los procesos de userland (no
+    // solo /bin/ble), lo cual para el experimento da igual: la variable que arbitra es la
+    // pila del llamador. `net_task` no se ve afectado (usa NET_STACK_SIZE, no este const).
+    #[cfg(feature = "diag-32k-stack")]
+    pub const DEFAULT_STACK_SIZE: usize = 32 * 1024;
 }

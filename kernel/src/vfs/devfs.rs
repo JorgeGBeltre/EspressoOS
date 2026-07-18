@@ -154,6 +154,10 @@ pub fn init() -> KResult<Arc<DevFs>> {
 
     register(&devfs, "i2c0", crate::drivers::i2c::devfs_device())?;
     register(&devfs, "spi0", crate::drivers::spi::devfs_device())?;
+    register(&devfs, "wlan0", crate::drivers::wifi::wlan_devfs_device())?;
+    register(&devfs, "sha0", crate::drivers::crypto::devfs_device())?;
+    register(&devfs, "power", crate::drivers::power::devfs_device())?;
+    register(&devfs, "ble0", crate::drivers::ble::devfs_device())?;
     Ok(devfs)
 }
 

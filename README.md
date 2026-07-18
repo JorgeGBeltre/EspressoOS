@@ -594,4 +594,11 @@ Project: **EspressoOS — A `no_std` Unix-like Operating System in Rust for ESP3
 
 This project is developed independently. Even a small contribution helps me dedicate more time to development, testing, and releasing new features.
 
- [![Buy Me a Coffee](https://img.shields.io/badge/Buy_Me_a_Coffee-FFDD00?style=for-the-badge&logo=buy-me-a-coffee&logoColor=black)](https://www.paypal.com/donate/?hosted_button_id=2VLA8BWT967LU)
+
+ <p align="center">
+  <a href="https://www.paypal.com/donate/?hosted_button_id=2VLA8BWT967LU">
+    <img src="https://www.paypalobjects.com/webstatic/icon/pp258.png"
+         alt="Donate with PayPal"
+         height="60">
+  </a>
+</p>

@@ -264,9 +264,10 @@ Notes worth knowing (all from `syscall/handler.rs`):
 | `i2c/spi/sha256/power/ble/reboot/ota` | ✅ driver control via `/dev/*` ioctl (see §3.6). `sha256` is the strong differential; `ota` menu marks image INVALID to force rollback. |
 | `sleep` | ✅ concurrency test — holds a slot long enough for a second instance to overlap |
 | `cwdtest/ioctltest/badptr` | ✅ boundary self-tests (chdir/getcwd edges; ioctl D-1 EFAULT/EINVAL frontier; syscall pointer rejection) |
-| `ping` | ⚠️ **ignores argv**, hardcodes `192.168.1.1`, and is a **TCP-connect probe to port 80, NOT ICMP** (smoltcp has no raw sockets) |
-| `sntp` | ⚠️ UDP client to a hardcoded NTP server + `settimeofday`; its 200-attempt **timeout is dead code** (the blocking socket read never returns short) |
-| `httpd` | ⚠️ minimal HTTP/1.1 server; **no argv, blocks forever in `accept`**, serves a fixed page inlining `/proc/uptime`+`/proc/meminfo` |
+| `ping [IPv4]` | ⚠️ **ICMP raw sockets not supported by smoltcp/kernel stack.** Explicitly outputs architectural notice and points user to `tcping`. |
+| `tcping <IPv4> [port]` | ✅ **TCP connectivity probe.** Processes `argv` (`<IPv4>`, optional `port`, default 80), measures TCP handshake RTT, and displays transmission/loss statistics. |
+| `sntp [server_ip]` | ✅ **SNTP time synchronization client.** Processes `argv` for NTP server IP (defaults to `128.138.140.44`), configures `SO_RCVTIMEO` socket read timeout (2s), retries up to 3 times, updates system clock via `settimeofday`, and exits gracefully on failure without blocking indefinitely. |
+| `httpd [port]` | ✅ **HTTP/1.1 web server.** Processes `argv` for port (defaults to 80), configures client socket read timeout (3s), dynamically serves `/proc/uptime` and `/proc/meminfo` on each request, sends valid HTTP/1.1 headers, and closes client sockets safely. |
 | `netstat` | ✅ prints `/proc/net/sockets` verbatim |
 
 ---

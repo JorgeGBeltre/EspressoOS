@@ -20,7 +20,7 @@ struct ShaReq {
 /// de crypto de verdad (no como el `00 00 00` de un bus vacío).
 #[no_mangle]
 pub extern "C" fn main(argc: i32, argv: *const *const u8) -> i32 {
-    let mut input = [0u8; 512];
+    let mut input = [0u8; 4096];
     let mut ilen = 0usize;
     let text = if argc >= 2 {
         let t = unsafe { arg(argv, 1) };

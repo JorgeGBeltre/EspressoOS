@@ -678,13 +678,14 @@ struct sockaddr_in {
 fn sys_socket(args: &[usize]) -> isize {
     let domain = arg(args, 0) as i32;
     let ty = arg(args, 1) as i32;
-    let _proto = arg(args, 2) as i32;
+    let proto = arg(args, 2) as i32;
 
-    if domain != 2 || (ty != 1 && ty != 2) {
+    let is_icmp = ty == 3 || proto == 1;
+    let is_udp = ty == 2 && !is_icmp;
+
+    if domain != 2 || (ty != 1 && ty != 2 && ty != 3 && proto != 1) {
         return KError::NotSupported.as_errno();
     }
-
-    let is_udp = ty == 2;
 
     let mut guard = crate::drivers::wifi::NET_SOCKETS.lock();
     let sockets = match guard.as_mut() {
@@ -692,7 +693,17 @@ fn sys_socket(args: &[usize]) -> isize {
         None => return KError::IoError.as_errno(),
     };
 
-    let handle = if is_udp {
+    let handle = if is_icmp {
+        let rx_meta = alloc::vec![smoltcp::socket::icmp::PacketMetadata::EMPTY; 8];
+        let rx_data = alloc::vec![0; 2048];
+        let tx_meta = alloc::vec![smoltcp::socket::icmp::PacketMetadata::EMPTY; 8];
+        let tx_data = alloc::vec![0; 2048];
+        let rx_buf = smoltcp::socket::icmp::PacketBuffer::new(rx_meta, rx_data);
+        let tx_buf = smoltcp::socket::icmp::PacketBuffer::new(tx_meta, tx_data);
+        let mut socket = smoltcp::socket::icmp::Socket::new(rx_buf, tx_buf);
+        let _ = socket.bind(smoltcp::socket::icmp::Endpoint::Ident(0x1234));
+        sockets.add(socket)
+    } else if is_udp {
         let rx_meta = alloc::vec![smoltcp::socket::udp::PacketMetadata::EMPTY; 8];
         let rx_data = alloc::vec![0; 2048];
         let tx_meta = alloc::vec![smoltcp::socket::udp::PacketMetadata::EMPTY; 8];
@@ -712,6 +723,7 @@ fn sys_socket(args: &[usize]) -> isize {
     let socket_inode = Arc::new(crate::vfs::socket::SocketInode {
         handle: crate::arch::xtensa::sync::Mutex::new(handle),
         is_udp,
+        is_icmp,
         remote_endpoint: crate::arch::xtensa::sync::Mutex::new(None),
         local_port: crate::arch::xtensa::sync::Mutex::new(None),
         recv_timeout_ms: core::sync::atomic::AtomicU32::new(0),
@@ -771,7 +783,7 @@ fn sys_connect(args: &[usize]) -> isize {
         smoltcp::wire::IpAddress::Ipv4(smoltcp::wire::Ipv4Address::from_octets(ip_bytes));
     let remote_endpoint = smoltcp::wire::IpEndpoint::new(remote_addr, port);
 
-    if inode.is_udp_socket() {
+    if inode.is_udp_socket() || inode.is_icmp_socket() {
         let _ = inode.set_socket_remote_endpoint(remote_endpoint);
         return 0;
     }

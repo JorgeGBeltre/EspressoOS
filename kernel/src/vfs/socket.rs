@@ -9,6 +9,7 @@ pub const FIONBIO: u32 = 0x5421;
 pub struct SocketInode {
     pub handle: KMutex<SocketHandle>,
     pub is_udp: bool,
+    pub is_icmp: bool,
     pub remote_endpoint: KMutex<Option<smoltcp::wire::IpEndpoint>>,
     pub local_port: KMutex<Option<u16>>,
     pub recv_timeout_ms: core::sync::atomic::AtomicU32,
@@ -30,6 +31,10 @@ impl Inode for SocketInode {
 
     fn is_udp_socket(&self) -> bool {
         self.is_udp
+    }
+
+    fn is_icmp_socket(&self) -> bool {
+        self.is_icmp
     }
 
     fn set_socket_remote_endpoint(&self, endpoint: smoltcp::wire::IpEndpoint) -> KResult<()> {
@@ -60,12 +65,18 @@ impl Inode for SocketInode {
                 let sock = sockets.get_mut::<smoltcp::socket::udp::Socket>(handle);
                 sock.bind(port).map_err(|_| KError::InvalidArgument)?;
             }
+        } else if self.is_icmp {
+            let mut guard = crate::drivers::wifi::NET_SOCKETS.lock();
+            if let Some(sockets) = guard.as_mut() {
+                let sock = sockets.get_mut::<smoltcp::socket::icmp::Socket>(handle);
+                sock.bind(smoltcp::socket::icmp::Endpoint::Ident(port)).map_err(|_| KError::InvalidArgument)?;
+            }
         }
         Ok(())
     }
 
     fn listen(&self, _backlog: i32) -> KResult<()> {
-        if self.is_udp {
+        if self.is_udp || self.is_icmp {
             return Err(KError::NotSupported);
         }
         let port = self.local_port.lock().ok_or(KError::InvalidArgument)?;
@@ -79,7 +90,7 @@ impl Inode for SocketInode {
     }
 
     fn accept(&self) -> KResult<Arc<dyn Inode>> {
-        if self.is_udp {
+        if self.is_udp || self.is_icmp {
             return Err(KError::NotSupported);
         }
 
@@ -118,6 +129,7 @@ impl Inode for SocketInode {
         let accepted_inode = Arc::new(SocketInode {
             handle: KMutex::new(connected_handle),
             is_udp: false,
+            is_icmp: false,
             remote_endpoint: KMutex::new(None),
             local_port: KMutex::new(Some(local_port)),
             recv_timeout_ms: core::sync::atomic::AtomicU32::new(0),
@@ -133,7 +145,14 @@ impl Inode for SocketInode {
         loop {
             let mut guard = crate::drivers::wifi::NET_SOCKETS.lock();
             if let Some(sockets) = guard.as_mut() {
-                if self.is_udp {
+                if self.is_icmp {
+                    let sock = sockets.get_mut::<smoltcp::socket::icmp::Socket>(handle);
+                    if sock.can_recv() {
+                        if let Ok((n, _remote_ip)) = sock.recv_slice(buf) {
+                            return Ok(n);
+                        }
+                    }
+                } else if self.is_udp {
                     let sock = sockets.get_mut::<smoltcp::socket::udp::Socket>(handle);
                     if sock.can_recv() {
                         if let Ok((n, _remote_ep)) = sock.recv_slice(buf) {
@@ -174,7 +193,19 @@ impl Inode for SocketInode {
         loop {
             let mut guard = crate::drivers::wifi::NET_SOCKETS.lock();
             if let Some(sockets) = guard.as_mut() {
-                if self.is_udp {
+                if self.is_icmp {
+                    let sock = sockets.get_mut::<smoltcp::socket::icmp::Socket>(handle);
+                    let ep_guard = self.remote_endpoint.lock();
+                    if let Some(ep) = *ep_guard {
+                        if sock.can_send() {
+                            if let Ok(_) = sock.send_slice(buf, ep.addr) {
+                                return Ok(buf.len());
+                            }
+                        }
+                    } else {
+                        return Err(KError::InvalidArgument);
+                    }
+                } else if self.is_udp {
                     let sock = sockets.get_mut::<smoltcp::socket::udp::Socket>(handle);
                     let ep_guard = self.remote_endpoint.lock();
                     if let Some(ep) = *ep_guard {
@@ -225,7 +256,7 @@ impl Drop for SocketInode {
         let handle = *self.handle.lock();
         let mut guard = crate::drivers::wifi::NET_SOCKETS.lock();
         if let Some(sockets) = guard.as_mut() {
-            if !self.is_udp {
+            if !self.is_udp && !self.is_icmp {
                 let sock = sockets.get_mut::<smoltcp::socket::tcp::Socket>(handle);
                 sock.close();
             }

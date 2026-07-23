@@ -285,15 +285,11 @@ fn banner() {
 }
 
 fn init_supervisor_task(_arg: usize) {
-    // La consola de arranque, al estilo PID 1. Corre /bin/init como hijo (que hereda los
-    // fds 0/1/2→UART de esta tarea vía clone_fd_table) y espera. En el caso normal init
-    // no sale nunca -- hace bucle lanzando el sh interactivo -- así que esto sólo retorna
-    // si init no arranca o revienta. En cualquier caso, cae al shell del kernel para que
-    // la placa nunca quede sin consola durante SP1-SP3. SP4 borra este fallback cuando
-    // init sea PID 1 de verdad. SSH sigue en el shell del kernel a propósito (spec §9).
+    // Consola primaria de userland: corre /bin/init de forma permanente. Si init sale,
+    // se reinicia automáticamente sin necesidad del shell del kernel.
     loop {
         let _ = shell::commands::run_program("init", &[]);
-        shell::run_session(None);
+        scheduler::yield_now();
     }
 }
 

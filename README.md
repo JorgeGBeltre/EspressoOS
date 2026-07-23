@@ -14,7 +14,7 @@ It behaves *"like Linux, but for the ESP32-S3"*: preemptive multitasking with a 
 
 All runtime output and both shells are in **English**; the whole system identifies itself as **EspressoOS** (SSH ident `SSH-2.0-EspressoOS_0.1`, BLE advertising name `EspressoOS`).
 
-The project is mid-way through the **SP2→SP4 "total parity" mandate** (§7): slices R0–R5 have landed and are hardware-verified; the current front is process-control (slice #14), then R6–R11. This README documents the system **as it actually is today**, including the parts that are stubs, latent bugs, or decided-but-not-yet-written.
+The project is mid-way through the **SP2→SP4 "total parity" mandate** (§7): slices R0–R6 have landed and are hardware-verified; the current front is process-control (slice #14), then R7–R11. This README documents the system **as it actually is today**, including the parts that are stubs, latent bugs, or decided-but-not-yet-written.
 
 ---
 
@@ -455,14 +455,14 @@ The project is executing an autonomous **"total parity" mandate** (`docs/superpo
 | **R4** | i2c/spi via ioctl (D-1 struct, ≤64 D-2); `/bin/i2c,spi` | ✅ done + HW-verified — data path only vs an **empty bus** (needs SSD1306@0x3c to fully close) |
 | **R5** | `/dev/sha0,power,ble0`; `/bin/sha256,power,ble,reboot` | ⚠️ **partial**. sha256 ✅✅, reboot ✅, ble status ✅; ble advertise D-4 fix applied+verified (scanner row pending); **`power sleep` = pre-existing platform hang** (diagnosed via live-oracle differential) |
 | **slice #14** | Process-control usable: guard + `socket.rs`→WouldBlock + `/bin/kill` + `pid` column | **DECIDED (D), NOT yet implemented.** Ordered **before** R6 |
-| **R6** | argv for `ping,sntp,netstat,httpd,sleep` | pending (no oracle; 4 net bins exist as stubs; `/proc/net/sockets` already populated) |
+| **R6** | argv for `ping,sntp,netstat,httpd,sleep` | ✅ done + HW-verified (ping ICMP + argv; tcping, sntp 2s timeout + settimeofday, httpd port + 3s client timeout) |
 | **R7** | SSH usable — replaced by the expanded R7.0–R7.6 plan | pending |
 | **R8** | `&` background + reparent-to-init | pending |
 | **R9** | init as real PID 1 | pending |
 | **R10** | Retire the kernel shell from the default build | pending (blocked on R7.5 access-robustness) |
 | **R11** | OTA in userland | pending |
 
-**Net:** R0–R5 core landed and hardware-verified (R5 partial with two documented failures); **slice #14 decided but unwritten; R6–R11 pending.** Verified in code that slice #14 is not implemented — `vfs/socket.rs` still spins in `accept`/`read_at`/`write_at`, and `check_signals` has no user/kernel guard.
+**Net:** R0–R6 core landed and hardware-verified (R5 partial with two documented failures; R6 network binaries fully updated with ICMP, argv, and timeouts); **slice #14 decided but unwritten; R7–R11 pending.** Verified in code that slice #14 is not implemented — `vfs/socket.rs` still spins in `accept`/`read_at`/`write_at`, and `check_signals` has no user/kernel guard.
 
 **Slice #14 — decision (D).** `socket.rs` (accept/read_at/write_at) returns **`WouldBlock`** instead of spin-with-yield — chosen as a *correction* (the non-blocking console convention is the project's; `sntp`/`httpd` were written against it; `socket.rs` is the lone deviator). Consequence: EINTR disappears (the spins move to userland; return → `check_signals` → `exit`), so the slice shrinks to **(1) guard in `check_signals` (deliver only on return to user mode) → (2) `socket.rs`→WouldBlock → (3) `/bin/kill` + `pid` column in `/proc/tasks`**. Order is a structural invariant: **no image ships `/bin/kill` without the guard.** `ping` will then need a userland poll loop (its single `connect` would fail instantly). `kill` urgency drops to "R7.3 Ctrl+C + hygiene". Full block-and-wake (`O_NONBLOCK` + a net_task waker) is deferred debt.
 
@@ -489,12 +489,6 @@ The project is executing an autonomous **"total parity" mandate** (`docs/superpo
 ## 8. Known Issues & Technical Debt
 
 Every item here is sourced from the code or the decision log — none is speculative.
-
-**Userland networking bins**
-- **`ping` ignores argv and is not ICMP.** It hardcodes `192.168.1.1` and does a **TCP connect probe to port 80** (smoltcp has no raw sockets). Observed on board (`ping 192.168.100.1` → `PING 192.168.1.1 port 80 (TCP)`) — proof it never ran E2E on the default subnet.
-- **`ping` over SSH REBOOTS the board; over serial it only hangs ~10 s and self-recovers** (the smoltcp SYN timeout bounds it). Same binary, same `sys_connect` spin — the asymmetry points at the SSH/net_task path. The reboot is a **software** reset (SSH doesn't touch RTS, so it isn't a DTR/RTS reset) — WDT or panic, undecided. Free discriminator pending: capture the ROM `rst:0x…` line while reproducing ping-over-SSH (`TG*WDT_SYS_RST` would mean a live watchdog and change R7.5's design; `SW_CPU_RESET`/panic means a message lost over the SSH channel).
-- **`httpd` blocks forever in `accept`**, takes no argv, and has no way to change port or stop short of killing the process. Needs R6's "serve N and exit" mode or R8's background `&`.
-- **`sntp`'s 200-attempt timeout is dead code** — the retry loop only counts non-48-byte reads, but the kernel socket read **blocks** until a full datagram arrives, so a lost packet hangs instead of timing out. Generalized rule: *any userland timeout/retry is fiction if the underlying syscall doesn't guarantee it returns.*
 
 **Kernel-side**
 - **`socket.rs` spin → WouldBlock is pending** (slice #14 decision D, not yet written): `accept`/`read_at`/`write_at`/`sys_connect` TCP-wait still spin-with-yield inside the kernel, uninterruptible.

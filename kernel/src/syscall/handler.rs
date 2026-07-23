@@ -795,23 +795,23 @@ fn sys_connect(args: &[usize]) -> isize {
     };
     crate::drivers::wifi::NET_CMD_QUEUE.lock().push(cmd);
 
-    loop {
-        let mut guard = crate::drivers::wifi::NET_SOCKETS.lock();
-        if let Some(sockets) = guard.as_mut() {
-            let sock = sockets.get_mut::<smoltcp::socket::tcp::Socket>(handle);
-            match sock.state() {
-                smoltcp::socket::tcp::State::Established => return 0,
-                smoltcp::socket::tcp::State::Closed => {
-                    if sock.remote_endpoint().is_some() {
-                        return KError::IoError.as_errno();
-                    }
+    let mut guard = crate::drivers::wifi::NET_SOCKETS.lock();
+    if let Some(sockets) = guard.as_mut() {
+        let sock = sockets.get_mut::<smoltcp::socket::tcp::Socket>(handle);
+        match sock.state() {
+            smoltcp::socket::tcp::State::Established => 0,
+            smoltcp::socket::tcp::State::Closed => {
+                if sock.remote_endpoint().is_some() {
+                    KError::IoError.as_errno()
+                } else {
+                    KError::WouldBlock.as_errno()
                 }
-                smoltcp::socket::tcp::State::SynSent => {}
-                _ => return KError::IoError.as_errno(),
             }
+            smoltcp::socket::tcp::State::SynSent => KError::WouldBlock.as_errno(),
+            _ => KError::IoError.as_errno(),
         }
-        drop(guard);
-        crate::scheduler::yield_now();
+    } else {
+        KError::IoError.as_errno()
     }
 }
 

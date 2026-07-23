@@ -120,24 +120,35 @@ fn with_sched<R>(f: impl FnOnce(&mut Scheduler) -> R) -> Option<R> {
 /// Recoge los datos bajo el lock SCHED (solo lecturas de memoria + clones de nombre) y
 /// formatea FUERA del lock, para minimizar el tiempo con interrupciones apagadas.
 pub fn stacks_report() -> String {
-    let rows: Vec<(Tid, String, TaskState, usize, usize)> = with_sched(|s| {
+    let rows: Vec<(Tid, Option<u32>, String, TaskState, usize, usize)> = with_sched(|s| {
         s.tasks
             .iter()
             .map(|(tid, t)| (*tid, t.name.clone(), t.state, t.stack_high_water(), t.stack_size))
-            .collect()
+            .collect::<Vec<_>>()
     })
-    .unwrap_or_default();
+    .unwrap_or_default()
+    .into_iter()
+    .map(|(tid, name, state, used, size)| {
+        let pid = crate::scheduler::process::PROCESS_TABLE.lock().pid_of_tid(tid);
+        (tid, pid, name, state, used, size)
+    })
+    .collect();
 
-    let mut out = String::from("tid\tname\tstate\tused\tsize\tfree\n");
-    for (tid, name, state, used, size) in rows {
+    let mut out = String::from("pid\ttid\tname\tstate\tused\tsize\tfree\n");
+    for (tid, pid, name, state, used, size) in rows {
         let st = match state {
             TaskState::Ready => "ready",
             TaskState::Running => "run",
             TaskState::Blocked => "blocked",
             TaskState::Zombie => "zombie",
         };
+        let pid_str = match pid {
+            Some(p) => alloc::format!("{}", p),
+            None => String::from("-"),
+        };
         out.push_str(&alloc::format!(
-            "{}\t{}\t{}\t{}\t{}\t{}\n",
+            "{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
+            pid_str,
             tid,
             name,
             st,

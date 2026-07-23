@@ -28,7 +28,8 @@ New-Item -ItemType Directory -Force -Path $dist  | Out-Null
 # app -> indice de slot (direccion = 0x3c000000 + i*0x10000)
 $apps = [ordered]@{
   "init" = 0; "sh" = 1; "cat" = 2; "ls" = 3; "echo" = 4;
-  "ota" = 5; "ping" = 6; "sntp" = 7; "netstat" = 8; "httpd" = 9
+  "ota" = 5; "ping" = 6; "sntp" = 7; "netstat" = 8; "httpd" = 9;
+  "tcping" = 10
 }
 
 $tpl = @'

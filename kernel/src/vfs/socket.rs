@@ -3,11 +3,16 @@ use crate::arch::xtensa::sync::Mutex as KMutex;
 use crate::prelude::*;
 use smoltcp::iface::SocketHandle;
 
+pub const SO_RCVTIMEO: u32 = 0x1006;
+pub const FIONBIO: u32 = 0x5421;
+
 pub struct SocketInode {
     pub handle: KMutex<SocketHandle>,
     pub is_udp: bool,
     pub remote_endpoint: KMutex<Option<smoltcp::wire::IpEndpoint>>,
     pub local_port: KMutex<Option<u16>>,
+    pub recv_timeout_ms: core::sync::atomic::AtomicU32,
+    pub non_blocking: core::sync::atomic::AtomicBool,
 }
 
 impl Inode for SocketInode {
@@ -30,6 +35,20 @@ impl Inode for SocketInode {
     fn set_socket_remote_endpoint(&self, endpoint: smoltcp::wire::IpEndpoint) -> KResult<()> {
         *self.remote_endpoint.lock() = Some(endpoint);
         Ok(())
+    }
+
+    fn ioctl(&self, cmd: u32, arg: usize) -> KResult<usize> {
+        match cmd {
+            SO_RCVTIMEO => {
+                self.recv_timeout_ms.store(arg as u32, core::sync::atomic::Ordering::Relaxed);
+                Ok(0)
+            }
+            FIONBIO => {
+                self.non_blocking.store(arg != 0, core::sync::atomic::Ordering::Relaxed);
+                Ok(0)
+            }
+            _ => Err(KError::NotSupported),
+        }
     }
 
     fn bind(&self, port: u16) -> KResult<()> {
@@ -101,12 +120,16 @@ impl Inode for SocketInode {
             is_udp: false,
             remote_endpoint: KMutex::new(None),
             local_port: KMutex::new(Some(local_port)),
+            recv_timeout_ms: core::sync::atomic::AtomicU32::new(0),
+            non_blocking: core::sync::atomic::AtomicBool::new(false),
         });
         Ok(accepted_inode)
     }
 
     fn read_at(&self, _off: u64, buf: &mut [u8]) -> KResult<usize> {
         let handle = *self.handle.lock();
+        let timeout_ms = self.recv_timeout_ms.load(core::sync::atomic::Ordering::Relaxed);
+        let start_ms = crate::arch::xtensa::timer::uptime_ms();
         loop {
             let mut guard = crate::drivers::wifi::NET_SOCKETS.lock();
             if let Some(sockets) = guard.as_mut() {
@@ -130,6 +153,18 @@ impl Inode for SocketInode {
                 }
             }
             drop(guard);
+
+            if self.non_blocking.load(core::sync::atomic::Ordering::Relaxed) {
+                return Err(KError::WouldBlock);
+            }
+
+            if timeout_ms > 0 {
+                let elapsed = crate::arch::xtensa::timer::uptime_ms().saturating_sub(start_ms);
+                if elapsed >= timeout_ms as u64 {
+                    return Err(KError::Timeout);
+                }
+            }
+
             crate::scheduler::yield_now();
         }
     }

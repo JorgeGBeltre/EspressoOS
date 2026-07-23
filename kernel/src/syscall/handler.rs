@@ -714,6 +714,8 @@ fn sys_socket(args: &[usize]) -> isize {
         is_udp,
         remote_endpoint: crate::arch::xtensa::sync::Mutex::new(None),
         local_port: crate::arch::xtensa::sync::Mutex::new(None),
+        recv_timeout_ms: core::sync::atomic::AtomicU32::new(0),
+        non_blocking: core::sync::atomic::AtomicBool::new(false),
     });
 
     let open_file = match crate::vfs::OpenFile::new(socket_inode, crate::vfs::OpenFlags::RDWR) {

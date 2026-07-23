@@ -255,6 +255,17 @@ pub fn connect(fd: i32, addr: &sockaddr_in) -> isize {
     unsafe { syscall(22, fd as usize, addr as *const sockaddr_in as usize, core::mem::size_of::<sockaddr_in>(), 0, 0, 0) }
 }
 
+pub const SO_RCVTIMEO: u32 = 0x1006;
+pub const FIONBIO: u32 = 0x5421;
+
+pub fn setsockopt_timeout(fd: i32, timeout_ms: u32) -> isize {
+    ioctl(fd, SO_RCVTIMEO, timeout_ms as usize)
+}
+
+pub fn set_nonblocking(fd: i32, nonblocking: bool) -> isize {
+    ioctl(fd, FIONBIO, if nonblocking { 1 } else { 0 })
+}
+
 pub fn send(fd: i32, buf: &[u8]) -> isize {
     write(fd, buf)
 }

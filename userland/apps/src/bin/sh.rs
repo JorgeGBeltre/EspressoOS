@@ -257,34 +257,11 @@ fn builtin_pwd() {
     }
 }
 
-/// Prompt con el cwd, como el shell del kernel ('/' se muestra como '~'). Efecto
-/// lateral valioso: `getcwd` se verifica en CADA interacción, gratis.
-fn print_prompt() {
-    let mut cwd = [0u8; PATH_MAX];
-    let user_str = unsafe {
-        if USER_LEN > 0 {
-            core::str::from_utf8(&USER_BUF[..USER_LEN]).unwrap_or("")
-        } else {
-            ""
-        }
-    };
-    let at = if !user_str.is_empty() { "@" } else { "" };
-    match getcwd_str(&mut cwd) {
-        Ok("/") => print!("{}{}EspressoOS:~$ ", user_str, at),
-        Ok(s) => print!("{}{}EspressoOS:{}$ ", user_str, at, s),
-        Err(_) => print!("{}{}EspressoOS:?$ ", user_str, at),
-    }
-}
-
 fn builtin_cd(line: &[u8]) {
-    // El argumento tras "cd", recortado. Vacío -> "/" (no hay $HOME en este sistema).
     let target = core::str::from_utf8(&line[2..]).unwrap_or("").trim();
     let target = if target.is_empty() { "/" } else { target };
     let r = chdir(target);
     if r < 0 {
-        // Distingue no-existe de no-es-directorio: el mensaje único "no such directory"
-        // mentía sobre un fichero que SÍ existe (p. ej. `cd /etc/rc`). Errnos del kernel:
-        // ENOENT=-2, ENOTDIR=-20.
         let reason = match r {
             -2 => "no such file or directory",
             -20 => "not a directory",
@@ -294,12 +271,6 @@ fn builtin_cd(line: &[u8]) {
     }
 }
 
-/// Reads one line into `buf`, echoing as it goes. Returns its length.
-///
-/// Isomorfo con el lector del shell del kernel (`shell/mod.rs`): backspace/DEL borran
-/// el último carácter y **nunca** pasan del inicio del input -- por eso no se puede
-/// comer el prompt. Sólo se aceptan imprimibles `0x20..0x7f`; el resto de controles
-/// (flechas, Ctrl-*, etc.) se ignoran en vez de ensuciar el buffer y la pantalla.
 const HISTORY_MAX: usize = 16;
 static mut HISTORY_BUF: [[u8; LINE]; HISTORY_MAX] = [[0; LINE]; HISTORY_MAX];
 static mut HISTORY_LENS: [usize; HISTORY_MAX] = [0; HISTORY_MAX];
@@ -343,21 +314,99 @@ fn itoa<'a>(mut n: usize, buf: &'a mut [u8; 16]) -> &'a str {
     core::str::from_utf8(&buf[..len]).unwrap_or("")
 }
 
-fn redraw_line(buf: &[u8], len: usize, pos: usize) {
-    let mut num_buf = [0u8; 16];
-    let _ = libc::write(1, b"\r");
-    print_prompt();
-    if len > 0 {
-        let _ = libc::write(1, &buf[..len]);
+fn prompt_bytes(out: &mut [u8]) -> usize {
+    let mut cwd = [0u8; PATH_MAX];
+    let user_str = unsafe {
+        if USER_LEN > 0 {
+            core::str::from_utf8(&USER_BUF[..USER_LEN]).unwrap_or("")
+        } else {
+            ""
+        }
+    };
+    let at = if !user_str.is_empty() { "@" } else { "" };
+    let mut o = 0;
+    let ubytes = user_str.as_bytes();
+    if o + ubytes.len() <= out.len() {
+        out[o..o + ubytes.len()].copy_from_slice(ubytes);
+        o += ubytes.len();
     }
-    let _ = libc::write(1, b"\x1b[K");
+    let abytes = at.as_bytes();
+    if o + abytes.len() <= out.len() {
+        out[o..o + abytes.len()].copy_from_slice(abytes);
+        o += abytes.len();
+    }
+
+    match getcwd_str(&mut cwd) {
+        Ok("/") => {
+            let p = b"EspressoOS:~$ ";
+            if o + p.len() <= out.len() {
+                out[o..o + p.len()].copy_from_slice(p);
+                o += p.len();
+            }
+        }
+        Ok(s) => {
+            let p1 = b"EspressoOS:";
+            if o + p1.len() <= out.len() {
+                out[o..o + p1.len()].copy_from_slice(p1);
+                o += p1.len();
+            }
+            let sbytes = s.as_bytes();
+            if o + sbytes.len() <= out.len() {
+                out[o..o + sbytes.len()].copy_from_slice(sbytes);
+                o += sbytes.len();
+            }
+            let p2 = b"$ ";
+            if o + p2.len() <= out.len() {
+                out[o..o + p2.len()].copy_from_slice(p2);
+                o += p2.len();
+            }
+        }
+        Err(_) => {
+            let p = b"EspressoOS:?$ ";
+            if o + p.len() <= out.len() {
+                out[o..o + p.len()].copy_from_slice(p);
+                o += p.len();
+            }
+        }
+    }
+    o
+}
+
+fn print_prompt() {
+    let mut buf = [0u8; 128];
+    let n = prompt_bytes(&mut buf);
+    let _ = libc::write(1, &buf[..n]);
+}
+
+fn redraw_line(buf: &[u8], len: usize, pos: usize) {
+    let mut scratch = [0u8; 256];
+    let mut o = 0;
+    scratch[o] = b'\r';
+    o += 1;
+    o += prompt_bytes(&mut scratch[o..]);
+    if len > 0 {
+        let chunk_len = len.min(LINE).min(scratch.len().saturating_sub(o + 32));
+        scratch[o..o + chunk_len].copy_from_slice(&buf[..chunk_len]);
+        o += chunk_len;
+    }
+    let clear = b"\x1b[K";
+    scratch[o..o + clear.len()].copy_from_slice(clear);
+    o += clear.len();
+
     if pos < len {
         let back = len - pos;
+        let mut num_buf = [0u8; 16];
         let back_str = itoa(back, &mut num_buf);
-        let _ = libc::write(1, b"\x1b[");
-        let _ = libc::write(1, back_str.as_bytes());
-        let _ = libc::write(1, b"D");
+        let prefix = b"\x1b[";
+        scratch[o..o + prefix.len()].copy_from_slice(prefix);
+        o += prefix.len();
+        let bbytes = back_str.as_bytes();
+        scratch[o..o + bbytes.len()].copy_from_slice(bbytes);
+        o += bbytes.len();
+        scratch[o] = b'D';
+        o += 1;
     }
+    let _ = libc::write(1, &scratch[..o]);
 }
 
 fn try_read_byte() -> Option<u8> {

@@ -573,6 +573,7 @@ pub fn net_task(_arg: usize) {
     let ssh_rx = tcp::SocketBuffer::new(alloc::vec![0u8; SSH_RX_SIZE]);
     let ssh_tx = tcp::SocketBuffer::new(alloc::vec![0u8; SSH_TX_SIZE]);
     let mut ssh_sock = tcp::Socket::new(ssh_rx, ssh_tx);
+    ssh_sock.set_ack_delay(None);
     if let Err(e) = ssh_sock.listen(SSH_PORT) {
         println!("[ssh] ERROR listen({}): {:?}", SSH_PORT, e);
     }
@@ -801,6 +802,12 @@ pub fn net_task(_arg: usize) {
                         ota_receiving = false;
                     }
                 }
+            }
+
+            // Segunda pasada de poll para transmitir inmediatamente cualquier eco o datos
+            // generados por SSH/ECHO en esta iteración sin esperar al siguiente turno de net_task.
+            if associated {
+                let _ = iface.poll(t, &mut device, sockets);
             }
 
             if uptime_ms() >= next_link_check {

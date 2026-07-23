@@ -19,11 +19,31 @@ const O_TRUNC: u32 = 0x0400;
 /// Máximo de etapas en un pipeline (`a | b | c | ...`).
 const MAX_STAGES: usize = 8;
 
+static mut USER_BUF: [u8; 32] = [0; 32];
+static mut USER_LEN: usize = 0;
+
 #[no_mangle]
 pub extern "C" fn main(argc: i32, argv: *const *const u8) -> i32 {
-    // Modo-script: `sh <fichero>` corre el fichero y sale. Sin argumentos = interactivo.
-    if argc > 1 {
-        let path = unsafe { arg(argv, 1) };
+    let mut script_path: Option<&str> = None;
+    let mut i = 1;
+    while i < argc {
+        let a = unsafe { arg(argv, i) };
+        if a == "--user" && i + 1 < argc {
+            i += 1;
+            let u = unsafe { arg(argv, i) };
+            unsafe {
+                let bytes = u.as_bytes();
+                let len = bytes.len().min(USER_BUF.len());
+                USER_BUF[..len].copy_from_slice(&bytes[..len]);
+                USER_LEN = len;
+            }
+        } else if script_path.is_none() {
+            script_path = Some(a);
+        }
+        i += 1;
+    }
+
+    if let Some(path) = script_path {
         return run_script(path);
     }
 
@@ -241,10 +261,18 @@ fn builtin_pwd() {
 /// lateral valioso: `getcwd` se verifica en CADA interacción, gratis.
 fn print_prompt() {
     let mut cwd = [0u8; PATH_MAX];
+    let user_str = unsafe {
+        if USER_LEN > 0 {
+            core::str::from_utf8(&USER_BUF[..USER_LEN]).unwrap_or("")
+        } else {
+            ""
+        }
+    };
+    let at = if !user_str.is_empty() { "@" } else { "" };
     match getcwd_str(&mut cwd) {
-        Ok("/") => print!("EspressoOS:~$ "),
-        Ok(s) => print!("EspressoOS:{}$ ", s),
-        Err(_) => print!("EspressoOS:?$ "),
+        Ok("/") => print!("{}{}EspressoOS:~$ ", user_str, at),
+        Ok(s) => print!("{}{}EspressoOS:{}$ ", user_str, at, s),
+        Err(_) => print!("{}{}EspressoOS:?$ ", user_str, at),
     }
 }
 

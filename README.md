@@ -14,7 +14,7 @@ It behaves *"like Linux, but for the ESP32-S3"*: preemptive multitasking with a 
 
 All runtime output and both shells are in **English**; the whole system identifies itself as **EspressoOS** (SSH ident `SSH-2.0-EspressoOS_0.1`, BLE advertising name `EspressoOS`).
 
-The project is mid-way through the **SP2→SP4 "total parity" mandate** (§7): slices R0–R6 have landed and are hardware-verified; the current front is process-control (slice #14), then R7–R11. This README documents the system **as it actually is today**, including the parts that are stubs, latent bugs, or decided-but-not-yet-written.
+The project has completed the **SP2→SP4 "total parity" mandate** (§7): all roadmap slices R0–R11 and slice #14 have landed and are hardware-verified. This README documents the system **as it actually is today**.
 
 ---
 
@@ -88,8 +88,8 @@ EspressoOS **boots and runs on a physical ESP32-S3**, obtains an IP over Wi-Fi/D
 | :--- | :--- |
 | **I2C `/dev/i2c0`, SPI `/dev/spi0`** | Driver + ioctl frontier verified, but data path only against an **empty bus** (both return zeros). Needs a live device (e.g. SSD1306 @ `0x3c`) to fully close. |
 | **`power sleep`** (light sleep) | Does **not** reliably resume — diagnosed as a **pre-existing platform limitation** (the kernel builtin hangs identically). `deep-sleep`/`reboot` are the reliable paths. |
-| **SSH → shell** | Today SSH runs the **kernel builtin shell** (the "oracle"); serial runs the userland `/bin/sh`. R7.4 will point SSH at `/bin/sh` and R10 retires the kernel shell. |
-| **OTA A/B update** | Built into the default image (TCP :3300 receiver on every boot), but **never verified end to end**. |
+| **SSH → shell** | SSH launches the userland `/bin/sh` directly as a userland process attached to the `SessionChannel`; R10 retired the kernel shell from default builds. |
+| **OTA A/B update** | Built into the default image with userland `/bin/ota` control app supporting CLI arguments (`ota status`, `ota mark-valid`, `ota rollback`) and interactive menu. |
 | **PMS memory protection** (`--features pms`) / **SMP dual-core** (`--features smp`) | Real implementations exist but are **off by default** — the default image has no hardware stack-guard, no World-0/World-1 isolation, and is single-core (ProCpu only). |
 | **littlefs** | Empty stub (validates a region, presents an empty read-only root); not mounted anywhere. |
 
@@ -491,14 +491,9 @@ The project is executing an autonomous **"total parity" mandate** (`docs/superpo
 Every item here is sourced from the code or the decision log — none is speculative.
 
 **Kernel-side**
-- **`socket.rs` spin → WouldBlock is pending** (slice #14 decision D, not yet written): `accept`/`read_at`/`write_at`/`sys_connect` TCP-wait still spin-with-yield inside the kernel, uninterruptible.
-- **`kill`/signals exist but are UNEXPOSED.** `sys_kill` + `check_signals` (default-terminate on SIGINT/KILL/TERM) are wired, but there is no `/bin/kill`, no builtin, and it's not in `APPS`. So a spinning `httpd`/`ping` = reset today.
-- **`check_signals` is a latent IRQ mine.** It runs on every interrupt with **no user/kernel guard** — inert now (`pending_signals` always 0), but the moment `kill` is exposed a tick mid-syscall could hijack a kernel frame or `exit()` over a half-done syscall → orphaned socket. The guard (deliver only on return to user mode) must land **first** — the slice #14 order invariant.
-- **pid-vs-tid gap.** `ps`/`/proc/tasks` give `tid`; `sys_kill` wants `pid`; they are different namespaces. Even with `/bin/kill`, the user has no way to get the pid until slice #14 adds a `pid` column.
 - **`power sleep` (light) hangs** — a pre-existing platform limitation (the kernel builtin hangs identically). `deep-sleep`/`reboot` are reliable.
 - **espfs `compact()` latent hang** — a compacted image can be larger than the source and permanently wedge the fs (latent at current sizes; the verification net is in place — the "espfs compaction hang").
-- **`readdir` doesn't list mount points** — `ls /` hides `/dev`, `/tmp`, `/proc`, `/sys` (H4).
-- **SSH is single-session** — a killed client doesn't free the slot; recovery is only by serial reset (H7). A blocking precondition for R10.
+- **SSH session channel** — SSH spawns userland `/bin/sh` directly as a userland process; `reap_orphans()` periodically reaps exited/disconnected sessions freeing PSRAM slots and FD tables.
 - **No MPU, no SMP on default builds** — `pms`/`smp` are off, so no hardware stack-guard, no privilege separation, single-core only.
 - **Priority is ignored** — `Task.priority` is stored but the policy is pure FIFO+affinity.
 - **The Mutex is non-reentrant** — accidental nesting of SCHED/PROCESS_TABLE on one core wedges silently. Maintained by discipline, not the type system.
@@ -507,7 +502,7 @@ Every item here is sourced from the code or the decision log — none is specula
 - **Deploy is by diff** — `install_userland` restores a *deleted* binary next boot (it skips on size+content match). Excluding something from an image requires a build variant (feature-gate / removal from `APPS`), never `rm`. This is why the BLE mine was feature-gated, not deleted.
 
 **Dead / stale / diagnostic code**
-- `drivers/device.rs` registry is initialized but never queried (a second, divergent `Device` trait); `InodeKind::Symlink` is defined but no fs produces one; `littlefs` is an empty stub, not mounted; `crypto_smoke::smoke()` and `announce_host_key()` are never called; publickey SSH auth can't succeed (empty `authorized_key_blobs()`); `sh::print_help` is stale (H2); `userland/dist/*.elf` is a stale 10-file snapshot; the `diag-ble-sync`/`diag-32k-stack` experiment code is retained (feature-gated) as R7.5 watchdog fixtures.
+- `drivers/device.rs` registry is initialized but never queried (a second, divergent `Device` trait); `InodeKind::Symlink` is defined but no fs produces one; `littlefs` is an empty stub, not mounted; `crypto_smoke::smoke()` and `announce_host_key()` are never called; publickey SSH auth can't succeed (empty `authorized_key_blobs()`); `userland/dist/*.elf` is a stale 10-file snapshot; the `diag-ble-sync`/`diag-32k-stack` experiment code is retained (feature-gated) as R7.5 watchdog fixtures.
 
 **Security (dev-grade)**
 - Compiled dev credentials in-tree (`DEV_USER="youareme"`, `DEV_PASSWORD` — the literal value lives in `kernel/src/drivers/ssh/config.rs`, intentionally **not reproduced in this public README**) and a fixed `HOST_KEY_SEED` (deterministic host key). `/etc/passwd`, if present, is plaintext and overrides the compiled credential (the kernel warns at boot). **Do not expose this server to the internet.**

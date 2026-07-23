@@ -454,7 +454,7 @@ The project is executing an autonomous **"total parity" mandate** (`docs/superpo
 | **R3** | `/proc/tasks` (+state,pid), meminfo slots, `/bin/uptime,free,ps`, `/sys/smp,pms` | ✅ done + HW-verified; `NET_STACK` 16 K→24 K |
 | **R4** | i2c/spi via ioctl (D-1 struct, ≤64 D-2); `/bin/i2c,spi` | ✅ done + HW-verified — data path only vs an **empty bus** (needs SSD1306@0x3c to fully close) |
 | **R5** | `/dev/sha0,power,ble0`; `/bin/sha256,power,ble,reboot` | ⚠️ **partial**. sha256 ✅✅, reboot ✅, ble status ✅; ble advertise D-4 fix applied+verified (scanner row pending); **`power sleep` = pre-existing platform hang** (diagnosed via live-oracle differential) |
-| **slice #14** | Process-control usable: guard + `socket.rs`→WouldBlock + `/bin/kill` + `pid` column | **DECIDED (D), NOT yet implemented.** Ordered **before** R6 |
+| **slice #14** | Process-control usable: guard + `socket.rs`→WouldBlock + `/bin/kill` + `pid` column | ✅ done + HW-verified (user/kernel signal guard, WouldBlock non-blocking sockets, /bin/kill app, pid column in /proc/tasks) |
 | **R6** | argv for `ping,sntp,netstat,httpd,sleep` | ✅ done + HW-verified (ping ICMP + argv; tcping, sntp 2s timeout + settimeofday, httpd port + 3s client timeout) |
 | **R7** | SSH usable — replaced by the expanded R7.0–R7.6 plan | pending |
 | **R8** | `&` background + reparent-to-init | pending |
@@ -462,7 +462,7 @@ The project is executing an autonomous **"total parity" mandate** (`docs/superpo
 | **R10** | Retire the kernel shell from the default build | pending (blocked on R7.5 access-robustness) |
 | **R11** | OTA in userland | pending |
 
-**Net:** R0–R6 core landed and hardware-verified (R5 partial with two documented failures; R6 network binaries fully updated with ICMP, argv, and timeouts); **slice #14 decided but unwritten; R7–R11 pending.** Verified in code that slice #14 is not implemented — `vfs/socket.rs` still spins in `accept`/`read_at`/`write_at`, and `check_signals` has no user/kernel guard.
+**Net:** R0–R6 and slice #14 core landed and hardware-verified (R5 partial with two documented failures; R6 network binaries fully updated; slice #14 process-control active); **R7–R11 pending.**
 
 **Slice #14 — decision (D).** `socket.rs` (accept/read_at/write_at) returns **`WouldBlock`** instead of spin-with-yield — chosen as a *correction* (the non-blocking console convention is the project's; `sntp`/`httpd` were written against it; `socket.rs` is the lone deviator). Consequence: EINTR disappears (the spins move to userland; return → `check_signals` → `exit`), so the slice shrinks to **(1) guard in `check_signals` (deliver only on return to user mode) → (2) `socket.rs`→WouldBlock → (3) `/bin/kill` + `pid` column in `/proc/tasks`**. Order is a structural invariant: **no image ships `/bin/kill` without the guard.** `ping` will then need a userland poll loop (its single `connect` would fail instantly). `kill` urgency drops to "R7.3 Ctrl+C + hygiene". Full block-and-wake (`O_NONBLOCK` + a net_task waker) is deferred debt.
 

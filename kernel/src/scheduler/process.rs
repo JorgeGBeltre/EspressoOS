@@ -347,6 +347,13 @@ pub fn reap_orphans() {
 }
 
 pub fn check_signals(save_frame: &mut esp_hal::xtensa_lx_rt::exception::Context) -> bool {
+    if !super::current_task_is_user() {
+        return false;
+    }
+    if !crate::mm::psram_exec::is_ibus(save_frame.PC, 1) {
+        return false;
+    }
+
     let current_tid = super::current();
     let mut pt = PROCESS_TABLE.lock();
 

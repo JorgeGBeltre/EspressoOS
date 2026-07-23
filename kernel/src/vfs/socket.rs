@@ -96,19 +96,19 @@ impl Inode for SocketInode {
 
         let handle = *self.handle.lock();
 
-        loop {
+        {
             let mut guard = crate::drivers::wifi::NET_SOCKETS.lock();
             if let Some(sockets) = guard.as_mut() {
                 let sock = sockets.get_mut::<smoltcp::socket::tcp::Socket>(handle);
-                if sock.is_active() && sock.state() == smoltcp::socket::tcp::State::Established {
-                    break;
-                }
                 if sock.state() == smoltcp::socket::tcp::State::Closed {
                     return Err(KError::IoError);
                 }
+                if !(sock.is_active() && sock.state() == smoltcp::socket::tcp::State::Established) {
+                    return Err(KError::WouldBlock);
+                }
+            } else {
+                return Err(KError::IoError);
             }
-            drop(guard);
-            crate::scheduler::yield_now();
         }
 
         let local_port = self.local_port.lock().ok_or(KError::InvalidArgument)?;
@@ -142,96 +142,90 @@ impl Inode for SocketInode {
         let handle = *self.handle.lock();
         let timeout_ms = self.recv_timeout_ms.load(core::sync::atomic::Ordering::Relaxed);
         let start_ms = crate::arch::xtensa::timer::uptime_ms();
-        loop {
-            let mut guard = crate::drivers::wifi::NET_SOCKETS.lock();
-            if let Some(sockets) = guard.as_mut() {
-                if self.is_icmp {
-                    let sock = sockets.get_mut::<smoltcp::socket::icmp::Socket>(handle);
-                    if sock.can_recv() {
-                        if let Ok((n, _remote_ip)) = sock.recv_slice(buf) {
-                            return Ok(n);
-                        }
-                    }
-                } else if self.is_udp {
-                    let sock = sockets.get_mut::<smoltcp::socket::udp::Socket>(handle);
-                    if sock.can_recv() {
-                        if let Ok((n, _remote_ep)) = sock.recv_slice(buf) {
-                            return Ok(n);
-                        }
-                    }
-                } else {
-                    let sock = sockets.get_mut::<smoltcp::socket::tcp::Socket>(handle);
-                    if sock.can_recv() {
-                        if let Ok(n) = sock.recv_slice(buf) {
-                            return Ok(n);
-                        }
-                    }
-                    if !sock.is_open() || sock.state() == smoltcp::socket::tcp::State::CloseWait {
-                        return Ok(0);
+
+        let mut guard = crate::drivers::wifi::NET_SOCKETS.lock();
+        if let Some(sockets) = guard.as_mut() {
+            if self.is_icmp {
+                let sock = sockets.get_mut::<smoltcp::socket::icmp::Socket>(handle);
+                if sock.can_recv() {
+                    if let Ok((n, _remote_ip)) = sock.recv_slice(buf) {
+                        return Ok(n);
                     }
                 }
-            }
-            drop(guard);
-
-            if self.non_blocking.load(core::sync::atomic::Ordering::Relaxed) {
-                return Err(KError::WouldBlock);
-            }
-
-            if timeout_ms > 0 {
-                let elapsed = crate::arch::xtensa::timer::uptime_ms().saturating_sub(start_ms);
-                if elapsed >= timeout_ms as u64 {
-                    return Err(KError::Timeout);
+            } else if self.is_udp {
+                let sock = sockets.get_mut::<smoltcp::socket::udp::Socket>(handle);
+                if sock.can_recv() {
+                    if let Ok((n, _remote_ep)) = sock.recv_slice(buf) {
+                        return Ok(n);
+                    }
+                }
+            } else {
+                let sock = sockets.get_mut::<smoltcp::socket::tcp::Socket>(handle);
+                if sock.can_recv() {
+                    if let Ok(n) = sock.recv_slice(buf) {
+                        return Ok(n);
+                    }
+                }
+                if !sock.is_open() || sock.state() == smoltcp::socket::tcp::State::CloseWait {
+                    return Ok(0);
                 }
             }
-
-            crate::scheduler::yield_now();
         }
+        drop(guard);
+
+        if timeout_ms > 0 {
+            let elapsed = crate::arch::xtensa::timer::uptime_ms().saturating_sub(start_ms);
+            if elapsed >= timeout_ms as u64 {
+                return Err(KError::Timeout);
+            }
+        }
+
+        Err(KError::WouldBlock)
     }
 
     fn write_at(&self, _off: u64, buf: &[u8]) -> KResult<usize> {
         let handle = *self.handle.lock();
-        loop {
-            let mut guard = crate::drivers::wifi::NET_SOCKETS.lock();
-            if let Some(sockets) = guard.as_mut() {
-                if self.is_icmp {
-                    let sock = sockets.get_mut::<smoltcp::socket::icmp::Socket>(handle);
-                    let ep_guard = self.remote_endpoint.lock();
-                    if let Some(ep) = *ep_guard {
-                        if sock.can_send() {
-                            if let Ok(_) = sock.send_slice(buf, ep.addr) {
-                                return Ok(buf.len());
-                            }
+        let mut guard = crate::drivers::wifi::NET_SOCKETS.lock();
+        if let Some(sockets) = guard.as_mut() {
+            if self.is_icmp {
+                let sock = sockets.get_mut::<smoltcp::socket::icmp::Socket>(handle);
+                let ep_guard = self.remote_endpoint.lock();
+                if let Some(ep) = *ep_guard {
+                    if sock.can_send() {
+                        if let Ok(_) = sock.send_slice(buf, ep.addr) {
+                            return Ok(buf.len());
                         }
-                    } else {
-                        return Err(KError::InvalidArgument);
-                    }
-                } else if self.is_udp {
-                    let sock = sockets.get_mut::<smoltcp::socket::udp::Socket>(handle);
-                    let ep_guard = self.remote_endpoint.lock();
-                    if let Some(ep) = *ep_guard {
-                        if sock.can_send() {
-                            if let Ok(_) = sock.send_slice(buf, ep) {
-                                return Ok(buf.len());
-                            }
-                        }
-                    } else {
-                        return Err(KError::InvalidArgument);
                     }
                 } else {
-                    let sock = sockets.get_mut::<smoltcp::socket::tcp::Socket>(handle);
+                    return Err(KError::InvalidArgument);
+                }
+            } else if self.is_udp {
+                let sock = sockets.get_mut::<smoltcp::socket::udp::Socket>(handle);
+                let ep_guard = self.remote_endpoint.lock();
+                if let Some(ep) = *ep_guard {
                     if sock.can_send() {
-                        if let Ok(n) = sock.send_slice(buf) {
-                            return Ok(n);
+                        if let Ok(_) = sock.send_slice(buf, ep) {
+                            return Ok(buf.len());
                         }
                     }
-                    if !sock.is_open() {
-                        return Err(KError::IoError);
+                } else {
+                    return Err(KError::InvalidArgument);
+                }
+            } else {
+                let sock = sockets.get_mut::<smoltcp::socket::tcp::Socket>(handle);
+                if sock.can_send() {
+                    if let Ok(n) = sock.send_slice(buf) {
+                        return Ok(n);
                     }
                 }
+                if !sock.is_open() {
+                    return Err(KError::IoError);
+                }
             }
-            drop(guard);
-            crate::scheduler::yield_now();
         }
+        drop(guard);
+
+        Err(KError::WouldBlock)
     }
 
     fn readdir(&self, _index: usize) -> KResult<Option<DirEntry>> {

@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 
-use super::inode::{FileSystem, Inode};
+use super::inode::{FileSystem, Inode, InodeKind};
 use crate::arch::xtensa::sync::Mutex;
 use crate::prelude::*;
 
@@ -184,6 +184,31 @@ pub fn resolve(path: &str) -> KResult<Arc<dyn Inode>> {
         node = node.lookup(comp)?;
     }
     Ok(node)
+}
+
+pub fn child_mounts(dir_path: &str) -> KResult<Vec<(String, InodeKind)>> {
+    use alloc::format;
+    use alloc::string::ToString;
+
+    let norm = normalize(dir_path)?;
+    let prefix = if norm == "/" {
+        String::from("/")
+    } else {
+        format!("{}/", norm)
+    };
+
+    let mounts = MOUNTS.lock();
+    let mut children = Vec::new();
+    for m in mounts.iter() {
+        if m.path != "/" && m.path.starts_with(&prefix) {
+            let rel = &m.path[prefix.len()..];
+            if !rel.is_empty() && !rel.contains('/') {
+                let kind = m.fs.root().kind();
+                children.push((rel.to_string(), kind));
+            }
+        }
+    }
+    Ok(children)
 }
 
 // These cannot run: the kernel is a no_std binary with no lib target, so

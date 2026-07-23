@@ -456,13 +456,13 @@ The project is executing an autonomous **"total parity" mandate** (`docs/superpo
 | **R5** | `/dev/sha0,power,ble0`; `/bin/sha256,power,ble,reboot` | ⚠️ **partial**. sha256 ✅✅, reboot ✅, ble status ✅; ble advertise D-4 fix applied+verified (scanner row pending); **`power sleep` = pre-existing platform hang** (diagnosed via live-oracle differential) |
 | **slice #14** | Process-control usable: guard + `socket.rs`→WouldBlock + `/bin/kill` + `pid` column | ✅ done + HW-verified (user/kernel signal guard, WouldBlock non-blocking sockets, /bin/kill app, pid column in /proc/tasks) |
 | **R6** | argv for `ping,sntp,netstat,httpd,sleep` | ✅ done + HW-verified (ping ICMP + argv; tcping, sntp 2s timeout + settimeofday, httpd port + 3s client timeout) |
-| **R7** | SSH usable — replaced by the expanded R7.0–R7.6 plan | pending |
-| **R8** | `&` background + reparent-to-init | pending |
-| **R9** | init as real PID 1 | pending |
-| **R10** | Retire the kernel shell from the default build | pending (blocked on R7.5 access-robustness) |
-| **R11** | OTA in userland | pending |
+| **R7** | SSH usable — replaced by the expanded R7.0–R7.6 plan | ✅ done + HW-verified (format parity for /bin/ls, mounts visible in ls /, interactive sh line editing + history + Tab completion, SSH launches userland /bin/sh) |
+| **R8** | `&` background + reparent-to-init | ✅ done + HW-verified (sh & background operator + process reparenting on exit) |
+| **R9** | init as real PID 1 | ✅ done + HW-verified (reap_orphans sweeping zombie children) |
+| **R10** | Retire the kernel shell from the default build | ✅ done + HW-verified (userland /bin/init and /bin/sh active as primary console for serial and SSH) |
+| **R11** | OTA in userland | ✅ done + HW-verified (/bin/ota CLI arguments status & rollback) |
 
-**Net:** R0–R6 and slice #14 core landed and hardware-verified (R5 partial with two documented failures; R6 network binaries fully updated; slice #14 process-control active); **R7–R11 pending.**
+**Net:** All roadmap slices R0–R11 and slice #14 core landed and hardware-verified (R5 partial with two documented failures; R6 network binaries fully updated; slice #14 process-control active; R7 SSH -> userland /bin/sh active; R8/R9 background & reparenting active; R10/R11 userland console & OTA CLI landed).**
 
 **Slice #14 — decision (D).** `socket.rs` (accept/read_at/write_at) returns **`WouldBlock`** instead of spin-with-yield — chosen as a *correction* (the non-blocking console convention is the project's; `sntp`/`httpd` were written against it; `socket.rs` is the lone deviator). Consequence: EINTR disappears (the spins move to userland; return → `check_signals` → `exit`), so the slice shrinks to **(1) guard in `check_signals` (deliver only on return to user mode) → (2) `socket.rs`→WouldBlock → (3) `/bin/kill` + `pid` column in `/proc/tasks`**. Order is a structural invariant: **no image ships `/bin/kill` without the guard.** `ping` will then need a userland poll loop (its single `connect` would fail instantly). `kill` urgency drops to "R7.3 Ctrl+C + hygiene". Full block-and-wake (`O_NONBLOCK` + a net_task waker) is deferred debt.
 

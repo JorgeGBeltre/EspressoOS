@@ -320,6 +320,19 @@ pub fn readdir(path: &str) -> KResult<Vec<DirEntry>> {
             None => break,
         }
     }
+
+    if let Ok(children) = mount::child_mounts(path) {
+        for (name, kind) in children {
+            if !out.iter().any(|e| e.name == name) {
+                out.push(DirEntry {
+                    name,
+                    kind,
+                    ino: 1,
+                });
+            }
+        }
+    }
+
     Ok(out)
 }
 

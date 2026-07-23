@@ -94,6 +94,11 @@ impl ProcessTable {
                 p.children.retain(|c| *c != pid);
             }
         }
+        for child_pid in &proc.children {
+            if let Some(child_proc) = self.table.get_mut(child_pid) {
+                child_proc.parent_pid = None;
+            }
+        }
         Some(proc)
     }
 }

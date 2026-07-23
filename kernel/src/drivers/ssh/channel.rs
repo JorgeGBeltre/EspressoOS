@@ -204,14 +204,9 @@ impl Channel {
 }
 
 fn ssh_shell_entry(arg: usize) {
-    // The prompt must name whoever actually authenticated, not the compiled
-    // DEV_USER. It used to print DEV_USER unconditionally, which meant a login as
-    // any other account -- /etc/passwd allows them -- was shown as DEV_USER's. That
-    // is what hid a live root:root: `ssh root@board` came back with a
-    // `youareme@EspressoOS:~$` prompt and looked like it had been refused.
     let user = session::get(arg as u32).and_then(|c| c.user.clone());
-    crate::shell::run_session(user.as_deref());
-    // Returning is the exit path: task_trampoline calls exit(0), which marks the
-    // task Zombie for the scheduler and the process Zombie for reap_orphans. The
-    // channel reaches this task through its fd table; `arg` is only its id.
+    let exit_code = crate::shell::commands::run_program("sh", &[]);
+    if exit_code < 0 {
+        crate::shell::run_session(user.as_deref());
+    }
 }

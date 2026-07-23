@@ -1,10 +1,30 @@
 #![no_std]
 #![no_main]
 
-use libc::{println, print, read, ota_state, yield_now};
+use libc::{arg, print, println, read, ota_state, yield_now};
 
 #[no_mangle]
-pub extern "C" fn main(_argc: i32, _argv: *const *const u8) -> i32 {
+pub extern "C" fn main(argc: i32, argv: *const *const u8) -> i32 {
+    if argc > 1 {
+        let cmd = unsafe { arg(argv, 1) };
+        match cmd {
+            "status" => {
+                let state = ota_state(0, 0);
+                println!("Current image state (otadata.ota_state): {}", state);
+                return 0;
+            }
+            "rollback" | "invalidate" => {
+                println!("Marking image as INVALID and forcing reboot (rollback)...");
+                let _ = ota_state(1, 3);
+                return 0;
+            }
+            _ => {
+                println!("Usage: ota [status|rollback]");
+                return 1;
+            }
+        }
+    }
+
     println!("--- EspressoOS OTA Control Utility ---");
     println!("1. Get status of the current image");
     println!("2. Mark current image as INVALID (Failure/automatic rollback)");

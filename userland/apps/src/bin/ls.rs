@@ -25,7 +25,7 @@ fn list(path: &str) -> i32 {
             buf[pos + 6],
             buf[pos + 7],
         ]);
-        let _kind = buf[pos + 8];
+        let kind = buf[pos + 8];
         let name_len = u16::from_le_bytes([buf[pos + 9], buf[pos + 10]]) as usize;
         pos += 11;
 
@@ -33,7 +33,13 @@ fn list(path: &str) -> i32 {
             break;
         }
         if let Ok(name) = core::str::from_utf8(&buf[pos..pos + name_len]) {
-            println!("{}", name);
+            if kind == 1 {
+                println!("{}/", name);
+            } else if kind == 3 {
+                println!("{}@", name);
+            } else {
+                println!("{}", name);
+            }
         }
         pos += name_len;
     }

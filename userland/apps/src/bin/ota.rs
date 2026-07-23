@@ -13,13 +13,18 @@ pub extern "C" fn main(argc: i32, argv: *const *const u8) -> i32 {
                 println!("Current image state (otadata.ota_state): {}", state);
                 return 0;
             }
+            "mark-valid" | "valid" => {
+                println!("Marking current image as VALID (stable boot)...");
+                let _ = ota_state(1, 1);
+                return 0;
+            }
             "rollback" | "invalidate" => {
                 println!("Marking image as INVALID and forcing reboot (rollback)...");
                 let _ = ota_state(1, 3);
                 return 0;
             }
             _ => {
-                println!("Usage: ota [status|rollback]");
+                println!("Usage: ota [status|mark-valid|rollback]");
                 return 1;
             }
         }
@@ -27,7 +32,8 @@ pub extern "C" fn main(argc: i32, argv: *const *const u8) -> i32 {
 
     println!("--- EspressoOS OTA Control Utility ---");
     println!("1. Get status of the current image");
-    println!("2. Mark current image as INVALID (Failure/automatic rollback)");
+    println!("2. Mark current image as VALID (stable boot)");
+    println!("3. Mark current image as INVALID (Failure/automatic rollback)");
     print!("Select an option: ");
     
     let mut buf = [0u8; 1];
@@ -42,6 +48,11 @@ pub extern "C" fn main(argc: i32, argv: *const *const u8) -> i32 {
                 break;
             } else if c == b'2' {
                 println!("2");
+                println!("Marking current image as VALID (stable boot)...");
+                let _ = ota_state(1, 1);
+                break;
+            } else if c == b'3' {
+                println!("3");
                 println!("Marking image as INVALID and forcing reboot (rollback)...");
                 let _ = ota_state(1, 3);
                 break;

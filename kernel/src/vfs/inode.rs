@@ -37,6 +37,10 @@ pub trait Inode: Send + Sync {
         false
     }
 
+    fn is_icmp_socket(&self) -> bool {
+        false
+    }
+
     fn set_socket_remote_endpoint(&self, _endpoint: smoltcp::wire::IpEndpoint) -> KResult<()> {
         Err(KError::NotSupported)
     }

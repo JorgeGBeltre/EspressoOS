@@ -17,13 +17,17 @@ pub fn init(lpwr: esp_hal::peripherals::LPWR) {
 
 pub fn enter_light_sleep(seconds: u64) {
     esp_println::println!("[power] Entering Light Sleep for {} seconds...", seconds);
-    crate::arch::xtensa::interrupts::critical_section(|| {
-        let mut guard = RTC.lock();
-        if let Some(rtc) = guard.as_mut() {
-            let timer = TimerWakeupSource::new(Duration::from_secs(seconds));
-            rtc.sleep_light(&[&timer]);
+    let timer = TimerWakeupSource::new(Duration::from_secs(seconds));
+    let mut rtc = match RTC.lock().take() {
+        Some(r) => r,
+        None => {
+            esp_println::println!("[power] ERROR: RTC not initialized");
+            return;
         }
-    });
+    };
+    // Executed with interrupts ENABLED (mutex lock released by .take())
+    rtc.sleep_light(&[&timer]);
+    *RTC.lock() = Some(rtc);
     esp_println::println!("[power] Light Sleep wakeup!");
 }
 
@@ -32,16 +36,17 @@ pub fn enter_deep_sleep(seconds: u64) -> ! {
         "[power] Entering Deep Sleep for {} seconds (reboot on wakeup)...",
         seconds
     );
-    crate::arch::xtensa::interrupts::critical_section(|| {
-        let mut guard = RTC.lock();
-        if let Some(rtc) = guard.as_mut() {
-            let timer = TimerWakeupSource::new(Duration::from_secs(seconds));
-            rtc.sleep_deep(&[&timer]);
+    let timer = TimerWakeupSource::new(Duration::from_secs(seconds));
+    let mut rtc = match RTC.lock().take() {
+        Some(r) => r,
+        None => {
+            esp_println::println!("[power] ERROR: RTC not initialized");
+            loop {
+                core::hint::spin_loop();
+            }
         }
-    });
-    loop {
-        core::hint::spin_loop();
-    }
+    };
+    rtc.sleep_deep(&[&timer]);
 }
 
 // ---- /dev/power: sleep / deep-sleep / reboot por ioctl (SP2 R5). D-5: cero syscalls. ----

@@ -22,7 +22,7 @@ pub fn sha256(data: &[u8]) -> [u8; 32] {
 // ---- /dev/sha0: SHA-256 por ioctl (SP2 R5). Molde D-1 (struct tipado + validación). ----
 
 pub const SHA256_CMD: u32 = 0;
-const SHA_IN_MAX: usize = 512; // D-2: cota del input (TEXT de línea o stdin corto).
+const SHA_IN_MAX: usize = 4096; // D-2: cota del input (hasta 4KB).
 
 /// Struct D-1: `{in_ptr, in_len, out_ptr}`; `out` recibe 32 bytes (el hash). D-3: el
 /// resultado (datos) viaja por el struct del ioctl, no es estado del driver.

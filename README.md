@@ -270,6 +270,19 @@ Notes worth knowing (all from `syscall/handler.rs`):
 | `httpd [port]` | ✅ **HTTP/1.1 web server.** Processes `argv` for port (defaults to 80), configures client socket read timeout (3s), dynamically serves `/proc/uptime` and `/proc/meminfo` on each request, sends valid HTTP/1.1 headers, and closes client sockets safely. |
 | `netstat` | ✅ prints `/proc/net/sockets` verbatim |
 
+> **Verified execution example on hardware (`ping` ICMP):**
+> ```text
+> EspressoOS:~$ ping 192.168.2.1
+> PING 192.168.2.1 (ICMP Echo Request)...
+> 64 bytes from 192.168.2.1: icmp_seq=0 time=21 ms
+> 64 bytes from 192.168.2.1: icmp_seq=1 time=18 ms
+> 64 bytes from 192.168.2.1: icmp_seq=2 time=4 ms
+> 64 bytes from 192.168.2.1: icmp_seq=3 time=57 ms
+> 
+> --- 192.168.2.1 ping statistics ---
+> 4 packets transmitted, 4 received, 0% packet loss
+> ```
+
 ---
 
 ## 4. Build & Flash

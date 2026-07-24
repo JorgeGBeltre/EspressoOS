@@ -526,33 +526,41 @@ You can also poke the raw network path with the TCP echo server on port 2323: `p
 
 ```
 EspressoOS/
-├── .cargo/config.toml       # Xtensa target + `cargo run` = espflash flash --monitor
-├── rust-toolchain.toml      # channel = "esp"
+├── .cargo/
+│   └── config.toml          # Xtensa target + `cargo run` = espflash flash --monitor
 ├── bootloader/              # 2nd-stage bootloader (stub crate, excluded from the workspace)
 ├── kernel/                  # Kernel crate (package: espressoos-kernel, binary: kernel)
-│   ├── build.rs             # Compiles the 32 userland ELFs, extracts fixups, emits the linker script + USERLAND_BINARIES
+│   ├── build.rs             # Compiles the 34 userland ELFs, extracts fixups, emits the linker script + USERLAND_BINARIES
 │   ├── src/
-│   │   ├── arch/xtensa/     # context switch (Model B), vectors, SYSTIMER, non-reentrant Mutex
-│   │   ├── drivers/         # gpio, uart, i2c, spi, crypto, power, ble, wifi, wifi_store, ssh/, device(dead)
+│   │   ├── arch/xtensa/     # Context switch (Model B), vectors, SYSTIMER, non-reentrant Mutex
+│   │   ├── drivers/         # gpio, uart, i2c, spi, crypto, flash, power, ble, wifi, wifi_store, ssh/, device(dead)
 │   │   ├── fs/              # espfs, ramfs, procfs, sysfs, littlefs(stub), elf.rs (loader)
 │   │   ├── mm/              # heap, psram_exec (slot pool), mpu (pms)
+│   │   ├── ota/             # A/B slots + otadata
 │   │   ├── scheduler/       # task, policy (FIFO), process (pid/signals), core_sync (SMP)
-│   │   ├── shell/           # commands/, parser  (kernel builtin shell — the oracle)
-│   │   ├── session.rs       # SessionChannel (Uart|Ssh) + SessionConsole inode
+│   │   ├── shell/           # commands/, parser (kernel builtin shell — the oracle)
 │   │   ├── syscall/         # table (0..29), handler, trap
 │   │   ├── vfs/             # inode, file, mount, devfs, pipe, socket
-│   │   ├── ota/             # A/B slots + otadata
-│   │   ├── wifi_credentials.rs   # GIT-IGNORED boot Wi-Fi fallback
-│   │   └── main.rs          # boot sequencer
+│   │   ├── main.rs          # Boot sequencer
+│   │   ├── prelude.rs       # Memory layout, system constants, prelude imports
+│   │   ├── session.rs       # SessionChannel (Uart|Ssh) + SessionConsole inode
+│   │   ├── wifi_credentials.rs         # GIT-IGNORED boot Wi-Fi fallback
+│   │   └── wifi_credentials.rs.example # Boot Wi-Fi fallback template
 │   └── Cargo.toml
-├── userland/                # no_std libc + /bin programs (ELF, run from PSRAM)
-│   ├── libc/                # _start, raw syscall, 30 typed wrappers, 32 KB bump heap
-│   └── apps/src/bin/        # 32 programs (sh, coreutils, wifi/net, /dev drivers, self-tests)
 ├── tools/                   # partition-gen, mkimage, build-userland.ps1, tests/ (logic_tests.py)
-├── docs/superpowers/plans/  # the SP2→SP4 mandate + DECISIONES.md
-├── espflash.toml            # flash size + partition table — both load-bearing (§4)
+├── userland/                # no_std libc + /bin programs (ELF, run from PSRAM)
+│   ├── apps/src/bin/        # 34 programs (sh, coreutils, wifi/net, /dev drivers, self-tests)
+│   ├── dist/                # Prebuilt userland ELF binaries
+│   ├── libc/                # _start, raw syscall, 30 typed wrappers, 32 KB bump heap
+│   └── Cargo.toml
+├── Cargo.lock               # Workspace lockfile
+├── Cargo.toml               # Workspace manifest
+├── espflash.toml            # Flash size + partition table — both load-bearing (§4)
+├── LICENSE                  # MIT License
+├── partitions.bin           # Generated binary partition table
 ├── partitions.csv           # 16 MB flash layout (espflash reads this directly)
-└── README.md                # this file
+├── README.md                # Main documentation
+└── rust-toolchain.toml      # Toolchain configuration (channel = "esp")
 ```
 
 ---

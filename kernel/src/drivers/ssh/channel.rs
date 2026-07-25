@@ -205,10 +205,7 @@ impl Channel {
 
 fn ssh_shell_entry(arg: usize) {
     let user = session::get(arg as u32).and_then(|c| c.user.clone());
-    let exit_code = match &user {
-        Some(u) => crate::shell::commands::run_program("sh", &["--user", u.as_str()]),
-        None => crate::shell::commands::run_program("sh", &[]),
-    };
+    let exit_code = crate::shell::run_userland("sh", user.as_deref());
     if exit_code < 0 {
         crate::shell::run_session(user.as_deref());
     }

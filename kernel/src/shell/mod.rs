@@ -14,13 +14,16 @@ const MAX_LINE: usize = 256;
 
 pub(crate) const MAX_LINE_LEN: usize = MAX_LINE;
 
+/// Runs a userland program (e.g. "sh") with an optional user context (--user <username>).
+/// Returns the program exit code (negative on error).
+pub fn run_userland(program: &str, user: Option<&str>) -> i32 {
+    match user {
+        Some(u) => commands::run_program(program, &["--user", u]),
+        None => commands::run_program(program, &[]),
+    }
+}
+
 /// Runs one interactive session on the caller's own fds, and returns when stdin
-/// reports end of session.
-///
-/// There is exactly one of these for both the serial console and SSH. Nothing
-/// here knows which it is: the session's channel is fd 0/1/2 of the calling
-/// process, seeded before this task was ever unblocked. `\n` goes out bare --
-/// the channel adds the `\r`.
 pub fn run_session(user: Option<&str>) {
     // A session starts at the root, and it is this function's job to say so because
     // this function is what a session IS -- the doc above promises the serial console

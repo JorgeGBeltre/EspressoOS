@@ -76,6 +76,19 @@ EspressoOS boots and executes on physical ESP32-S3 hardware. The system acquires
 - **Power Management & Reboot**: Driver `/dev/power` with working software reboot.
 - **BLE Advertising**: Beacon advertisement as `EspressoOS` via `/bin/ble`.
 
+> **Verified execution example on hardware (`ping` ICMP):**
+> ```text
+> EspressoOS:~$ ping 192.168.2.1
+> PING 192.168.2.1 (ICMP Echo Request)...
+> 64 bytes from 192.168.2.1: icmp_seq=0 time=21 ms
+> 64 bytes from 192.168.2.1: icmp_seq=1 time=18 ms
+> 64 bytes from 192.168.2.1: icmp_seq=2 time=4 ms
+> 64 bytes from 192.168.2.1: icmp_seq=3 time=57 ms
+> 
+> --- 192.168.2.1 ping statistics ---
+> 4 packets transmitted, 4 received, 0% packet loss
+> ```
+
 ### Partial or Feature-Gated Capabilities
 
 - **I2C (`/dev/i2c0`) & SPI (`/dev/spi0`)**: Master drivers and `ioctl` interface implemented and verified on open bus.
@@ -333,6 +346,28 @@ The following feature flags are available in `kernel/Cargo.toml`:
 | `diag-ble-sync` | Disabled | Diagnostic feature for synchronous BLE execution. |
 | `diag-32k-stack` | Disabled | Increases default task stack size to 32 KB for diagnostic testing. |
 
+### 4.5 Expected serial output
+
+```text
+[kernel] PSRAM added to heap: 7340032 bytes @ 0x3c1f0000 (1MB reserved for Userland @ 0x3c0f0000)
+[psram-exec] reserved PSRAM mapped to the instruction bus @ 0x42800000 (16 pages)
+[psram-exec] OK: code EXECUTED from PSRAM returned 42 (expected 42)
+
+========================================
+   EspressoOS   ·   kernel
+   Live console. Starting subsystems.
+========================================
+[kernel] flash: 16 MB usable
+[kernel] / mounted on flash (espfs)
+[kernel] userland: 32 binaries installed/updated in EspFs
+[net] connecting to SSID '...'
+[net] associated with AP; negotiating DHCP...
+[net] IP = 192.168.2.146
+[net] SSH listening on port 22, ECHO on 2323, OTA on 3300
+
+EspressoOS:~$
+```
+
 ---
 
 ## 5. Complete Command Reference
@@ -405,6 +440,22 @@ Example:
 
 ### Session Management
 Each serial or SSH connection runs an isolated session (`SessionChannel`) with dedicated file descriptors and working directory. Disconnecting frees file descriptors and sweeps associated child processes.
+
+### Userland programs (`/bin`)
+
+See the full 32-binary table in §3.7. Selected usage:
+
+```text
+EspressoOS:~$ /bin/echo hola mundo | /bin/cat
+hola mundo
+EspressoOS:~$ /bin/ls /bin | /bin/cat
+EspressoOS:~$ sha256 hello           # 2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824
+EspressoOS:~$ wifi connect "My Home Net" "password"
+EspressoOS:~$ free
+            total         used         free
+heap      7471104       171312      7299792
+slots          32            0           32
+```
 
 ---
 

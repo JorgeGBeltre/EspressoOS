@@ -33,7 +33,9 @@ fn list(path: &str) -> i32 {
             break;
         }
         if let Ok(name) = core::str::from_utf8(&buf[pos..pos + name_len]) {
-            if kind == 1 {
+            // kind del kernel (syscall/handler.rs kind_to_u8): File=1, Dir=2, Device=3,
+            // Symlink=4. Contrato del README: los directorios llevan '/', los dispositivos '@'.
+            if kind == 2 {
                 println!("{}/", name);
             } else if kind == 3 {
                 println!("{}@", name);

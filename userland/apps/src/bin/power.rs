@@ -4,7 +4,6 @@
 use libc::{arg, close, ioctl, open, println};
 
 const O_RDONLY: u32 = 1;
-const POWER_SLEEP: u32 = 0;
 const POWER_DEEP_SLEEP: u32 = 1;
 
 fn parse_dec(s: &str) -> Option<u64> {
@@ -25,19 +24,26 @@ fn parse_dec(s: &str) -> Option<u64> {
     }
 }
 
-/// power(1): `power sleep [SECONDS]` (light sleep, vuelve) o `power deep-sleep [SECONDS]`
-/// (rebootea al despertar). Vía `/dev/power` + ioctl (cero syscalls nuevas, D-5).
+/// power(1): `power deep-sleep [SECONDS]` (rebootea al despertar). Vía `/dev/power` +
+/// ioctl (cero syscalls nuevas, D-5).
+///
+/// `power sleep` fue removido (SP2 R6): el light sleep de esp-hal cuelga la CPU en este
+/// hardware/generación de HAL -- limitación de plataforma, no manejable desde software.
+/// Deep sleep y reboot cubren los mismos casos de uso sin ese riesgo.
 #[no_mangle]
 pub extern "C" fn main(argc: i32, argv: *const *const u8) -> i32 {
     if argc < 2 {
-        println!("usage: power sleep [SECONDS] | deep-sleep [SECONDS]");
+        println!("usage: power deep-sleep [SECONDS]");
         return 1;
     }
     let cmd = match unsafe { arg(argv, 1) } {
-        "sleep" => POWER_SLEEP,
+        "sleep" => {
+            println!("power: 'sleep' removed (hangs the CPU on this HAL); use deep-sleep");
+            return 1;
+        }
         "deep-sleep" => POWER_DEEP_SLEEP,
         _ => {
-            println!("usage: power sleep [SECONDS] | deep-sleep [SECONDS]");
+            println!("usage: power deep-sleep [SECONDS]");
             return 1;
         }
     };
@@ -52,7 +58,7 @@ pub extern "C" fn main(argc: i32, argv: *const *const u8) -> i32 {
         println!("power: cannot open /dev/power");
         return 1;
     }
-    // deep-sleep no retorna (la placa reinicia); light sleep vuelve tras SECONDS.
+    // deep-sleep no retorna (la placa reinicia).
     let rc = ioctl(fd as i32, cmd, secs as usize);
     close(fd as i32);
     if rc < 0 {

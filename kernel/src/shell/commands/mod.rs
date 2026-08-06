@@ -683,7 +683,7 @@ fn cmd_help(_args: &[&str]) -> i32 {
     emit_line("  syscalltest           exercise the syscall ABI");
     emit_line("  smp                   multicore status (SMP)");
     emit_line("  pms [world1]          memory protection (PMS)");
-    emit_line("  power sleep|deep-sleep [seconds]  power management");
+    emit_line("  power deep-sleep [seconds]        power management");
     emit_line("  sha256 [text]         hardware SHA-256 hashing");
     emit_line("  ble status|advertise  Bluetooth LE management and advertising");
     emit_line("  wifi status|scan|connect \"SSID\" [PASS]|disconnect   Wi-Fi management");
@@ -1283,14 +1283,16 @@ fn cmd_power(args: &[&str]) -> i32 {
 
     match mode {
         Some("sleep") => {
-            crate::drivers::power::enter_light_sleep(secs);
-            0
+            // Removida (SP2 R6): esp-hal's light sleep cuelga la CPU en este HAL/hardware
+            // (limitación de plataforma, no un bug de este kernel). Usa deep-sleep o reboot.
+            eprint_line("power: 'sleep' removed (hangs the CPU on this HAL); use deep-sleep");
+            1
         }
         Some("deep-sleep") => {
             crate::drivers::power::enter_deep_sleep(secs);
         }
         _ => {
-            eprint_line("usage: power sleep [seconds] | power deep-sleep [seconds]");
+            eprint_line("usage: power deep-sleep [seconds]");
             1
         }
     }

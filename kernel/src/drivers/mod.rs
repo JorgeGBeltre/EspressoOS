@@ -4,6 +4,7 @@ pub mod device;
 pub mod flash;
 pub mod gpio;
 pub mod i2c;
+pub mod passwd;
 pub mod power;
 pub mod spi;
 pub mod ssh;

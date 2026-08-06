@@ -92,7 +92,7 @@ EspressoOS boots and executes on physical ESP32-S3 hardware. The system acquires
 ### Partial or Feature-Gated Capabilities
 
 - **I2C (`/dev/i2c0`) & SPI (`/dev/spi0`)**: Master drivers and `ioctl` interface implemented and verified on open bus.
-- **Light Sleep (`power sleep`)**: Suspended due to platform limitations; reboot and deep sleep are the recommended paths.
+- **Light Sleep**: Removed (`power sleep` no longer exists). esp-hal's `rtc.sleep_light()` hangs the CPU on this hardware/HAL generation; `power deep-sleep` and `power reboot` cover the same use cases without that risk.
 - **PMS Memory Protection / Dual-Core SMP**: Features `pms` and `smp` are fully implemented in code but disabled by default for simplicity and stability.
 - **littlefs**: Static stub in `kernel/src/fs/littlefs/mod.rs` returning an empty read-only root. Not mounted by default.
 
@@ -237,7 +237,8 @@ Data-carrying drivers follow a unified architecture pattern: `open("/dev/<node>"
 | `i2c0` | GPIO8 (SDA), GPIO9 (SCL) | `I2C_PROBE` (0), `I2C_READ` (1), `I2C_WRITE` (2). `I2cReq` struct (max 64 bytes buffer). | Functional |
 | `spi0` | GPIO12 (MOSI), GPIO11 (MISO), GPIO13 (CLK) | `SPI_TRANSFER` (0). `SpiReq` struct (max 64 bytes buffer). | Functional |
 | `sha0` | Hardware SHA engine | `SHA256_CMD` (0). `ShaReq` struct (max 512 bytes input, 32 bytes output). | Hardware-Verified |
-| `power` | LPWR Controller | `POWER_SLEEP` (0), `POWER_DEEP_SLEEP` (1), `POWER_REBOOT` (2). | Reboot Functional |
+| `power` | LPWR Controller | `POWER_DEEP_SLEEP` (1), `POWER_REBOOT` (2). ioctl 0 (former `POWER_SLEEP`) now returns `NotSupported` -- see Known Issues. | Reboot Functional |
+| `passwd` | — (crypto only) | `SET_PASSWORD_CMD` (0). `PasswdReq` struct (max 64 bytes user, 128 bytes password); salts+hashes (SHA-256) before writing `/etc/passwd`. | Functional |
 | `wlan0` | `esp-wifi` STA | `WLAN_NOP` (0), `WLAN_CONNECT` (1), `WLAN_DISCONNECT` (2), `WLAN_SCAN` (3). | Hardware-Verified |
 | `ble0` | `esp-wifi` BLE | `BLE_ADVERTISE` (0). Queues atomic advertising request. | Hardware-Verified |
 
@@ -248,25 +249,22 @@ Data-carrying drivers follow a unified architecture pattern: `open("/dev/<node>"
 The system integrates identity management and user authentication for the SSH server and user shell control:
 
 #### `passwd` Command Implementation
-- **Source Location**: `userland/apps/src/bin/passwd.rs`.
+- **Source Location**: `userland/apps/src/bin/passwd.rs` (client) + `kernel/src/drivers/passwd.rs` (`/dev/passwd`, does the actual hashing).
 - **Usage Syntax**:
   - `passwd NEW_PASSWORD`: Sets the password for the default user (`youareme`).
   - `passwd USER NEW_PASSWORD`: Sets the password for the specified user name.
-- **Input Validation**:
+- **Input Validation**: enforced on both sides of the ioctl boundary (userland client and kernel driver) —
   - User and password strings must be non-empty.
   - User and password strings cannot contain `:` or newline `\n` characters.
-- **Filesystem Mapping**:
-  - Opens `/etc/passwd` with flags `O_WRONLY_CREATE_TRUNC` (`0x0502`).
-  - Writes single-line format `user:password\n` and closes the descriptor.
-  - Stored on EspFs flash storage, making the credential change **persistent across reboots and re-flashes**.
+- **Storage format**: `passwd(1)` sends `{user, password}` to `/dev/passwd` via `ioctl(SET_PASSWORD_CMD)`; the kernel generates a 16-byte salt from the hardware TRNG, computes `SHA-256(salt || password)`, and writes a single line `user:$s5$<salt-hex>$<hash-hex>\n` to `/etc/passwd` (`O_WRONLY_CREATE_TRUNC`). The plaintext password is never written to flash. Stored on EspFs flash storage, making the credential change **persistent across reboots and re-flashes**.
 
 #### Kernel SSH Authentication Verification
 - **Source Location**: `kernel/src/drivers/ssh/auth.rs` (`check_password`).
 - **Validation Flow**:
   1. On SSH password login request, the server attempts to resolve `/etc/passwd` via VFS (`vfs::mount::resolve("/etc/passwd")`).
-  2. If `/etc/passwd` exists, it reads the file and matches the target user line.
-  3. Password verification uses constant-time comparison (`ct_eq` via `subtle` crate) to prevent timing attacks.
-  4. If `/etc/passwd` does not exist or the user is not found, authentication falls back to compiled dev credentials (`DEV_USER` = `"youareme"`, `DEV_PASSWORD` in `kernel/src/drivers/ssh/config.rs`).
+  2. If `/etc/passwd` exists, it reads the file and matches the target user line (username comparison is constant-time too, via `ct_eq`).
+  3. If the stored field starts with `$s5$`, the kernel re-hashes the supplied password with the stored salt and compares the two hashes in constant time (`ct_eq`). Fields without that prefix are compared as plaintext (`ct_eq`) — kept only so a pre-existing `/etc/passwd` from before this change is not silently locked out; running `passwd` again replaces it with the salted form.
+  4. If `/etc/passwd` does not exist or the user is not found, authentication falls back to compiled dev credentials (`DEV_USER` = `"youareme"`, `DEV_PASSWORD` in `kernel/src/drivers/ssh/config.rs` — still plaintext-in-source; that is a separate, still-open hardening item, see the security notes on the hardcoded default credential and shared SSH host key).
 
 #### Boot Warnings & Credentials Reset
 - **Kernel Boot Behavior** (`kernel/src/main.rs`):
@@ -399,7 +397,7 @@ The system includes **35 userland binaries** in `/bin` alongside shell built-in 
 21. **`ps`**: List active tasks and processes.
 22. **`kill`**: Send signals to running processes (`kill -SIGKILL PID`).
 23. **`sha256`**: Calculate SHA-256 digest using hardware acceleration engine.
-24. **`power`**: Manage system power modes (`power sleep`, `power deep-sleep`, `power reboot`).
+24. **`power`**: Manage system power modes (`power deep-sleep`, `power reboot`). `power sleep` was removed (see Known Issues).
 25. **`reboot`**: Trigger software reset.
 26. **`ble`**: Control Bluetooth Low Energy advertiser (`ble status`, `ble advertise`).
 27. **`i2c`**: I2C bus diagnostic tool (`i2c scan`, `i2c read`, `i2c write`).
@@ -526,10 +524,10 @@ Flash layout defined in `kernel/src/prelude.rs` and `partitions.csv`:
 
 ## 9. Known Issues & Technical Debt
 
-1. **Light Sleep (`power sleep`)**: Light sleep hangs the CPU due to underlying platform limitations. Use `power reboot` or `power deep-sleep`.
-2. **EspFs Compaction Limit**: EspFs log-structured compaction requires free flash space. Extremely low flash conditions may return a `NoSpace` error during compaction.
-3. **Plaintext Password Storage**: `/etc/passwd` stores passwords in plaintext. While SSH verification uses constant-time string comparisons (`ct_eq`) to mitigate timing attacks, storage does not currently use salted password hashing algorithms (such as bcrypt or SHA-512).
-4. **Non-Reentrant Kernel Mutex**: Kernel `Mutex` disables CPU interrupts while held. Acquiring the same mutex twice on the same core will result in a silent dead lock.
+1. **Light Sleep — REMOVED**: `power sleep` and the `POWER_SLEEP` ioctl were removed. esp-hal's `rtc.sleep_light()` hung the CPU on this hardware/HAL generation, a platform limitation rather than something fixable in this kernel. `power deep-sleep` and `power reboot` remain and cover the same use cases without that risk.
+2. **EspFs Compaction Limit**: EspFs log-structured compaction requires free flash space. Extremely low flash conditions may return a `NoSpace` error during compaction. The current partition table (`partitions.csv`) leaves only ~84 KB unallocated in the 16 MB flash map (the `fs` partition is already the largest slice at ~7.8 MB); growing it further would mean shrinking `ota_0` (losing A/B OTA redundancy) or `coredump`. No code change applied; `compact()` already fails with an honest `NoSpace` error instead of corrupting data (see the comment at `kernel/src/fs/espfs/mod.rs:360`).
+3. **Plaintext Password Storage — FIXED**: `/etc/passwd` now stores `user:$s5$<salt-hex>$<hash-hex>` (SHA-256 of a 16-byte random salt + the password), written by the new `/dev/passwd` device (`kernel/src/drivers/passwd.rs`) so hashing happens kernel-side — userland's `passwd(1)` never touches crypto/RNG directly. `ssh::auth::check_password` verifies by re-hashing and comparing in constant time (`ct_eq`); it still accepts bare-plaintext entries on read for backward compatibility with files written before this change, but `passwd(1)` always writes the new salted format. The compiled fallback credential (`DEV_USER`/`DEV_PASSWORD` in `kernel/src/drivers/ssh/config.rs`) is unchanged by this fix — see the separate hardening note on hardcoded default credentials and the shared SSH host key.
+4. **Non-Reentrant Kernel Mutex**: Kernel `Mutex` disables CPU interrupts while held. Acquiring the same mutex twice on the same core will result in a silent dead lock. Audited: no call site in the tree currently re-enters the same `Mutex` while already holding it. Left as a documented invariant rather than converted to a recursive mutex, since a recursive mutex would silently paper over a future double-lock instead of surfacing it as the bug it is.
 
 ---
 

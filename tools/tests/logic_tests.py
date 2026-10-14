@@ -1995,6 +1995,70 @@ class TestPhase15Logic(unittest.TestCase):
         self.assertIn("wlan0", net_route)
 
 
+class TestPhase16Logic(unittest.TestCase):
+    def test_factor_decomposition(self):
+        def factorize(n: int):
+            factors = []
+            if n <= 1:
+                return factors
+            while n % 2 == 0:
+                factors.append(2)
+                n //= 2
+            while n % 3 == 0:
+                factors.append(3)
+                n //= 3
+            d = 5
+            while d * d <= n:
+                while n % d == 0:
+                    factors.append(d)
+                    n //= d
+                d2 = d + 2
+                while n % d2 == 0:
+                    factors.append(d2)
+                    n //= d2
+                d += 6
+            if n > 1:
+                factors.append(n)
+            return factors
+
+        self.assertEqual(factorize(42), [2, 3, 7])
+        self.assertEqual(factorize(100), [2, 2, 5, 5])
+        self.assertEqual(factorize(13), [13])
+        self.assertEqual(factorize(1), [])
+
+    def test_rev_characters(self):
+        s = "EspressoOS"
+        self.assertEqual(s[::-1], "SOosserpsE")
+
+    def test_paste_merging(self):
+        f1 = ["a", "b", "c"]
+        f2 = ["1", "2", "3"]
+        merged = [f"{l1}\t{l2}" for l1, l2 in zip(f1, f2)]
+        self.assertEqual(merged, ["a\t1", "b\t2", "c\t3"])
+
+    def test_expand_tabs(self):
+        def expand_line(line: str, tabstop: int = 8) -> str:
+            res = []
+            col = 0
+            for c in line:
+                if c == '\t':
+                    spaces = tabstop - (col % tabstop)
+                    res.append(' ' * spaces)
+                    col += spaces
+                else:
+                    res.append(c)
+                    col += 1
+            return "".join(res)
+
+        self.assertEqual(expand_line("a\tb", 8), "a       b")
+        self.assertEqual(expand_line("abcd\te", 8), "abcd    e")
+
+    def test_procfs_cmdline(self):
+        cmdline = "console=ttyS0,115200 root=/dev/flash0 rw init=/bin/init quiet\n"
+        self.assertIn("root=/dev/flash0", cmdline)
+        self.assertIn("init=/bin/init", cmdline)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
 

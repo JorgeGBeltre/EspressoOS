@@ -588,9 +588,11 @@ pub fn net_task(_arg: usize) {
     let ota_handle = sockets_set.add(ota_sock);
     let mut ota_receiving = false;
 
-    let host_key = HostKey::from_seed(&crate::drivers::ssh::config::HOST_KEY_SEED);
+    let mut hw_rng = HwRng::new(rng);
+    let host_key = HostKey::load_or_generate(&mut hw_rng);
+    crate::drivers::ssh::announce_host_key(&host_key);
 
-    let mut ssh_conn = Connection::new(HwRng::new(rng));
+    let mut ssh_conn = Connection::new(hw_rng);
     let mut ssh_active = false;
 
     let mut have_ip = false;
@@ -735,6 +737,14 @@ pub fn net_task(_arg: usize) {
                         // channel no client can reach.
                         ssh_conn.shutdown();
                     }
+                    ssh_active = false;
+                }
+                if ssh_active
+                    && (!sock.is_active()
+                        || (sock.may_send() && !sock.may_recv() && sock.recv_queue() == 0))
+                {
+                    sock.close();
+                    ssh_conn.shutdown();
                     ssh_active = false;
                 }
                 if sock.is_active() && !ssh_active {

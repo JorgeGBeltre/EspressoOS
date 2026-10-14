@@ -19,10 +19,17 @@ pub fn otadata_entries() -> KResult<[OtaSelectEntry; 2]> {
 }
 
 pub fn validate_header(image: &[u8]) -> KResult<()> {
-    match image.first() {
-        Some(&b) if b == ESP_IMAGE_MAGIC => Ok(()),
-        _ => Err(KError::Corrupt),
+    if image.len() < 24 {
+        return Err(KError::Corrupt);
     }
+    if image[0] != ESP_IMAGE_MAGIC {
+        return Err(KError::Corrupt);
+    }
+    let segment_count = image[1];
+    if segment_count == 0 || segment_count > 16 {
+        return Err(KError::Corrupt);
+    }
+    Ok(())
 }
 
 pub fn inactive_slot() -> Slot {

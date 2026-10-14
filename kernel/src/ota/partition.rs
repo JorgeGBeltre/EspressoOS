@@ -281,7 +281,7 @@ pub fn set_boot_slot(slot: Slot) -> KResult<()> {
         None => 0usize,
     };
 
-    let entry = OtaSelectEntry::new(new_seq, OtaImgState::New);
+    let entry = OtaSelectEntry::new(new_seq, OtaImgState::PendingVerify);
     write_otadata_copy(write_copy, &entry)
 }
 

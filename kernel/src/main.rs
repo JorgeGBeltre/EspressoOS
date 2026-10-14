@@ -501,4 +501,18 @@ fn init_etc_files() {
              'rm /etc/passwd' to fall back to it"
         );
     }
+    if vfs::mount::resolve("/etc/authorized_keys").is_ok() {
+        println!(
+            "[kernel] NOTICE: /etc/authorized_keys exists and enables SSH public-key authentication"
+        );
+    }
+
+    let slot = crate::ota::active_slot();
+    let state = crate::ota::get_state().unwrap_or(crate::ota::OtaImgState::Undefined);
+    println!("[kernel] OTA boot slot: {:?}, state: {:?}", slot, state);
+    if state == crate::ota::OtaImgState::PendingVerify {
+        println!(
+            "[kernel] NOTICE: candidate image in PendingVerify state; run 'ota mark-valid' to confirm"
+        );
+    }
 }

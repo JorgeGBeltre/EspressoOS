@@ -68,7 +68,7 @@ EspressoOS boots and executes on physical ESP32-S3 hardware. The system acquires
 - **Kernel Boot**: HAL initialization, 128 KB SRAM internal heap, VFS mounts (`/` EspFs on flash, `/tmp` ramfs in RAM, `/dev` devfs, `/proc` procfs, `/sys` sysfs).
 - **PSRAM Execution (PSRAM-Exec)**: 8 MB PSRAM carve-up with 1 MB reserved for code execution on the instruction bus (`0x42800000`). Boot selftest verifies instruction execution in PSRAM returning code 42.
 - **Preemptive Multitasking & Process Management**: Scheduler driven by SYSTIMER at 100 Hz, 50 ms quantum, and Model B in-ISR context switching. Automatic reparenting of orphan processes to PID 1 (`init-sup`) and non-blocking zombie reaping with `waitpid` (`WNOHANG`), preventing PSRAM-Exec slot leaks.
-- **Dynamic Userland ELFs**: Suite of **122 ELF binaries** executing from PSRAM with `argv` support, 32-slot pool, and load-time relocation without requiring Position Independent Code (PIC).
+- **Dynamic Userland ELFs**: Suite of **128 ELF binaries** executing from PSRAM with `argv` support, 32-slot pool, and load-time relocation without requiring Position Independent Code (PIC).
 - **Wi-Fi + TCP/IP Stack**: Station (STA) mode, DHCP client, and active TCP/IP stack (`smoltcp`). Runtime Wi-Fi scan, connect, and disconnect. Credential persistence in flash NVS sector 0 (`0x0000_9000`).
 - **Hardened SSH-2.0 Server**: Server supporting curve25519-sha256, ssh-ed25519, and chacha20-poly1305@openssh.com.
   - **Persistent Host Key**: Unique Ed25519 host key generated via hardware TRNG on first boot and persisted to NVS flash sector 1 (`0x0000_A000`, `ESHK` format).
@@ -534,6 +534,12 @@ The system includes **122 userland binaries** in `/bin` alongside shell built-in
 120. **`od`**: Dump files in octal, character, hex, or decimal representations (`od [-b | -c | -x | -d | -o] [file...]`).
 121. **`realpath`**: Resolve and canonicalize relative file and directory paths against current working directory (`realpath [-q] [-s] file...`).
 122. **`cksum`**: Compute POSIX standard 32-bit CRC checksum and byte counts for files or standard input (`cksum [file...]`).
+123. **`time`**: Run programs and summarize real execution time in seconds (`time COMMAND [ARG...]`).
+124. **`readlink`**: Print value of a symbolic link or canonical file name (`readlink [-f] [-n] [-q] FILE...`).
+125. **`tty`**: Print the file name of the terminal connected to standard input (`tty [-s]`).
+126. **`groups`**: Print group memberships for a user or current login session (`groups [USERNAME...]`).
+127. **`hostid`**: Print the 32-bit numeric identifier in hexadecimal for the current host (`hostid`).
+128. **`dc`**: Classic Unix Desk Calculator for reverse-Polish arithmetic evaluation (`dc [-e expr] [expr]`).
 
 ---
 
@@ -566,7 +572,7 @@ Each serial or SSH connection runs an isolated session (`SessionChannel`) with d
 
 ### Userland programs (`/bin`)
 
-See the full 116-binary list in §5. Selected usage:
+See the full 128-binary list in §5. Selected usage:
 
 ```text
 EspressoOS:~$ /bin/echo hola mundo | /bin/cat
@@ -590,7 +596,7 @@ EspressoOS/
 │   └── config.toml          # Xtensa target config and espflash runner setup
 ├── bootloader/              # Second-stage bootloader skeleton (future phase)
 ├── kernel/                  # EspressoOS Kernel crate
-│   ├── build.rs             # Build script: compiles 116 userland ELFs and generates fixup tables
+│   ├── build.rs             # Build script: compiles 128 userland ELFs and generates fixup tables
 │   ├── src/
 │   │   ├── arch/xtensa/     # Context switch, ISR vectors, and SYSTIMER driver
 │   │   ├── drivers/         # Drivers: gpio, uart, i2c, spi, crypto, flash, power, ble, wifi, ssh
@@ -607,7 +613,7 @@ EspressoOS/
 │   └── Cargo.toml
 ├── tools/                   # Partition generation tools and test scripts
 ├── userland/                # no_std userland workspace (executes from PSRAM)
-│   ├── apps/src/bin/        # Source code for 122 userland binaries (/bin/*)
+│   ├── apps/src/bin/        # Source code for 128 userland binaries (/bin/*)
 │   ├── libc/                # Userland base library: _start, syscall wrappers, allocator
 │   └── Cargo.toml
 ├── Cargo.lock               # Cargo workspace lockfile
@@ -836,6 +842,18 @@ Flash layout defined in `kernel/src/prelude.rs` and `partitions.csv`:
   - Resolved non-reentrant kernel mutex hangs by implementing core-aware owner tracking and immediate panic diagnostics on same-core re-entry.
   - Resolved CPU light sleep and idle power consumption by implementing hardware wait-for-interrupt low-power sleep in the scheduler idle task and power control ioctl, replacing hot spin loops without bus hangs.
   - Expanded automated test suite to **198 tests passing with 100% success rate** covering sequence generation, path canonicalization, POSIX checksum vectors, and CPU statistics introspection.
+- **Phase 18: System Configuration Plumbing, Desk Calculator & Core POSIX Expansion (P1/P2/P3)**:
+  - Initialized standard Unix configuration hierarchy on initial boot with persistent host lookup tables, domain name resolution records, operating system release metadata, issue banners, and user group definitions.
+  - Implemented static hostname resolution in network diagnostic utilities, resolving local loopback and device hostnames directly from system host configuration without requiring external domain name queries.
+  - Added dynamic nameserver extraction from system resolver configuration for domain name lookups.
+  - Implemented execution duration profiler and timer tool (`time`) measuring real wall-clock elapsed execution time and tracking child process exit status codes.
+  - Implemented symbolic target and path canonicalization utility (`readlink`) resolving parent directory traversal and suppressing trailing delimiters.
+  - Implemented standard terminal identification tool (`tty`) detecting character device streams versus redirected regular file descriptors on standard input.
+  - Implemented user group membership query tool (`groups`) resolving primary and supplementary group affiliations from the system group configuration.
+  - Implemented numeric host identifier utility (`hostid`) computing a stable 32-bit hexadecimal identifier from system hostname parameters.
+  - Implemented classic Unix Desk Calculator (`dc`) supporting reverse-Polish notation stack arithmetic, stack duplication, reversal, and stack dump inspection.
+  - Expanded userland application suite to **128 dynamic ELF binaries**, all linking within their 16 KB PSRAM execution slot budgets.
+  - Expanded automated test suite to **204 tests passing with 100% success rate** covering static host resolution, resolver parsing, reverse-Polish stack evaluation, host identification hashing, group membership matching, and execution duration formatting.
 
 ### [0.1.0] - 2026-08-06
 

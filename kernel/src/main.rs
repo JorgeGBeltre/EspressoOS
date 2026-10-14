@@ -540,6 +540,81 @@ fn init_etc_files() {
         }
     }
 
+    if vfs::mount::resolve("/etc/hosts").is_err() {
+        if let Ok(fd) = vfs::open(
+            "/etc/hosts",
+            vfs::OpenFlags(
+                vfs::OpenFlags::CREATE.0 | vfs::OpenFlags::WRONLY.0 | vfs::OpenFlags::TRUNC.0,
+            ),
+        ) {
+            let _ = vfs::write(
+                fd,
+                b"# EspressoOS Static Host Table (/etc/hosts)\n127.0.0.1 localhost\n192.168.4.1 espressoos\n",
+            );
+            let _ = vfs::close(fd);
+        }
+    }
+
+    if vfs::mount::resolve("/etc/resolv.conf").is_err() {
+        if let Ok(fd) = vfs::open(
+            "/etc/resolv.conf",
+            vfs::OpenFlags(
+                vfs::OpenFlags::CREATE.0 | vfs::OpenFlags::WRONLY.0 | vfs::OpenFlags::TRUNC.0,
+            ),
+        ) {
+            let _ = vfs::write(
+                fd,
+                b"# EspressoOS DNS Configuration (/etc/resolv.conf)\nnameserver 8.8.8.8\nnameserver 1.1.1.1\n",
+            );
+            let _ = vfs::close(fd);
+        }
+    }
+
+    if vfs::mount::resolve("/etc/os-release").is_err() {
+        if let Ok(fd) = vfs::open(
+            "/etc/os-release",
+            vfs::OpenFlags(
+                vfs::OpenFlags::CREATE.0 | vfs::OpenFlags::WRONLY.0 | vfs::OpenFlags::TRUNC.0,
+            ),
+        ) {
+            let _ = vfs::write(
+                fd,
+                b"NAME=\"EspressoOS\"\nID=espressoos\nPRETTY_NAME=\"EspressoOS 0.2.0-dev (ESP32-S3 Xtensa LX7)\"\nVERSION=\"0.2.0-dev\"\nVERSION_ID=\"0.2.0\"\nARCH=\"xtensa\"\n",
+            );
+            let _ = vfs::close(fd);
+        }
+    }
+
+    if vfs::mount::resolve("/etc/issue").is_err() {
+        if let Ok(fd) = vfs::open(
+            "/etc/issue",
+            vfs::OpenFlags(
+                vfs::OpenFlags::CREATE.0 | vfs::OpenFlags::WRONLY.0 | vfs::OpenFlags::TRUNC.0,
+            ),
+        ) {
+            let _ = vfs::write(
+                fd,
+                b"EspressoOS 0.2.0-dev (\\n) (\\l)\n\n",
+            );
+            let _ = vfs::close(fd);
+        }
+    }
+
+    if vfs::mount::resolve("/etc/group").is_err() {
+        if let Ok(fd) = vfs::open(
+            "/etc/group",
+            vfs::OpenFlags(
+                vfs::OpenFlags::CREATE.0 | vfs::OpenFlags::WRONLY.0 | vfs::OpenFlags::TRUNC.0,
+            ),
+        ) {
+            let _ = vfs::write(
+                fd,
+                b"root:x:0:\ndaemon:x:1:\nbin:x:2:\nsys:x:3:\nadm:x:4:\nwheel:x:10:root,youareme\nusers:x:100:youareme\n",
+            );
+            let _ = vfs::close(fd);
+        }
+    }
+
     // Never seed /etc/passwd. drivers/ssh/auth.rs consults it BEFORE the compiled
     // DEV_USER/DEV_PASSWORD and returns Success on a match, so seeding it with
     // defaults -- it used to be "root:root\nguest:guest\n" -- put two plaintext

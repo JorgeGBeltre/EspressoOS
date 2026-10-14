@@ -2133,6 +2133,137 @@ class TestPhase16Logic(unittest.TestCase):
         self.assertIn("processes 123", stat_out)
         self.assertIn("procs_running 4", stat_out)
 
+    def test_etc_hosts_resolution(self):
+        hosts_file = (
+            "# Static hosts table\n"
+            "127.0.0.1 localhost\n"
+            "192.168.4.1 espressoos esp32s3\n"
+            "10.0.0.1   gateway\n"
+        )
+        def resolve_host(content: str, host: str):
+            for line in content.splitlines():
+                line = line.strip()
+                if not line or line.startswith('#'):
+                    continue
+                parts = line.split()
+                if len(parts) >= 2:
+                    ip = parts[0]
+                    for name in parts[1:]:
+                        if name.lower() == host.lower():
+                            return ip
+            return None
+
+        self.assertEqual(resolve_host(hosts_file, "localhost"), "127.0.0.1")
+        self.assertEqual(resolve_host(hosts_file, "LOCALHOST"), "127.0.0.1")
+        self.assertEqual(resolve_host(hosts_file, "espressoos"), "192.168.4.1")
+        self.assertEqual(resolve_host(hosts_file, "esp32s3"), "192.168.4.1")
+        self.assertEqual(resolve_host(hosts_file, "gateway"), "10.0.0.1")
+        self.assertIsNone(resolve_host(hosts_file, "unknown.local"))
+
+    def test_resolv_conf_nameserver(self):
+        resolv_file = (
+            "# DNS Configuration\n"
+            "nameserver 8.8.8.8\n"
+            "nameserver 1.1.1.1\n"
+        )
+        def get_nameserver(content: str):
+            for line in content.splitlines():
+                line = line.strip()
+                if not line or line.startswith('#'):
+                    continue
+                parts = line.split()
+                if len(parts) >= 2 and parts[0] == "nameserver":
+                    return parts[1]
+            return None
+
+        self.assertEqual(get_nameserver(resolv_file), "8.8.8.8")
+
+    def test_dc_rpn_calculator(self):
+        def eval_dc(tokens_str: str):
+            stack = []
+            for tok in tokens_str.split():
+                if tok.isdigit() or (tok.startswith('_') and tok[1:].isdigit()):
+                    val = -int(tok[1:]) if tok.startswith('_') else int(tok)
+                    stack.append(val)
+                elif tok == '+':
+                    a, b = stack.pop(), stack.pop()
+                    stack.append(b + a)
+                elif tok == '-':
+                    a, b = stack.pop(), stack.pop()
+                    stack.append(b - a)
+                elif tok == '*':
+                    a, b = stack.pop(), stack.pop()
+                    stack.append(b * a)
+                elif tok == '/':
+                    a, b = stack.pop(), stack.pop()
+                    stack.append(b // a)
+                elif tok == '%':
+                    a, b = stack.pop(), stack.pop()
+                    stack.append(b % a)
+                elif tok == 'd':
+                    stack.append(stack[-1])
+                elif tok == 'r':
+                    a, b = stack.pop(), stack.pop()
+                    stack.append(a)
+                    stack.append(b)
+                elif tok == 'c':
+                    stack.clear()
+            return stack
+
+        self.assertEqual(eval_dc("10 20 +"), [30])
+        self.assertEqual(eval_dc("50 15 -"), [35])
+        self.assertEqual(eval_dc("6 7 *"), [42])
+        self.assertEqual(eval_dc("100 4 /"), [25])
+        self.assertEqual(eval_dc("17 5 %"), [2])
+        self.assertEqual(eval_dc("9 d *"), [81])
+        self.assertEqual(eval_dc("10 20 r"), [20, 10])
+
+    def test_hostid_fnv1a(self):
+        def fnv1a(s: bytes) -> int:
+            h = 0x811c9dc5
+            for b in s:
+                h ^= b
+                h = (h * 0x01000193) & 0xFFFFFFFF
+            return h
+
+        h1 = fnv1a(b"esp32s3")
+        h2 = fnv1a(b"espressoos")
+        self.assertGreater(h1, 0)
+        self.assertNotEqual(h1, h2)
+        hex_str = f"{h1:08x}"
+        self.assertEqual(len(hex_str), 8)
+
+    def test_etc_group_membership(self):
+        group_file = (
+            "root:x:0:\n"
+            "daemon:x:1:\n"
+            "wheel:x:10:root,youareme\n"
+            "users:x:100:youareme\n"
+        )
+        def get_user_groups(content: str, username: str):
+            groups = []
+            for line in content.splitlines():
+                parts = line.strip().split(':')
+                if len(parts) >= 4:
+                    gname = parts[0]
+                    members = [m.strip() for m in parts[3].split(',') if m.strip()]
+                    if gname == username or username in members:
+                        groups.append(gname)
+            return groups
+
+        self.assertEqual(get_user_groups(group_file, "youareme"), ["wheel", "users"])
+        self.assertEqual(get_user_groups(group_file, "root"), ["root", "wheel"])
+
+    def test_time_formatting(self):
+        def format_ms(ms: int) -> str:
+            sec = ms // 1000
+            rem = ms % 1000
+            return f"{sec}.{rem:03d}s"
+
+        self.assertEqual(format_ms(52), "0.052s")
+        self.assertEqual(format_ms(1200), "1.200s")
+        self.assertEqual(format_ms(0), "0.000s")
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

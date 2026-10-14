@@ -1,7 +1,7 @@
 #![no_std]
 #![no_main]
 
-use libc::{arg, close, connect, println, sockaddr_in, socket, uptime_ms};
+use libc::{arg, close, connect, open, println, read, sockaddr_in, socket, uptime_ms, O_RDONLY};
 
 fn parse_ip(s: &str) -> Option<[u8; 4]> {
     let mut ip = [0u8; 4];
@@ -34,6 +34,35 @@ fn parse_ip(s: &str) -> Option<[u8; 4]> {
     Some(ip)
 }
 
+fn check_etc_hosts(host: &str) -> Option<[u8; 4]> {
+    let fd = open("/etc/hosts", O_RDONLY);
+    if fd < 0 {
+        return None;
+    }
+    let mut buf = [0u8; 512];
+    let n = read(fd as i32, &mut buf);
+    let _ = close(fd as i32);
+    if n <= 0 {
+        return None;
+    }
+    let s = core::str::from_utf8(&buf[..n as usize]).ok()?;
+    for line in s.split('\n') {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        let mut parts = trimmed.split_whitespace();
+        if let Some(ip_str) = parts.next() {
+            for h in parts {
+                if h.eq_ignore_ascii_case(host) {
+                    return parse_ip(ip_str);
+                }
+            }
+        }
+    }
+    None
+}
+
 fn parse_port(s: &str) -> Option<u16> {
     if s.is_empty() {
         return None;
@@ -55,17 +84,20 @@ fn parse_port(s: &str) -> Option<u16> {
 #[no_mangle]
 pub extern "C" fn main(argc: i32, argv: *const *const u8) -> i32 {
     if argc < 2 {
-        println!("Usage: tcping <IPv4> [port]");
+        println!("Usage: tcping <IPv4|hostname> [port]");
         return 1;
     }
 
     let ip_str = unsafe { arg(argv, 1) };
     let ip = match parse_ip(ip_str) {
         Some(addr) => addr,
-        None => {
-            println!("tcping: invalid IPv4 address '{}'", ip_str);
-            return 1;
-        }
+        None => match check_etc_hosts(ip_str) {
+            Some(addr) => addr,
+            None => {
+                println!("tcping: unknown host or invalid IPv4 address '{}'", ip_str);
+                return 1;
+            }
+        },
     };
 
     let port = if argc >= 3 {

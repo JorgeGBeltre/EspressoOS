@@ -566,7 +566,6 @@ Flash layout defined in `kernel/src/prelude.rs` and `partitions.csv`:
 
 ## 10. Changelog & Implementation History
 
-All notable modifications to this project are documented below in reverse chronological order. Format adheres to [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and semantic versioning.
 
 ### [0.2.0-dev] - 2026-10-14
 

@@ -2384,6 +2384,171 @@ class TestPhase16Logic(unittest.TestCase):
         self.assertEqual(resolve_cmd("/usr/bin/env"), "/usr/bin/env")
 
 
+    def test_fmt_reflow_logic(self):
+        def reflow_text(text: str, width: int = 75, split_only: bool = False) -> str:
+            lines = text.splitlines()
+            output = []
+            cur_line = []
+            cur_len = 0
+
+            for line in lines:
+                stripped = line.strip()
+                if not stripped:
+                    if cur_line:
+                        output.append(" ".join(cur_line))
+                        cur_line = []
+                        cur_len = 0
+                    output.append("")
+                    continue
+
+                words = line.split()
+                if split_only:
+                    if len(line) <= width:
+                        output.append(line)
+                    else:
+                        sub_line = []
+                        sub_len = 0
+                        for w in words:
+                            if sub_len == 0:
+                                sub_line.append(w)
+                                sub_len = len(w)
+                            elif sub_len + 1 + len(w) <= width:
+                                sub_line.append(w)
+                                sub_len += 1 + len(w)
+                            else:
+                                output.append(" ".join(sub_line))
+                                sub_line = [w]
+                                sub_len = len(w)
+                        if sub_line:
+                            output.append(" ".join(sub_line))
+                else:
+                    for w in words:
+                        if cur_len == 0:
+                            cur_line.append(w)
+                            cur_len = len(w)
+                        elif cur_len + 1 + len(w) <= width:
+                            cur_line.append(w)
+                            cur_len += 1 + len(w)
+                        else:
+                            output.append(" ".join(cur_line))
+                            cur_line = [w]
+                            cur_len = len(w)
+
+            if cur_line:
+                output.append(" ".join(cur_line))
+
+            return "\n".join(output)
+
+        input_text = "The quick brown fox jumps over the lazy dog.\nAll good men must come to aid."
+        res = reflow_text(input_text, width=25)
+        lines = res.split("\n")
+        for l in lines:
+            self.assertLessEqual(len(l), 25)
+        self.assertIn("The quick brown fox", res)
+
+    def test_tsort_topological_sort(self):
+        def tsort_pairs(pairs: list) -> tuple:
+            # pairs is list of (u, v)
+            nodes = sorted(list(set([u for u, v in pairs] + [v for u, v in pairs])))
+            in_degree = {n: 0 for n in nodes}
+            adj = {n: [] for n in nodes}
+
+            for u, v in pairs:
+                if u != v:
+                    adj[u].append(v)
+                    in_degree[v] += 1
+
+            queue = [n for n in nodes if in_degree[n] == 0]
+            ordered = []
+
+            while queue:
+                u = queue.pop(0)
+                ordered.append(u)
+                for v in adj[u]:
+                    in_degree[v] -= 1
+                    if in_degree[v] == 0:
+                        queue.append(v)
+
+            has_cycle = len(ordered) < len(nodes)
+            return ordered, has_cycle
+
+        # Test DAG: a -> b, b -> c
+        ordered, cycle = tsort_pairs([("a", "b"), ("b", "c")])
+        self.assertFalse(cycle)
+        self.assertEqual(ordered, ["a", "b", "c"])
+
+        # Test diamond: a -> b, a -> c, b -> d, c -> d
+        ordered, cycle = tsort_pairs([("a", "b"), ("a", "c"), ("b", "d"), ("c", "d")])
+        self.assertFalse(cycle)
+        self.assertEqual(ordered[0], "a")
+        self.assertEqual(ordered[-1], "d")
+
+        # Test cycle: x -> y, y -> x
+        ordered, cycle = tsort_pairs([("x", "y"), ("y", "x")])
+        self.assertTrue(cycle)
+
+    def test_csplit_line_and_pattern_splitting(self):
+        def csplit_lines(content: list, split_spec: str) -> list:
+            pieces = []
+            cur_piece = []
+            is_num = split_spec.isdigit()
+            target_line = int(split_spec) if is_num else None
+            pattern = split_spec.strip('/') if not is_num and split_spec.startswith('/') else None
+
+            for idx, line in enumerate(content, 1):
+                split_now = False
+                if target_line is not None and idx == target_line:
+                    split_now = True
+                elif pattern is not None and pattern in line:
+                    split_now = True
+
+                if split_now and cur_piece:
+                    pieces.append(cur_piece)
+                    cur_piece = []
+
+                cur_piece.append(line)
+
+            if cur_piece:
+                pieces.append(cur_piece)
+            return pieces
+
+        lines = [f"line {i}" for i in range(1, 11)]
+        pieces = csplit_lines(lines, "5")
+        self.assertEqual(len(pieces), 2)
+        self.assertEqual(pieces[0], ["line 1", "line 2", "line 3", "line 4"])
+        self.assertEqual(pieces[1][0], "line 5")
+
+        pat_pieces = csplit_lines(lines, "/line 8/")
+        self.assertEqual(len(pat_pieces), 2)
+        self.assertEqual(pat_pieces[1][0], "line 8")
+
+    def test_dos2unix_and_unix2dos(self):
+        def dos2unix(b: bytes) -> bytes:
+            return b.replace(b"\r\n", b"\n")
+
+        def unix2dos(b: bytes) -> bytes:
+            # Replace \n with \r\n, ensuring not already preceded by \r
+            res = bytearray()
+            for i, byte in enumerate(b):
+                if byte == ord(b'\n') and (i == 0 or b[i-1] != ord(b'\r')):
+                    res.extend(b"\r\n")
+                else:
+                    res.append(byte)
+            return bytes(res)
+
+        dos_data = b"Line 1\r\nLine 2\r\nLine 3\r\n"
+        unix_data = b"Line 1\nLine 2\nLine 3\n"
+
+        self.assertEqual(dos2unix(dos_data), unix_data)
+        self.assertEqual(unix2dos(unix_data), dos_data)
+
+    def test_system_log_paths(self):
+        log_paths = ["/var/log/messages", "/var/log/dmesg", "/var/log/syslog"]
+        for p in log_paths:
+            self.assertTrue(p.startswith("/var/log/"))
+            self.assertFalse(" " in p)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
 

@@ -211,6 +211,15 @@ pub fn child_mounts(dir_path: &str) -> KResult<Vec<(String, InodeKind)>> {
     Ok(children)
 }
 
+pub fn list_mounts() -> Vec<(String, String)> {
+    use alloc::string::ToString;
+    let mounts = MOUNTS.lock();
+    mounts
+        .iter()
+        .map(|m| (m.path.clone(), m.fs.name().to_string()))
+        .collect()
+}
+
 // These cannot run: the kernel is a no_std binary with no lib target, so
 // `cargo test -p espressoos-kernel --lib` answers "no library targets found" and this
 // module is never compiled, let alone executed. tools/tests/logic_tests.py is a

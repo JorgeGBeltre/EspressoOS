@@ -171,8 +171,14 @@ pub fn getcwd_str(buf: &mut [u8]) -> core::result::Result<&str, isize> {
     core::str::from_utf8(&buf[..n as usize]).map_err(|_| -1)
 }
 
+pub const WNOHANG: u32 = 1;
+
 pub fn wait(status: &mut i32) -> isize {
-    unsafe { syscall(7, status as *mut i32 as usize, 0, 0, 0, 0, 0) }
+    waitpid(-1, status, 0)
+}
+
+pub fn waitpid(_pid: i32, status: &mut i32, options: u32) -> isize {
+    unsafe { syscall(7, status as *mut i32 as usize, options as usize, 0, 0, 0, 0) }
 }
 
 pub fn seek(fd: i32, offset: isize, whence: i32) -> isize {

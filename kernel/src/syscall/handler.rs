@@ -401,6 +401,7 @@ fn sys_spawn(args: &[usize]) -> isize {
 
 fn sys_wait(args: &[usize]) -> isize {
     let status_ptr = arg(args, 0) as *mut i32;
+    let options = arg(args, 1);
     // The write that started all this: sys_wait used to store the exit code at
     // whatever address it was handed, checking only for null. A null pointer is a
     // legal "I don't want the status", so it is allowed through here and skipped at
@@ -443,6 +444,11 @@ fn sys_wait(args: &[usize]) -> isize {
         }
         crate::vfs::cleanup_process_fds(child_pid);
         return child_pid as isize;
+    }
+
+    // WNOHANG (flag 1): si hay hijos vivos pero ninguno ha salido, retorna 0 de inmediato.
+    if options & 1 != 0 {
+        return 0;
     }
 
     crate::scheduler::block_current_noswitch();

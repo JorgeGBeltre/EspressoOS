@@ -159,7 +159,25 @@ pub fn init() -> KResult<Arc<DevFs>> {
     register(&devfs, "passwd", crate::drivers::passwd::devfs_device())?;
     register(&devfs, "power", crate::drivers::power::devfs_device())?;
     register(&devfs, "ble0", crate::drivers::ble::devfs_device())?;
+
+    let rand_dev = Arc::new(RandomDevice);
+    register(&devfs, "random", rand_dev.clone())?;
+    register(&devfs, "urandom", rand_dev)?;
     Ok(devfs)
+}
+
+struct RandomDevice;
+impl Device for RandomDevice {
+    fn read(&self, _off: u64, buf: &mut [u8]) -> KResult<usize> {
+        use rand_core::RngCore;
+        let rng = esp_hal::rng::Rng::new(unsafe { esp_hal::peripherals::RNG::steal() });
+        let mut hw = crate::drivers::ssh::crypto_rng::HwRng::new(rng);
+        hw.fill_bytes(buf);
+        Ok(buf.len())
+    }
+    fn write(&self, _off: u64, buf: &[u8]) -> KResult<usize> {
+        Ok(buf.len())
+    }
 }
 
 struct NullDevice;

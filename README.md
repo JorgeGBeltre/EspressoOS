@@ -68,15 +68,15 @@ EspressoOS boots and executes on physical ESP32-S3 hardware. The system acquires
 - **Kernel Boot**: HAL initialization, 128 KB SRAM internal heap, VFS mounts (`/` EspFs on flash, `/tmp` ramfs in RAM, `/dev` devfs, `/proc` procfs, `/sys` sysfs).
 - **PSRAM Execution (PSRAM-Exec)**: 8 MB PSRAM carve-up with 1 MB reserved for code execution on the instruction bus (`0x42800000`). Boot selftest verifies instruction execution in PSRAM returning code 42.
 - **Preemptive Multitasking & Process Management**: Scheduler driven by SYSTIMER at 100 Hz, 50 ms quantum, and Model B in-ISR context switching. Automatic reparenting of orphan processes to PID 1 (`init-sup`) and non-blocking zombie reaping with `waitpid` (`WNOHANG`), preventing PSRAM-Exec slot leaks.
-- **Dynamic Userland ELFs**: Suite of **58 ELF binaries** executing from PSRAM with `argv` support, 32-slot pool, and load-time relocation without requiring Position Independent Code (PIC).
+- **Dynamic Userland ELFs**: Suite of **63 ELF binaries** executing from PSRAM with `argv` support, 32-slot pool, and load-time relocation without requiring Position Independent Code (PIC).
 - **Wi-Fi + TCP/IP Stack**: Station (STA) mode, DHCP client, and active TCP/IP stack (`smoltcp`). Runtime Wi-Fi scan, connect, and disconnect. Credential persistence in flash NVS sector 0 (`0x0000_9000`).
 - **Hardened SSH-2.0 Server**: Server supporting curve25519-sha256, ssh-ed25519, and chacha20-poly1305@openssh.com.
   - **Persistent Host Key**: Unique Ed25519 host key generated via hardware TRNG on first boot and persisted to NVS flash sector 1 (`0x0000_A000`, `ESHK` format).
   - **Public-Key Authentication**: Supports OpenSSH `ssh-ed25519` keys in `/etc/authorized_keys` with constant-time cryptographic verification (`ct_eq`).
   - **Connection Resilience**: 60s authentication deadline, 300s session idle timeout, and clean TCP socket teardown on remote FIN/RST (`CloseWait`).
 - **`passwd` Command & Credential Management**: Userland application `/bin/passwd` creates or updates `/etc/passwd` in persistent flash storage (EspFs) using salted SHA-256 (`$s5$<salt>$<hash>`).
-- **Persistent EspFs Filesystem**: Log-structured filesystem on NOR flash surviving reboots and re-flashes.
-- **Hardware Cryptography**: Driver `/dev/sha0` exposing the hardware SHA-256 accelerator.
+- **Persistent EspFs Filesystem & VFS**: Log-structured filesystem on NOR flash surviving reboots and re-flashes, with dynamic mount table and ramfs scratch mount on `/mnt`.
+- **Hardware Cryptography & TRNG**: Drivers `/dev/sha0` exposing the hardware SHA-256 accelerator, and `/dev/random` + `/dev/urandom` streaming entropy from the on-chip True Random Number Generator.
 - **Power Management & Reboot**: Driver `/dev/power` with working software reboot.
 - **BLE Advertising**: Beacon advertisement as `EspressoOS` via `/bin/ble`.
 
@@ -117,9 +117,9 @@ Entry point located in `kernel/src/main.rs` (`#[esp_hal::main] fn main() -> !`):
 5. **VFS Mounts**:
    - Mount `/dev` (devfs).
    - Mount root `/` from NOR flash (`EspFs::mount()`). Falls back to `ramfs` if EspFs is unformatted or corrupt.
-   - Mount `/tmp` (ramfs), `/proc` (procfs), `/sys` (sysfs).
+   - Mount `/tmp` (ramfs), `/proc` (procfs), `/sys` (sysfs), `/mnt` (ramfs).
 6. **PID 0 File Descriptor Table**: Seed `/dev/console` for standard streams (fd 0, 1, 2).
-7. **Userland Deployment**: `install_userland()` inspects the 35 embedded binaries and deploys or updates `/bin/*` on EspFs.
+7. **Userland Deployment**: `install_userland()` inspects the 63 embedded binaries and deploys or updates `/bin/*` on EspFs.
 8. **System Files Setup**: `init_etc_files()` writes `/etc/rc`. If `/etc/passwd` exists, the kernel logs a warning noting custom SSH credentials are active.
 9. **I2C and SPI Init**: Initialize `I2C0` and `SPI2`.
 10. **Scheduler & Supervisor Bring-up**: Task creation:
@@ -350,7 +350,7 @@ cargo build --release
 cargo run --release
 ```
 
-`kernel/build.rs` automatically compiles all 58 userland binaries, generates relocation fixup tables, and embeds them into the kernel image.
+`kernel/build.rs` automatically compiles all 63 userland binaries, generates relocation fixup tables, and embeds them into the kernel image.
 
 ### 4.4 Feature Gates
 
@@ -377,7 +377,7 @@ The following feature flags are available in `kernel/Cargo.toml`:
 ========================================
 [kernel] flash: 16 MB usable
 [kernel] / mounted on flash (espfs)
-[kernel] userland: 58 binaries installed/updated in EspFs
+[kernel] userland: 63 binaries installed/updated in EspFs
 [net] connecting to SSID '...'
 [net] associated with AP; negotiating DHCP...
 [net] IP = 192.168.2.146
@@ -391,7 +391,7 @@ EspressoOS:~$
 
 ## 5. Complete Command Reference
 
-The system includes **58 userland binaries** in `/bin` alongside shell built-in commands.
+The system includes **63 userland binaries** in `/bin` alongside shell built-in commands.
 
 ### Userland Binaries (`/bin/*`)
 
@@ -453,6 +453,11 @@ The system includes **58 userland binaries** in `/bin` alongside shell built-in 
 56. **`less`**: Screen-by-screen file and stream pager with interactive navigation controls (`less [FILE]`).
 57. **`find`**: Recursively search directory hierarchy with BFS queue and pattern matching (`find [PATH] [-name PATTERN]`).
 58. **`du`**: Report recursive disk usage in blocks or human-readable format (`du [-h] [-s] [PATH]`).
+59. **`service`**: System service and daemon manager with lifecycle commands (`service [list | status | start | stop | restart]`).
+60. **`pkg`**: System package manager inspecting binaries, versions, and integrity (`pkg [list | info | check]`).
+61. **`which`**: Locate executable binary in `/bin` command path (`which PROGRAM`).
+62. **`true`**: Standard Unix utility returning exit code 0 (`true`).
+63. **`false`**: Standard Unix utility returning exit code 1 (`false`).
 
 ---
 
@@ -509,7 +514,7 @@ EspressoOS/
 │   └── config.toml          # Xtensa target config and espflash runner setup
 ├── bootloader/              # Second-stage bootloader skeleton (future phase)
 ├── kernel/                  # EspressoOS Kernel crate
-│   ├── build.rs             # Build script: compiles 35 userland ELFs and generates fixup tables
+│   ├── build.rs             # Build script: compiles 63 userland ELFs and generates fixup tables
 │   ├── src/
 │   │   ├── arch/xtensa/     # Context switch, ISR vectors, and SYSTIMER driver
 │   │   ├── drivers/         # Drivers: gpio, uart, i2c, spi, crypto, flash, power, ble, wifi, ssh
@@ -526,7 +531,7 @@ EspressoOS/
 │   └── Cargo.toml
 ├── tools/                   # Partition generation tools and test scripts
 ├── userland/                # no_std userland workspace (executes from PSRAM)
-│   ├── apps/src/bin/        # Source code for 35 userland binaries (/bin/*)
+│   ├── apps/src/bin/        # Source code for 63 userland binaries (/bin/*)
 │   ├── libc/                # Userland base library: _start, syscall wrappers, allocator
 │   └── Cargo.toml
 ├── Cargo.lock               # Cargo workspace lockfile
@@ -593,7 +598,7 @@ Flash layout defined in `kernel/src/prelude.rs` and `partitions.csv`:
   - Non-blocking background job reaping (`&`) in shell before printing interactive prompts.
   - Periodic supervisor reaping loop draining adopted zombie processes, preventing PSRAM-Exec slot exhaustion.
 - **Phase 2: Core POSIX Userland & Observability Expansion (P0/P1)**:
-  - Expanded userland application suite to **58 dynamic ELF binaries**, all operating within 16 KB PSRAM execution slot budgets:
+  - Expanded userland application suite to **63 dynamic ELF binaries**, all operating within 16 KB PSRAM execution slot budgets:
     - `cp`: File copy with chunked streaming buffer transfer.
     - `head`: Print first N lines from files or standard input (`-n N`).
     - `tail`: Print last N lines using a circular ring buffer (`-n N`).
@@ -617,6 +622,11 @@ Flash layout defined in `kernel/src/prelude.rs` and `partitions.csv`:
     - `less`: Interactive screen-by-screen file and stream pager with navigation controls.
     - `find`: Non-recursive BFS directory hierarchy search with name pattern matching.
     - `du`: Recursive disk space measurement for directory trees and individual files.
+    - `service`: System daemon and service manager coordinating system and userland unit lifecycles.
+    - `pkg`: System package manager inspecting binary metadata, execution architectures, and repository integrity.
+    - `which`: Locates executable binary paths in the system binary path.
+    - `true`: Standard POSIX utility returning success exit code 0.
+    - `false`: Standard POSIX utility returning failure exit code 1.
 - **Phase 3: Security Hardening & SSH Engine (P1)**:
   - Hardware TRNG generation of Ed25519 host key on initial boot.
   - Persistence of host key seed in dedicated NVS flash storage (`ESHK` format with CRC checksum), guaranteeing stable host identity across reboots.
@@ -624,6 +634,7 @@ Flash layout defined in `kernel/src/prelude.rs` and `partitions.csv`:
   - Passwordless public-key SSH login support for `ssh-ed25519` keys via authorized keys file with constant-time verification.
   - SSH connection timeouts: 60-second authentication deadline and 300-second session idle timeout.
   - Clean TCP socket teardown on remote FIN/RST (`CloseWait`), immediately releasing shell sessions and channels.
+  - Implemented `/dev/random` and `/dev/urandom` character devices streaming cryptographically secure random entropy directly from the on-chip True Random Number Generator.
 - **Phase 4 & 5: Bus Drivers, BLE & OTA Resilience (P2)**:
   - Verified I2C and full-duplex SPI master drivers with userland ioctl memory protection.
   - Non-blocking BLE advertising integrated directly into the network task service loop.
@@ -632,12 +643,13 @@ Flash layout defined in `kernel/src/prelude.rs` and `partitions.csv`:
   - Bootloader slot and candidate verification state detection and notice printed during startup.
 - **Phase 6: VFS Hierarchy, Dynamic Mounts & Kernel Observability (P2/P3)**:
   - Dynamic active mount table tracking in VFS (`/proc/mounts`) mapping devices, mount points, and filesystem types.
+  - Mounted secondary in-memory scratch volume on `/mnt` alongside root and temporary mounts.
   - Added CPU architecture and dual-core topology metrics export (`/proc/cpuinfo`).
   - Added diagnostic circular ring buffer with microsecond timestamps and system version identifiers in ProcFs.
   - Boot-time creation of full standard Unix directory tree (`/sbin`, `/var`, `/var/log`, `/var/lib`, `/home`, `/mnt`) alongside root and temporary mounts.
 - **Phase 7: Advanced Capabilities, Feature Gates & Test Suite Expansion (P3)**:
   - Verified clean release compilation with dual-core symmetric multiprocessing (SMP) and memory protection unit (PMS) feature gates.
-  - Extended automated test suite to 133 tests passing with 100% success rate across DNS, crypto, VFS logic, and file search algorithms.
+  - Extended automated test suite to 135 tests passing with 100% success rate across DNS, crypto, VFS logic, and file search algorithms.
 
 ### [0.1.0] - 2026-08-06
 

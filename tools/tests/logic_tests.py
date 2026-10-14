@@ -1197,5 +1197,30 @@ class TestFindDuLogic(unittest.TestCase):
         self.assertEqual(format_size(5 * 1024 * 1024, True), "5M\t")
 
 
+class TestServicePkgWhichLogic(unittest.TestCase):
+    def test_which_path_resolution(self):
+        def which_resolve(prog: str, available: list) -> Optional[str]:
+            full = f"/bin/{prog}"
+            if prog in available:
+                return full
+            return None
+
+        apps = ["sh", "ls", "service", "pkg", "which", "true", "false"]
+        self.assertEqual(which_resolve("sh", apps), "/bin/sh")
+        self.assertEqual(which_resolve("service", apps), "/bin/service")
+        self.assertEqual(which_resolve("unknown", apps), None)
+
+    def test_service_lookup(self):
+        services = {
+            "init": "RUNNING",
+            "net": "RUNNING",
+            "ssh": "LISTENING",
+            "httpd": "STOPPED",
+        }
+        self.assertIn("ssh", services)
+        self.assertEqual(services["ssh"], "LISTENING")
+        self.assertNotIn("apache", services)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

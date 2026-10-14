@@ -158,6 +158,9 @@ fn main() -> ! {
     if let Err(e) = vfs::mount("/sys", alloc::sync::Arc::new(fs::SysFs::new())) {
         println!("[kernel] warning: mount /sys failed: {:?}", e);
     }
+    if let Err(e) = vfs::mount("/mnt", fs::ramfs::RamFs::new()) {
+        println!("[kernel] warning: mount /mnt failed: {:?}", e);
+    }
 
     // Every task with no process of its own -- this boot code, the net task, the
     // heartbeat -- shares pid 0's fd table, via `get_current_pid().unwrap_or(0)` in

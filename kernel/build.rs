@@ -14,6 +14,7 @@ const APPS: &[&str] = &[
     "dmesg", "date", "sync",
     "nslookup", "curl", "mv", "stat", "tee", "env",
     "clear", "pwd", "poweroff", "mount", "umount", "less", "find", "du",
+    "service", "pkg", "which", "true", "false",
 ];
 
 // Every binary links at the same address and the loader relocates it into whatever

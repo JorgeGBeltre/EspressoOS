@@ -33,18 +33,26 @@ pub fn enter_deep_sleep(seconds: u64) -> ! {
     rtc.sleep_deep(&[&timer]);
 }
 
-// ---- /dev/power: deep-sleep / reboot por ioctl (SP2 R5). D-5: cero syscalls. ----
+pub fn enter_light_sleep(seconds: u64) {
+    esp_println::println!(
+        "[power] Entering low-power CPU sleep (WFI) for {} seconds...",
+        seconds
+    );
+    let start = crate::arch::xtensa::timer::uptime_ms();
+    let target = seconds.saturating_mul(1000);
+    while (crate::arch::xtensa::timer::uptime_ms().wrapping_sub(start) as u64) < target {
+        unsafe {
+            core::arch::asm!("waiti 0");
+        }
+    }
+}
 
-// POWER_SLEEP (0) removida (SP2 R6): esp-hal's `rtc.sleep_light()` cuelga la CPU en este
-// hardware/generación de HAL -- no es un bug de este kernel, es una limitación de
-// plataforma (ver README §9, punto 1 histórico). Deep sleep y reboot cubren los mismos
-// casos de uso (ahorro de energía, liberar el bus) sin el riesgo de colgar la placa, así
-// que en vez de dejar un camino que cuelga el CPU, el ioctl 0 ahora devuelve NotSupported.
-// El número 0 se deja sin reasignar para no romper binarios de userland ya compilados que
-// aún lo prueben.
-const POWER_SLEEP_REMOVED: u32 = 0;
+// ---- /dev/power: sleep / deep-sleep / reboot / idle por ioctl ----
+
+pub const POWER_SLEEP: u32 = 0;
 pub const POWER_DEEP_SLEEP: u32 = 1;
 pub const POWER_REBOOT: u32 = 2;
+pub const POWER_IDLE: u32 = 3;
 
 struct PowerDevice;
 
@@ -57,14 +65,22 @@ impl crate::vfs::devfs::Device for PowerDevice {
     }
     fn ioctl(&self, cmd: u32, arg: usize) -> KResult<usize> {
         match cmd {
-            // `arg` = segundos. deep-sleep y reboot no vuelven (la placa reinicia).
-            POWER_SLEEP_REMOVED => Err(KError::NotSupported),
+            POWER_SLEEP => {
+                enter_light_sleep(arg as u64);
+                Ok(0)
+            }
             POWER_DEEP_SLEEP => enter_deep_sleep(arg as u64),
             POWER_REBOOT => {
                 esp_hal::reset::software_reset();
                 loop {
                     core::hint::spin_loop();
                 }
+            }
+            POWER_IDLE => {
+                unsafe {
+                    core::arch::asm!("waiti 0");
+                }
+                Ok(0)
             }
             _ => Err(KError::InvalidArgument),
         }

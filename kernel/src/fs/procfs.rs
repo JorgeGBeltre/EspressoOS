@@ -83,6 +83,12 @@ impl Inode for ProcFsRoot {
         if name == "version" {
             return Ok(Arc::new(ProcFsFile::Version));
         }
+        if name == "cpuinfo" {
+            return Ok(Arc::new(ProcFsFile::CpuInfo));
+        }
+        if name == "mounts" {
+            return Ok(Arc::new(ProcFsFile::Mounts));
+        }
         if let Ok(pid) = name.parse::<u32>() {
             let pt = crate::scheduler::process::PROCESS_TABLE.lock();
             if pt.table.contains_key(&pid) {
@@ -156,16 +162,30 @@ impl Inode for ProcFsRoot {
                 ino: 8,
             }));
         }
+        if index == 9 {
+            return Ok(Some(DirEntry {
+                name: "cpuinfo".to_string(),
+                kind: InodeKind::File,
+                ino: 9,
+            }));
+        }
+        if index == 10 {
+            return Ok(Some(DirEntry {
+                name: "mounts".to_string(),
+                kind: InodeKind::File,
+                ino: 10,
+            }));
+        }
 
         let pids: Vec<u32> = {
             let pt = crate::scheduler::process::PROCESS_TABLE.lock();
             pt.table.keys().copied().collect()
         };
 
-        if index < 9 {
+        if index < 11 {
             return Ok(None);
         }
-        let pid_idx = index - 9;
+        let pid_idx = index - 11;
         if pid_idx < pids.len() {
             let pid = pids[pid_idx];
             return Ok(Some(DirEntry {
@@ -293,6 +313,8 @@ enum ProcFsFile {
     NetSockets,
     Dmesg,
     Version,
+    CpuInfo,
+    Mounts,
 }
 
 impl Inode for ProcFsFile {
@@ -306,6 +328,32 @@ impl Inode for ProcFsFile {
 
     fn read_at(&self, off: u64, buf: &mut [u8]) -> KResult<usize> {
         let content = match self {
+            ProcFsFile::CpuInfo => {
+                alloc::format!(
+                    "processor\t: 0\nmodel name\t: Xtensa LX7 dual-core\ncpu MHz\t\t: 240.00\nfeatures\t: fpu, mac, esp32s3, windowed_abi\ncache size\t: 32 KB I-Cache, 32 KB D-Cache\n\n\
+                     processor\t: 1\nmodel name\t: Xtensa LX7 dual-core\ncpu MHz\t\t: 240.00\nfeatures\t: fpu, mac, esp32s3, windowed_abi\ncache size\t: 32 KB I-Cache, 32 KB D-Cache\n"
+                )
+            }
+            ProcFsFile::Mounts => {
+                let mut out = alloc::string::String::new();
+                for (path, fs_name) in crate::vfs::mount::list_mounts() {
+                    let dev = if fs_name == "espfs" {
+                        "/dev/flash0"
+                    } else if fs_name == "devfs" {
+                        "devfs"
+                    } else if fs_name == "procfs" {
+                        "procfs"
+                    } else if fs_name == "sysfs" {
+                        "sysfs"
+                    } else if fs_name == "ramfs" {
+                        "ramfs"
+                    } else {
+                        "none"
+                    };
+                    out.push_str(&alloc::format!("{} {} {} rw 0 0\n", dev, path, fs_name));
+                }
+                out
+            }
             ProcFsFile::Version => {
                 alloc::format!("EspressoOS 0.2.0-dev (xtensa-esp32s3-none-elf) Rust no_std [Xtensa LX7 dual-core @ 240MHz]\n")
             }

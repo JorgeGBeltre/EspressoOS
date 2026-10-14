@@ -1158,5 +1158,44 @@ class TestRamfs(unittest.TestCase):
         self.assertEqual(st["block_size"], 1)
 
 
+class TestFindDuLogic(unittest.TestCase):
+    def test_find_pattern_matching(self):
+        def pattern_matches(name: str, pattern: str) -> bool:
+            if not pattern:
+                return True
+            if pattern.startswith("*"):
+                return name.endswith(pattern[1:])
+            elif pattern.endswith("*"):
+                return name.startswith(pattern[:-1])
+            else:
+                return name == pattern
+
+        self.assertTrue(pattern_matches("main.rs", "*.rs"))
+        self.assertFalse(pattern_matches("main.c", "*.rs"))
+        self.assertTrue(pattern_matches("lib.rs", "*"))
+        self.assertTrue(pattern_matches("test_app", "test*"))
+        self.assertFalse(pattern_matches("app_test", "test*"))
+        self.assertTrue(pattern_matches("sh", "sh"))
+        self.assertFalse(pattern_matches("sh", "bash"))
+
+    def test_du_formatting(self):
+        def format_size(bytes_val: int, human: bool) -> str:
+            if not human:
+                kb = (bytes_val + 1023) // 1024
+                return f"{kb}\t"
+            elif bytes_val < 1024:
+                return f"{bytes_val}B\t"
+            elif bytes_val < 1024 * 1024:
+                return f"{bytes_val // 1024}K\t"
+            else:
+                return f"{bytes_val // (1024 * 1024)}M\t"
+
+        self.assertEqual(format_size(500, False), "1\t")
+        self.assertEqual(format_size(2048, False), "2\t")
+        self.assertEqual(format_size(500, True), "500B\t")
+        self.assertEqual(format_size(2048, True), "2K\t")
+        self.assertEqual(format_size(5 * 1024 * 1024, True), "5M\t")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

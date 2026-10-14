@@ -178,6 +178,13 @@ fn main() -> ! {
         Err(e) => println!("[kernel] warning: no /dev/console for the kernel fd table: {:?}", e),
     }
 
+    let _ = vfs::mkdir("/sbin");
+    let _ = vfs::mkdir("/var");
+    let _ = vfs::mkdir("/var/log");
+    let _ = vfs::mkdir("/var/lib");
+    let _ = vfs::mkdir("/home");
+    let _ = vfs::mkdir("/mnt");
+
     install_userland();
 
     init_etc_files();

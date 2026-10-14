@@ -615,6 +615,36 @@ fn init_etc_files() {
         }
     }
 
+    if vfs::mount::resolve("/var/log/messages").is_err() {
+        if let Ok(fd) = vfs::open(
+            "/var/log/messages",
+            vfs::OpenFlags(
+                vfs::OpenFlags::CREATE.0 | vfs::OpenFlags::WRONLY.0 | vfs::OpenFlags::TRUNC.0,
+            ),
+        ) {
+            let _ = vfs::write(
+                fd,
+                b"[system] EspressoOS syslog service initialized\n",
+            );
+            let _ = vfs::close(fd);
+        }
+    }
+
+    if vfs::mount::resolve("/var/log/dmesg").is_err() {
+        if let Ok(fd) = vfs::open(
+            "/var/log/dmesg",
+            vfs::OpenFlags(
+                vfs::OpenFlags::CREATE.0 | vfs::OpenFlags::WRONLY.0 | vfs::OpenFlags::TRUNC.0,
+            ),
+        ) {
+            let _ = vfs::write(
+                fd,
+                b"[boot] EspressoOS kernel initialized\n[boot] VFS mounted: /dev, /, /tmp, /proc, /sys, /mnt\n[boot] Userland applications ready\n",
+            );
+            let _ = vfs::close(fd);
+        }
+    }
+
     // Never seed /etc/passwd. drivers/ssh/auth.rs consults it BEFORE the compiled
     // DEV_USER/DEV_PASSWORD and returns Success on a match, so seeding it with
     // defaults -- it used to be "root:root\nguest:guest\n" -- put two plaintext

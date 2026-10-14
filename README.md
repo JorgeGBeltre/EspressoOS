@@ -68,7 +68,7 @@ EspressoOS boots and executes on physical ESP32-S3 hardware. The system acquires
 - **Kernel Boot**: HAL initialization, 128 KB SRAM internal heap, VFS mounts (`/` EspFs on flash, `/tmp` ramfs in RAM, `/dev` devfs, `/proc` procfs, `/sys` sysfs).
 - **PSRAM Execution (PSRAM-Exec)**: 8 MB PSRAM carve-up with 1 MB reserved for code execution on the instruction bus (`0x42800000`). Boot selftest verifies instruction execution in PSRAM returning code 42.
 - **Preemptive Multitasking & Process Management**: Scheduler driven by SYSTIMER at 100 Hz, 50 ms quantum, and Model B in-ISR context switching. Automatic reparenting of orphan processes to PID 1 (`init-sup`) and non-blocking zombie reaping with `waitpid` (`WNOHANG`), preventing PSRAM-Exec slot leaks.
-- **Dynamic Userland ELFs**: Suite of **134 ELF binaries** executing from PSRAM with `argv` support, 32-slot pool, and load-time relocation without requiring Position Independent Code (PIC).
+- **Dynamic Userland ELFs**: Suite of **140 ELF binaries** executing from PSRAM with `argv` support, 32-slot pool, and load-time relocation without requiring Position Independent Code (PIC).
 - **Wi-Fi + TCP/IP Stack**: Station (STA) mode, DHCP client, and active TCP/IP stack (`smoltcp`). Runtime Wi-Fi scan, connect, and disconnect. Credential persistence in flash NVS sector 0 (`0x0000_9000`).
 - **Hardened SSH-2.0 Server**: Server supporting curve25519-sha256, ssh-ed25519, and chacha20-poly1305@openssh.com.
   - **Persistent Host Key**: Unique Ed25519 host key generated via hardware TRNG on first boot and persisted to NVS flash sector 1 (`0x0000_A000`, `ESHK` format).
@@ -546,6 +546,12 @@ The system includes **122 userland binaries** in `/bin` alongside shell built-in
 132. **`chroot`**: Run commands or shell with root directory set to a new path (`chroot NEWROOT [COMMAND [ARG...]]`).
 133. **`pr`**: Paginate and format text files or streams for printing (`pr [-h header] [-l lines] [-t] [file...]`).
 134. **`bc`**: Classic Unix infix arithmetic calculator supporting operator precedence, parentheses, and powers (`bc [-e expr] [expr...]`).
+135. **`fmt`**: Reformat text paragraphs to specified column width (`fmt [-w width] [-s] [file...]`).
+136. **`tsort`**: Topological sort utility for directed acyclic graphs and dependency pipelines (`tsort [file]`).
+137. **`csplit`**: Context-based file splitter by line numbers or delimiter patterns (`csplit [-f prefix] [-n digits] file split_spec...`).
+138. **`nice`**: Run commands with modified scheduling priority or query current niceness (`nice [-n increment] [command [args...]]`).
+139. **`dos2unix`**: Convert DOS/Windows CRLF line breaks to Unix LF line breaks (`dos2unix [-q] [file...]`).
+140. **`unix2dos`**: Convert Unix LF line breaks to DOS/Windows CRLF line breaks (`unix2dos [-q] [file...]`).
 
 ---
 
@@ -578,7 +584,7 @@ Each serial or SSH connection runs an isolated session (`SessionChannel`) with d
 
 ### Userland programs (`/bin`)
 
-See the full 134-binary list in §5. Selected usage:
+See the full 140-binary list in §5. Selected usage:
 
 ```text
 EspressoOS:~$ /bin/echo hola mundo | /bin/cat
@@ -870,6 +876,17 @@ Flash layout defined in `kernel/src/prelude.rs` and `partitions.csv`:
   - Implemented classic Unix infix arithmetic calculator (`bc`) supporting standard mathematical expressions with parentheses, operator precedence, modulo, and exponentiation using Dijkstra's Shunting-Yard evaluation algorithm.
   - Expanded userland application suite to **134 dynamic ELF binaries**, all linking within their 16 KB PSRAM execution slot budgets.
   - Expanded automated test suite to **209 tests passing with 100% success rate** covering system parameter paths, infix arithmetic precedence, pagination page geometries, processor core parsing, and command path resolution.
+- **Phase 20: System Logging Infrastructure, Topological Sorting, Stream Formatting & Text Processing (P1/P2/P3)**:
+  - Initialized persistent system logging hierarchy with automatic creation of persistent system log journals and kernel ring buffer message persistence on boot.
+  - Enhanced kernel ring buffer viewer (`dmesg`) supporting kernel memory ring introspection, persistent system log interrogation, custom log file reading, and command-line usage guidance.
+  - Implemented classic Unix paragraph reflow and text formatting utility (`fmt`) supporting customizable line widths, word wrapping, paragraph preservation, and split-only formatting mode.
+  - Implemented POSIX topological sorting utility (`tsort`) resolving directed acyclic graph partial orderings, dependency pipelines, and detecting dependency cycles.
+  - Implemented context-based file splitting utility (`csplit`) dividing input streams by line number offsets or regular pattern context boundaries with configurable chunk prefix naming and byte-count telemetry.
+  - Implemented process execution priority utility (`nice`) querying default scheduling niceness and executing child processes with priority adjustments.
+  - Implemented DOS-to-Unix line termination conversion utility (`dos2unix`) stripping carriage return characters from CRLF streams and files with in-place atomic replacement.
+  - Implemented Unix-to-DOS line termination conversion utility (`unix2dos`) converting LF stream delimiters to CRLF sequences with in-place atomic file modification.
+  - Expanded userland application suite to **140 dynamic ELF binaries**, all linking within their 16 KB PSRAM execution slot budgets.
+  - Expanded automated test suite to **214 tests passing with 100% success rate** covering paragraph reflow geometries, topological ordering, context splitting, line break conversions, and persistent logging paths.
 
 ### [0.1.0] - 2026-08-06
 

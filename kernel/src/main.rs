@@ -498,6 +498,21 @@ fn init_etc_files() {
         let _ = vfs::close(fd);
     }
 
+    if vfs::mount::resolve("/etc/rc.local").is_err() {
+        if let Ok(fd) = vfs::open(
+            "/etc/rc.local",
+            vfs::OpenFlags(
+                vfs::OpenFlags::CREATE.0 | vfs::OpenFlags::WRONLY.0 | vfs::OpenFlags::TRUNC.0,
+            ),
+        ) {
+            let _ = vfs::write(
+                fd,
+                b"# EspressoOS User Startup Hook (/etc/rc.local)\n",
+            );
+            let _ = vfs::close(fd);
+        }
+    }
+
     if vfs::mount::resolve("/etc/hostname").is_err() {
         if let Ok(fd) = vfs::open(
             "/etc/hostname",

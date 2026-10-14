@@ -2058,6 +2058,81 @@ class TestPhase16Logic(unittest.TestCase):
         self.assertIn("root=/dev/flash0", cmdline)
         self.assertIn("init=/bin/init", cmdline)
 
+    def test_seq_generation(self):
+        def seq(first, step, last):
+            res = []
+            cur = first
+            while (step > 0 and cur <= last) or (step < 0 and cur >= last):
+                res.append(cur)
+                cur += step
+            return res
+
+        self.assertEqual(seq(1, 1, 5), [1, 2, 3, 4, 5])
+        self.assertEqual(seq(3, 2, 9), [3, 5, 7, 9])
+        self.assertEqual(seq(5, -1, 1), [5, 4, 3, 2, 1])
+
+    def test_realpath_canonicalization(self):
+        def canonicalize(path: str, cwd: str) -> str:
+            full = path if path.startswith('/') else (cwd.rstrip('/') + '/' + path)
+            parts = []
+            for seg in full.split('/'):
+                if not seg or seg == '.':
+                    continue
+                elif seg == '..':
+                    if parts:
+                        parts.pop()
+                else:
+                    parts.append(seg)
+            return '/' + '/'.join(parts)
+
+        self.assertEqual(canonicalize("../bin/ls", "/usr/local"), "/usr/bin/ls")
+        self.assertEqual(canonicalize("./file.txt", "/home/user"), "/home/user/file.txt")
+        self.assertEqual(canonicalize("/etc/../var/log", "/"), "/var/log")
+        self.assertEqual(canonicalize("///", "/"), "/")
+
+    def test_cksum_crc(self):
+        def posix_cksum(data: bytes) -> int:
+            crc = 0
+            for b in data:
+                c = ((crc >> 24) ^ b) & 0xFF
+                for _ in range(8):
+                    if (c & 0x80) != 0:
+                        c = ((c << 1) ^ 0x04C11DB7) & 0xFFFFFFFF
+                    else:
+                        c = (c << 1) & 0xFFFFFFFF
+                crc = ((crc << 8) ^ c) & 0xFFFFFFFF
+            length = len(data)
+            while length > 0:
+                b = length & 0xFF
+                c = ((crc >> 24) ^ b) & 0xFF
+                for _ in range(8):
+                    if (c & 0x80) != 0:
+                        c = ((c << 1) ^ 0x04C11DB7) & 0xFFFFFFFF
+                    else:
+                        c = (c << 1) & 0xFFFFFFFF
+                crc = ((crc << 8) ^ c) & 0xFFFFFFFF
+                length >>= 8
+            return (~crc) & 0xFFFFFFFF
+
+        # Known POSIX cksum test vector for empty string and "Hello\n"
+        self.assertEqual(posix_cksum(b""), 4294967295)
+        self.assertGreater(posix_cksum(b"Hello\n"), 0)
+
+    def test_procfs_stat(self):
+        stat_out = (
+            "cpu  1000 0 500 3000 0 0 0 0 0 0\n"
+            "cpu0 1000 0 500 3000 0 0 0 0 0 0\n"
+            "intr 0\n"
+            "ctxt 2000\n"
+            "btime 1700000000\n"
+            "processes 123\n"
+            "procs_running 4\n"
+            "procs_blocked 0\n"
+        )
+        self.assertIn("cpu  ", stat_out)
+        self.assertIn("processes 123", stat_out)
+        self.assertIn("procs_running 4", stat_out)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

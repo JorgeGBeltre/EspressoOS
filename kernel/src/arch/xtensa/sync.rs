@@ -3,9 +3,17 @@
 use core::cell::UnsafeCell;
 use core::marker::PhantomData;
 use core::ops::{Deref, DerefMut};
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use super::interrupts;
+
+#[inline]
+fn current_core_id() -> u32 {
+    match esp_hal::Cpu::current() {
+        esp_hal::Cpu::ProCpu => 1,
+        esp_hal::Cpu::AppCpu => 2,
+    }
+}
 
 pub struct SpinLock {
     locked: AtomicBool,
@@ -36,7 +44,7 @@ impl SpinLock {
         self.locked
             .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
             .is_ok()
-    }
+        }
 
     pub fn is_locked(&self) -> bool {
         self.locked.load(Ordering::Relaxed)
@@ -75,7 +83,7 @@ impl Drop for CriticalSection {
 
 pub struct Mutex<T: ?Sized> {
     lock: SpinLock,
-
+    owner: AtomicU32,
     data: UnsafeCell<T>,
 }
 
@@ -86,6 +94,7 @@ impl<T> Mutex<T> {
     pub const fn new(value: T) -> Self {
         Self {
             lock: SpinLock::new(),
+            owner: AtomicU32::new(0),
             data: UnsafeCell::new(value),
         }
     }
@@ -98,7 +107,13 @@ impl<T> Mutex<T> {
 impl<T: ?Sized> Mutex<T> {
     pub fn lock(&self) -> MutexGuard<'_, T> {
         let irq_state = interrupts::disable();
+        let core = current_core_id();
+        if self.owner.load(Ordering::Relaxed) == core {
+            interrupts::restore(irq_state);
+            panic!("Kernel Mutex deadlock detected: core {} re-entered Mutex", core - 1);
+        }
         self.lock.lock();
+        self.owner.store(core, Ordering::Relaxed);
         MutexGuard {
             mutex: self,
             irq_state,
@@ -108,7 +123,13 @@ impl<T: ?Sized> Mutex<T> {
 
     pub fn try_lock(&self) -> Option<MutexGuard<'_, T>> {
         let irq_state = interrupts::disable();
+        let core = current_core_id();
+        if self.owner.load(Ordering::Relaxed) == core {
+            interrupts::restore(irq_state);
+            return None;
+        }
         if self.lock.try_lock() {
+            self.owner.store(core, Ordering::Relaxed);
             Some(MutexGuard {
                 mutex: self,
                 irq_state,
@@ -147,6 +168,7 @@ impl<T: ?Sized> DerefMut for MutexGuard<'_, T> {
 
 impl<T: ?Sized> Drop for MutexGuard<'_, T> {
     fn drop(&mut self) {
+        self.mutex.owner.store(0, Ordering::Relaxed);
         self.mutex.lock.unlock();
         interrupts::restore(self.irq_state);
     }

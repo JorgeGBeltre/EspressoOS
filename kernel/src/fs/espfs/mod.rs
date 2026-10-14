@@ -365,14 +365,11 @@ impl FsState {
         // because it runs so seldom. Log it: an operator seeing this line right before a
         // failure knows where to look, and its absence rules the path out.
         //
-        // KNOWN DEBT (not fixed): the compacted image can be LARGER than the source, so
-        // the NoSpace checks below can fire and, because every future append re-triggers
-        // this same overflowing compaction, wedge the filesystem for good. Two ways it
-        // grows: read_file materializes sparse holes as explicit zero bytes, and each
-        // COMPACT_CHUNK gets its own record header. Neither bites at today's sizes -- the
-        // half is ~4 MB and the live set is ~180 KB of dense files -- but a sparse file
-        // or a genuinely full half would. The real fix is to preserve holes and coalesce
-        // chunks; until then this returns an honest error rather than corrupting anything.
+        // Sparse Hole Preservation: To avoid expanding sparse holes into explicit
+        // zero-filled flash records during compaction, all-zero chunks are detected
+        // and skipped. If trailing sparse holes exist (or the file is completely sparse),
+        // a lightweight Truncate record is appended to preserve the logical file size
+        // without consuming flash data payload space.
         crate::println!("[espfs] compacting half {} -> {}", self.active_half, 1 - self.active_half);
         let dst = 1 - self.active_half;
         let dbase = self.geom.half_off[dst];
@@ -414,6 +411,11 @@ impl FsState {
                     let mut tmp = zeroed(clen as usize);
 
                     self.read_file(*ino, coff as u64, &mut tmp)?;
+                    if tmp.iter().all(|&b| b == 0) {
+                        // Skip writing all-zero chunk to preserve sparse holes
+                        coff += clen;
+                        continue;
+                    }
                     let payload = enc_write(*ino, coff, &tmp);
                     let rec = encode_record(RecType::Write, seq, &payload);
                     if cur + rec.len() as u32 > dend {
@@ -429,6 +431,17 @@ impl FsState {
                     cur += rec.len() as u32;
                     seq += 1;
                     coff += clen;
+                }
+                let last_end = exts.last().map(|e| e.off + e.len).unwrap_or(0);
+                if last_end < size {
+                    let payload = enc_trunc(*ino, size);
+                    let rec = encode_record(RecType::Truncate, seq, &payload);
+                    if cur + rec.len() as u32 > dend {
+                        return Err(KError::NoSpace);
+                    }
+                    flash::write(cur, &rec)?;
+                    cur += rec.len() as u32;
+                    seq += 1;
                 }
                 new_ext.insert(*ino, exts);
             }

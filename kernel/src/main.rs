@@ -288,6 +288,15 @@ fn init_supervisor_task(_arg: usize) {
     // Consola primaria de userland: corre /bin/init de forma permanente. Si init sale,
     // se reinicia automáticamente sin necesidad del shell del kernel.
     loop {
+        // Drena zombies huérfanos adoptados por PID 1 y limpia huérfanos sin padre
+        while let Some((child_pid, _, slot)) = scheduler::process::take_zombie_child(1) {
+            if let Some(s) = slot {
+                mm::psram_exec::slot_free(s);
+            }
+            vfs::cleanup_process_fds(child_pid);
+        }
+        scheduler::process::reap_orphans();
+
         let _ = shell::commands::run_program("init", &[]);
         scheduler::yield_now();
     }

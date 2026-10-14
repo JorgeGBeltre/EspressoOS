@@ -94,9 +94,19 @@ impl ProcessTable {
                 p.children.retain(|c| *c != pid);
             }
         }
-        for child_pid in &proc.children {
-            if let Some(child_proc) = self.table.get_mut(child_pid) {
-                child_proc.parent_pid = None;
+        let reparent_to_init = pid != 1 && self.table.contains_key(&1);
+        for &child_pid in &proc.children {
+            if let Some(child_proc) = self.table.get_mut(&child_pid) {
+                child_proc.parent_pid = if reparent_to_init { Some(1) } else { None };
+            }
+        }
+        if reparent_to_init {
+            if let Some(init_proc) = self.table.get_mut(&1) {
+                for &child_pid in &proc.children {
+                    if !init_proc.children.contains(&child_pid) {
+                        init_proc.children.push(child_pid);
+                    }
+                }
             }
         }
         Some(proc)

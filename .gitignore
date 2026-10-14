@@ -21,11 +21,14 @@ __pycache__/
 # IDE
 .idea/
 .vscode/
-docs/
+# Notas temporales de superpowers
 docs/superpowers/
+.docs/
+docs/
 # Logs de build transitorios
 *.log
 
+CHANGELOG.md
 # Sistema
 .DS_Store
 Thumbs.db

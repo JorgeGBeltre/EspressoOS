@@ -1,7 +1,13 @@
 #![no_std]
 #![no_main]
 
-use libc::{arg, chdir, close, dup2, getcwd_str, open, print, println, read, readdir, spawn, wait, yield_now, pipe, PATH_MAX};
+use libc::{arg, chdir, close, dup2, getcwd_str, open, print, println, read, readdir, spawn, wait, waitpid, yield_now, pipe, PATH_MAX, WNOHANG};
+
+#[inline(never)]
+fn reap_background_jobs() {
+    let mut status = 0;
+    while waitpid(-1, &mut status, WNOHANG) > 0 {}
+}
 
 /// Most tokens one command can have, counting argv[0] and the trailing NULL.
 const MAX_ARGV: usize = 16;
@@ -50,6 +56,7 @@ pub extern "C" fn main(argc: i32, argv: *const *const u8) -> i32 {
     println!("--- EspressoOS Shell (Userland) ---");
     let mut buf = [0u8; LINE + 1];
     loop {
+        reap_background_jobs();
         print_prompt();
         let len = read_line(&mut buf[..LINE]);
         let (s, e) = trim(&buf, 0, len);
@@ -275,26 +282,6 @@ const HISTORY_MAX: usize = 16;
 static mut HISTORY_BUF: [[u8; LINE]; HISTORY_MAX] = [[0; LINE]; HISTORY_MAX];
 static mut HISTORY_LENS: [usize; HISTORY_MAX] = [0; HISTORY_MAX];
 static mut HISTORY_COUNT: usize = 0;
-
-fn history_add(line: &[u8]) {
-    if line.is_empty() {
-        return;
-    }
-    unsafe {
-        if HISTORY_COUNT > 0 {
-            let last_idx = (HISTORY_COUNT - 1) % HISTORY_MAX;
-            let last_len = HISTORY_LENS[last_idx];
-            if &HISTORY_BUF[last_idx][..last_len] == line {
-                return;
-            }
-        }
-        let idx = HISTORY_COUNT % HISTORY_MAX;
-        let len = line.len().min(LINE);
-        HISTORY_BUF[idx][..len].copy_from_slice(&line[..len]);
-        HISTORY_LENS[idx] = len;
-        HISTORY_COUNT += 1;
-    }
-}
 
 fn itoa<'a>(mut n: usize, buf: &'a mut [u8; 16]) -> &'a str {
     if n == 0 {

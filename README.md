@@ -68,7 +68,7 @@ EspressoOS boots and executes on physical ESP32-S3 hardware. The system acquires
 - **Kernel Boot**: HAL initialization, 128 KB SRAM internal heap, VFS mounts (`/` EspFs on flash, `/tmp` ramfs in RAM, `/dev` devfs, `/proc` procfs, `/sys` sysfs).
 - **PSRAM Execution (PSRAM-Exec)**: 8 MB PSRAM carve-up with 1 MB reserved for code execution on the instruction bus (`0x42800000`). Boot selftest verifies instruction execution in PSRAM returning code 42.
 - **Preemptive Multitasking & Process Management**: Scheduler driven by SYSTIMER at 100 Hz, 50 ms quantum, and Model B in-ISR context switching. Automatic reparenting of orphan processes to PID 1 (`init-sup`) and non-blocking zombie reaping with `waitpid` (`WNOHANG`), preventing PSRAM-Exec slot leaks.
-- **Dynamic Userland ELFs**: Suite of **128 ELF binaries** executing from PSRAM with `argv` support, 32-slot pool, and load-time relocation without requiring Position Independent Code (PIC).
+- **Dynamic Userland ELFs**: Suite of **134 ELF binaries** executing from PSRAM with `argv` support, 32-slot pool, and load-time relocation without requiring Position Independent Code (PIC).
 - **Wi-Fi + TCP/IP Stack**: Station (STA) mode, DHCP client, and active TCP/IP stack (`smoltcp`). Runtime Wi-Fi scan, connect, and disconnect. Credential persistence in flash NVS sector 0 (`0x0000_9000`).
 - **Hardened SSH-2.0 Server**: Server supporting curve25519-sha256, ssh-ed25519, and chacha20-poly1305@openssh.com.
   - **Persistent Host Key**: Unique Ed25519 host key generated via hardware TRNG on first boot and persisted to NVS flash sector 1 (`0x0000_A000`, `ESHK` format).
@@ -540,6 +540,12 @@ The system includes **122 userland binaries** in `/bin` alongside shell built-in
 126. **`groups`**: Print group memberships for a user or current login session (`groups [USERNAME...]`).
 127. **`hostid`**: Print the 32-bit numeric identifier in hexadecimal for the current host (`hostid`).
 128. **`dc`**: Classic Unix Desk Calculator for reverse-Polish arithmetic evaluation (`dc [-e expr] [expr]`).
+129. **`sysctl`**: Configure or view kernel parameters at runtime (`sysctl [-a] [-w name=value] [name...]`).
+130. **`nproc`**: Print the number of processing units available to the current process (`nproc [--all]`).
+131. **`logname`**: Print the user's login name (`logname`).
+132. **`chroot`**: Run commands or shell with root directory set to a new path (`chroot NEWROOT [COMMAND [ARG...]]`).
+133. **`pr`**: Paginate and format text files or streams for printing (`pr [-h header] [-l lines] [-t] [file...]`).
+134. **`bc`**: Classic Unix infix arithmetic calculator supporting operator precedence, parentheses, and powers (`bc [-e expr] [expr...]`).
 
 ---
 
@@ -572,7 +578,7 @@ Each serial or SSH connection runs an isolated session (`SessionChannel`) with d
 
 ### Userland programs (`/bin`)
 
-See the full 128-binary list in §5. Selected usage:
+See the full 134-binary list in §5. Selected usage:
 
 ```text
 EspressoOS:~$ /bin/echo hola mundo | /bin/cat
@@ -596,7 +602,7 @@ EspressoOS/
 │   └── config.toml          # Xtensa target config and espflash runner setup
 ├── bootloader/              # Second-stage bootloader skeleton (future phase)
 ├── kernel/                  # EspressoOS Kernel crate
-│   ├── build.rs             # Build script: compiles 128 userland ELFs and generates fixup tables
+│   ├── build.rs             # Build script: compiles 134 userland ELFs and generates fixup tables
 │   ├── src/
 │   │   ├── arch/xtensa/     # Context switch, ISR vectors, and SYSTIMER driver
 │   │   ├── drivers/         # Drivers: gpio, uart, i2c, spi, crypto, flash, power, ble, wifi, ssh
@@ -613,7 +619,7 @@ EspressoOS/
 │   └── Cargo.toml
 ├── tools/                   # Partition generation tools and test scripts
 ├── userland/                # no_std userland workspace (executes from PSRAM)
-│   ├── apps/src/bin/        # Source code for 128 userland binaries (/bin/*)
+│   ├── apps/src/bin/        # Source code for 134 userland binaries (/bin/*)
 │   ├── libc/                # Userland base library: _start, syscall wrappers, allocator
 │   └── Cargo.toml
 ├── Cargo.lock               # Cargo workspace lockfile
@@ -854,6 +860,16 @@ Flash layout defined in `kernel/src/prelude.rs` and `partitions.csv`:
   - Implemented classic Unix Desk Calculator (`dc`) supporting reverse-Polish notation stack arithmetic, stack duplication, reversal, and stack dump inspection.
   - Expanded userland application suite to **128 dynamic ELF binaries**, all linking within their 16 KB PSRAM execution slot budgets.
   - Expanded automated test suite to **204 tests passing with 100% success rate** covering static host resolution, resolver parsing, reverse-Polish stack evaluation, host identification hashing, group membership matching, and execution duration formatting.
+- **Phase 19: Kernel Sysctl Introspection, Infix Arithmetic & Standard Process Execution (P1/P2/P3)**:
+  - Implemented virtual system control introspection nodes in the virtual process filesystem exposing kernel hostnames, OS release identifiers, OS types, build versions, and memory statistics with dynamic write support for live hostname updates.
+  - Implemented standard Unix system control administration utility (`sysctl`) supporting bulk variable enumeration, specific variable querying, and dynamic runtime parameter configuration.
+  - Implemented available processor count reporting utility (`nproc`) distinguishing active symmetric multiprocessing cores from uniprocessor execution and supporting hardware processor query flags.
+  - Implemented user login identity inspection utility (`logname`) querying authenticated session usernames from system configuration.
+  - Implemented root directory jail execution utility (`chroot`) changing process execution roots and launching subshells or batch commands within specified directory environments.
+  - Implemented standard pagination and print formatting utility (`pr`) formatting text streams with title banners, page counts, customizable page lengths, and trailer margins.
+  - Implemented classic Unix infix arithmetic calculator (`bc`) supporting standard mathematical expressions with parentheses, operator precedence, modulo, and exponentiation using Dijkstra's Shunting-Yard evaluation algorithm.
+  - Expanded userland application suite to **134 dynamic ELF binaries**, all linking within their 16 KB PSRAM execution slot budgets.
+  - Expanded automated test suite to **209 tests passing with 100% success rate** covering system parameter paths, infix arithmetic precedence, pagination page geometries, processor core parsing, and command path resolution.
 
 ### [0.1.0] - 2026-08-06
 

@@ -119,6 +119,9 @@ impl Inode for ProcFsRoot {
         if name == "stat" {
             return Ok(Arc::new(ProcFsFile::Stat));
         }
+        if name == "sys" {
+            return Ok(Arc::new(ProcFsSysDir));
+        }
         if let Ok(pid) = name.parse::<u32>() {
             let pt = crate::scheduler::process::PROCESS_TABLE.lock();
             if pt.table.contains_key(&pid) {
@@ -276,16 +279,23 @@ impl Inode for ProcFsRoot {
                 ino: 20,
             }));
         }
+        if index == 21 {
+            return Ok(Some(DirEntry {
+                name: "sys".to_string(),
+                kind: InodeKind::Dir,
+                ino: 21,
+            }));
+        }
 
         let pids: Vec<u32> = {
             let pt = crate::scheduler::process::PROCESS_TABLE.lock();
             pt.table.keys().copied().collect()
         };
 
-        if index < 21 {
+        if index < 22 {
             return Ok(None);
         }
-        let pid_idx = index - 21;
+        let pid_idx = index - 22;
         if pid_idx < pids.len() {
             let pid = pids[pid_idx];
             return Ok(Some(DirEntry {
@@ -435,6 +445,126 @@ impl Inode for ProcFsNetDir {
     }
 }
 
+struct ProcFsSysDir;
+
+impl Inode for ProcFsSysDir {
+    fn kind(&self) -> InodeKind {
+        InodeKind::Dir
+    }
+
+    fn size(&self) -> u64 {
+        0
+    }
+
+    fn read_at(&self, _off: u64, _buf: &mut [u8]) -> KResult<usize> {
+        Err(KError::IsADirectory)
+    }
+
+    fn write_at(&self, _off: u64, _buf: &[u8]) -> KResult<usize> {
+        Err(KError::NotSupported)
+    }
+
+    fn lookup(&self, name: &str) -> KResult<Arc<dyn Inode>> {
+        if name == "kernel" {
+            return Ok(Arc::new(ProcFsSysKernelDir));
+        }
+        if name == "vm" {
+            return Ok(Arc::new(ProcFsSysVmDir));
+        }
+        Err(KError::NotFound)
+    }
+
+    fn readdir(&self, index: usize) -> KResult<Option<DirEntry>> {
+        match index {
+            0 => Ok(Some(DirEntry { name: ".".to_string(), kind: InodeKind::Dir, ino: 200 })),
+            1 => Ok(Some(DirEntry { name: "..".to_string(), kind: InodeKind::Dir, ino: 1 })),
+            2 => Ok(Some(DirEntry { name: "kernel".to_string(), kind: InodeKind::Dir, ino: 201 })),
+            3 => Ok(Some(DirEntry { name: "vm".to_string(), kind: InodeKind::Dir, ino: 202 })),
+            _ => Ok(None),
+        }
+    }
+}
+
+struct ProcFsSysKernelDir;
+
+impl Inode for ProcFsSysKernelDir {
+    fn kind(&self) -> InodeKind {
+        InodeKind::Dir
+    }
+
+    fn size(&self) -> u64 {
+        0
+    }
+
+    fn read_at(&self, _off: u64, _buf: &mut [u8]) -> KResult<usize> {
+        Err(KError::IsADirectory)
+    }
+
+    fn write_at(&self, _off: u64, _buf: &[u8]) -> KResult<usize> {
+        Err(KError::NotSupported)
+    }
+
+    fn lookup(&self, name: &str) -> KResult<Arc<dyn Inode>> {
+        match name {
+            "hostname" => Ok(Arc::new(ProcFsFile::SysKernelHostname)),
+            "osrelease" => Ok(Arc::new(ProcFsFile::SysKernelOsRelease)),
+            "ostype" => Ok(Arc::new(ProcFsFile::SysKernelOsType)),
+            "version" => Ok(Arc::new(ProcFsFile::SysKernelVersion)),
+            _ => Err(KError::NotFound),
+        }
+    }
+
+    fn readdir(&self, index: usize) -> KResult<Option<DirEntry>> {
+        match index {
+            0 => Ok(Some(DirEntry { name: ".".to_string(), kind: InodeKind::Dir, ino: 210 })),
+            1 => Ok(Some(DirEntry { name: "..".to_string(), kind: InodeKind::Dir, ino: 200 })),
+            2 => Ok(Some(DirEntry { name: "hostname".to_string(), kind: InodeKind::File, ino: 211 })),
+            3 => Ok(Some(DirEntry { name: "osrelease".to_string(), kind: InodeKind::File, ino: 212 })),
+            4 => Ok(Some(DirEntry { name: "ostype".to_string(), kind: InodeKind::File, ino: 213 })),
+            5 => Ok(Some(DirEntry { name: "version".to_string(), kind: InodeKind::File, ino: 214 })),
+            _ => Ok(None),
+        }
+    }
+}
+
+struct ProcFsSysVmDir;
+
+impl Inode for ProcFsSysVmDir {
+    fn kind(&self) -> InodeKind {
+        InodeKind::Dir
+    }
+
+    fn size(&self) -> u64 {
+        0
+    }
+
+    fn read_at(&self, _off: u64, _buf: &mut [u8]) -> KResult<usize> {
+        Err(KError::IsADirectory)
+    }
+
+    fn write_at(&self, _off: u64, _buf: &[u8]) -> KResult<usize> {
+        Err(KError::NotSupported)
+    }
+
+    fn lookup(&self, name: &str) -> KResult<Arc<dyn Inode>> {
+        match name {
+            "free_ram" => Ok(Arc::new(ProcFsFile::SysVmFreeRam)),
+            "total_ram" => Ok(Arc::new(ProcFsFile::SysVmTotalRam)),
+            _ => Err(KError::NotFound),
+        }
+    }
+
+    fn readdir(&self, index: usize) -> KResult<Option<DirEntry>> {
+        match index {
+            0 => Ok(Some(DirEntry { name: ".".to_string(), kind: InodeKind::Dir, ino: 220 })),
+            1 => Ok(Some(DirEntry { name: "..".to_string(), kind: InodeKind::Dir, ino: 200 })),
+            2 => Ok(Some(DirEntry { name: "free_ram".to_string(), kind: InodeKind::File, ino: 221 })),
+            3 => Ok(Some(DirEntry { name: "total_ram".to_string(), kind: InodeKind::File, ino: 222 })),
+            _ => Ok(None),
+        }
+    }
+}
+
 enum ProcFsFile {
     Uptime,
     MemInfo,
@@ -458,6 +588,12 @@ enum ProcFsFile {
     Ipc,
     Cmdline,
     Stat,
+    SysKernelHostname,
+    SysKernelOsRelease,
+    SysKernelOsType,
+    SysKernelVersion,
+    SysVmFreeRam,
+    SysVmTotalRam,
 }
 
 impl Inode for ProcFsFile {
@@ -764,6 +900,42 @@ wlan0\t00000000\t0101A8C0\t0003\t0\t0\t0\t00000000\t0\t0\t0\n"
                     running
                 )
             }
+            ProcFsFile::SysKernelHostname => {
+                let mut name_buf = [0u8; 64];
+                let host = if let Ok(fd) = crate::vfs::open("/etc/hostname", crate::vfs::OpenFlags::RDONLY) {
+                    let n = crate::vfs::read(fd, &mut name_buf).unwrap_or(0);
+                    let _ = crate::vfs::close(fd);
+                    if n > 0 {
+                        let mut end = n;
+                        while end > 0 && (name_buf[end - 1] == b'\n' || name_buf[end - 1] == b'\r' || name_buf[end - 1] == b' ') {
+                            end -= 1;
+                        }
+                        alloc::string::String::from_utf8_lossy(&name_buf[..end]).into_owned()
+                    } else {
+                        alloc::string::String::from("esp32s3")
+                    }
+                } else {
+                    alloc::string::String::from("esp32s3")
+                };
+                alloc::format!("{}\n", host)
+            }
+            ProcFsFile::SysKernelOsRelease => {
+                alloc::format!("0.2.0-dev\n")
+            }
+            ProcFsFile::SysKernelOsType => {
+                alloc::format!("EspressoOS\n")
+            }
+            ProcFsFile::SysKernelVersion => {
+                alloc::format!("0.2.0-dev (xtensa-esp32s3-none-elf)\n")
+            }
+            ProcFsFile::SysVmFreeRam => {
+                let s = crate::mm::heap::stats();
+                alloc::format!("{}\n", s.free)
+            }
+            ProcFsFile::SysVmTotalRam => {
+                let s = crate::mm::heap::stats();
+                alloc::format!("{}\n", s.total)
+            }
         };
 
         let bytes = content.as_bytes();
@@ -776,7 +948,30 @@ wlan0\t00000000\t0101A8C0\t0003\t0\t0\t0\t00000000\t0\t0\t0\n"
         Ok(cnt)
     }
 
-    fn write_at(&self, _off: u64, _buf: &[u8]) -> KResult<usize> {
-        Err(KError::NotSupported)
+    fn write_at(&self, _off: u64, buf: &[u8]) -> KResult<usize> {
+        match self {
+            ProcFsFile::SysKernelHostname => {
+                let s = core::str::from_utf8(buf).map_err(|_| KError::InvalidArgument)?;
+                let trimmed = s.trim();
+                if trimmed.is_empty() {
+                    return Err(KError::InvalidArgument);
+                }
+                if let Ok(fd) = crate::vfs::open(
+                    "/etc/hostname",
+                    crate::vfs::OpenFlags(
+                        crate::vfs::OpenFlags::CREATE.0 | crate::vfs::OpenFlags::WRONLY.0 | crate::vfs::OpenFlags::TRUNC.0,
+                    ),
+                ) {
+                    let mut data = alloc::string::String::from(trimmed);
+                    data.push('\n');
+                    let _ = crate::vfs::write(fd, data.as_bytes());
+                    let _ = crate::vfs::close(fd);
+                    Ok(buf.len())
+                } else {
+                    Err(KError::IoError)
+                }
+            }
+            _ => Err(KError::NotSupported),
+        }
     }
 }

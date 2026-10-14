@@ -16,6 +16,8 @@ enum RamBody {
     File(Vec<u8>),
 
     Dir(BTreeMap<String, Arc<RamNode>>),
+
+    Fifo(Arc<crate::vfs::pipe::Pipe>),
 }
 
 struct RamNode {
@@ -42,6 +44,14 @@ impl RamNode {
             body: Mutex::new(RamBody::File(Vec::new())),
         })
     }
+
+    fn new_fifo() -> Arc<RamNode> {
+        Arc::new(RamNode {
+            ino: alloc_ino(),
+            kind: InodeKind::Fifo,
+            body: Mutex::new(RamBody::Fifo(crate::vfs::pipe::Pipe::new(4096))),
+        })
+    }
 }
 
 impl Inode for RamNode {
@@ -55,48 +65,62 @@ impl Inode for RamNode {
             RamBody::File(data) => data.len() as u64,
 
             RamBody::Dir(_) => 0,
+
+            RamBody::Fifo(_) => 0,
         }
     }
 
     fn read_at(&self, off: u64, buf: &mut [u8]) -> KResult<usize> {
-        let body = self.body.lock();
-        match &*body {
-            RamBody::File(data) => {
-                let start = match usize::try_from(off) {
-                    Ok(v) => v,
-                    Err(_) => return Ok(0),
-                };
-                if start >= data.len() {
-                    return Ok(0);
-                }
-                let disponible = data.len() - start;
-                let n = core::cmp::min(disponible, buf.len());
+        let pipe_opt = {
+            let body = self.body.lock();
+            match &*body {
+                RamBody::File(data) => {
+                    let start = match usize::try_from(off) {
+                        Ok(v) => v,
+                        Err(_) => return Ok(0),
+                    };
+                    if start >= data.len() {
+                        return Ok(0);
+                    }
+                    let disponible = data.len() - start;
+                    let n = core::cmp::min(disponible, buf.len());
 
-                buf[..n].copy_from_slice(&data[start..start + n]);
-                Ok(n)
+                    buf[..n].copy_from_slice(&data[start..start + n]);
+                    return Ok(n);
+                }
+                RamBody::Dir(_) => return Err(KError::IsADirectory),
+                RamBody::Fifo(p) => p.clone(),
             }
-            RamBody::Dir(_) => Err(KError::IsADirectory),
-        }
+        };
+
+        let reader = crate::vfs::pipe::PipeReadInode::new(pipe_opt);
+        reader.read_at(off, buf)
     }
 
     fn write_at(&self, off: u64, buf: &[u8]) -> KResult<usize> {
-        let mut body = self.body.lock();
-        match &mut *body {
-            RamBody::File(data) => {
-                let start = usize::try_from(off).map_err(|_| KError::InvalidArgument)?;
+        let pipe_opt = {
+            let mut body = self.body.lock();
+            match &mut *body {
+                RamBody::File(data) => {
+                    let start = usize::try_from(off).map_err(|_| KError::InvalidArgument)?;
 
-                let end = start.checked_add(buf.len()).ok_or(KError::NoMem)?;
-                if end > data.len() {
-                    let extra = end - data.len();
-                    data.try_reserve(extra).map_err(|_| KError::NoMem)?;
-                    data.resize(end, 0);
+                    let end = start.checked_add(buf.len()).ok_or(KError::NoMem)?;
+                    if end > data.len() {
+                        let extra = end - data.len();
+                        data.try_reserve(extra).map_err(|_| KError::NoMem)?;
+                        data.resize(end, 0);
+                    }
+
+                    data[start..end].copy_from_slice(buf);
+                    return Ok(buf.len());
                 }
-
-                data[start..end].copy_from_slice(buf);
-                Ok(buf.len())
+                RamBody::Dir(_) => return Err(KError::IsADirectory),
+                RamBody::Fifo(p) => p.clone(),
             }
-            RamBody::Dir(_) => Err(KError::IsADirectory),
-        }
+        };
+
+        let writer = crate::vfs::pipe::PipeWriteInode::new(pipe_opt);
+        writer.write_at(off, buf)
     }
 
     fn truncate(&self, len: u64) -> KResult<()> {
@@ -112,6 +136,7 @@ impl Inode for RamNode {
                 Ok(())
             }
             RamBody::Dir(_) => Err(KError::IsADirectory),
+            RamBody::Fifo(_) => Ok(()),
         }
     }
 
@@ -126,7 +151,7 @@ impl Inode for RamNode {
                 })),
                 None => Ok(None),
             },
-            RamBody::File(_) => Err(KError::NotADirectory),
+            RamBody::File(_) | RamBody::Fifo(_) => Err(KError::NotADirectory),
         }
     }
 
@@ -140,7 +165,7 @@ impl Inode for RamNode {
                 }
                 None => Err(KError::NotFound),
             },
-            RamBody::File(_) => Err(KError::NotADirectory),
+            RamBody::File(_) | RamBody::Fifo(_) => Err(KError::NotADirectory),
         }
     }
 
@@ -154,6 +179,7 @@ impl Inode for RamNode {
                 let node = match kind {
                     InodeKind::File => RamNode::new_file(),
                     InodeKind::Dir => RamNode::new_dir(),
+                    InodeKind::Fifo => RamNode::new_fifo(),
 
                     InodeKind::Device | InodeKind::Symlink => return Err(KError::NotSupported),
                 };
@@ -161,7 +187,7 @@ impl Inode for RamNode {
                 let out: Arc<dyn Inode> = node;
                 Ok(out)
             }
-            RamBody::File(_) => Err(KError::NotADirectory),
+            RamBody::File(_) | RamBody::Fifo(_) => Err(KError::NotADirectory),
         }
     }
 
@@ -175,7 +201,7 @@ impl Inode for RamNode {
                         let child_body = node.body.lock();
                         match &*child_body {
                             RamBody::Dir(sub) => sub.is_empty(),
-                            RamBody::File(_) => true,
+                            RamBody::File(_) | RamBody::Fifo(_) => true,
                         }
                     }
                 };
@@ -186,7 +212,7 @@ impl Inode for RamNode {
                 children.remove(name);
                 Ok(())
             }
-            RamBody::File(_) => Err(KError::NotADirectory),
+            RamBody::File(_) | RamBody::Fifo(_) => Err(KError::NotADirectory),
         }
     }
 }
@@ -213,6 +239,7 @@ impl RamFs {
                 }
                 total
             }
+            RamBody::Fifo(_) => 0,
         }
     }
 }

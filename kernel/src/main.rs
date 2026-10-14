@@ -525,6 +525,21 @@ fn init_etc_files() {
         }
     }
 
+    if vfs::mount::resolve("/etc/crontab").is_err() {
+        if let Ok(fd) = vfs::open(
+            "/etc/crontab",
+            vfs::OpenFlags(
+                vfs::OpenFlags::CREATE.0 | vfs::OpenFlags::WRONLY.0 | vfs::OpenFlags::TRUNC.0,
+            ),
+        ) {
+            let _ = vfs::write(
+                fd,
+                b"# EspressoOS Scheduled Tasks Table (/etc/crontab)\n# interval_sec command\n60 /bin/wdt ping\n300 /bin/sntp\n",
+            );
+            let _ = vfs::close(fd);
+        }
+    }
+
     // Never seed /etc/passwd. drivers/ssh/auth.rs consults it BEFORE the compiled
     // DEV_USER/DEV_PASSWORD and returns Success on a match, so seeding it with
     // defaults -- it used to be "root:root\nguest:guest\n" -- put two plaintext

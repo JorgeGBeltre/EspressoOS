@@ -18,6 +18,8 @@ const APPS: &[&str] = &[
     "wdt", "gpio", "ifconfig", "uname", "hostname",
     "top", "whoami", "cut", "tr", "base64", "hexdump",
     "adc", "pwm", "cal", "basename", "dirname", "lsof",
+    "mkfifo", "cmp", "sort", "uniq", "logger", "xargs",
+    "cron", "watch", "strings", "mktemp", "ipcs", "timeout",
 ];
 
 // Every binary links at the same address and the loader relocates it into whatever

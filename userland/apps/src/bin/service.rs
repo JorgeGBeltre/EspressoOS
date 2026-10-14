@@ -21,6 +21,8 @@ const SERVICES: &[ServiceInfo] = &[
     ServiceInfo { name: "sntp", desc: "Network Time Protocol client", is_system: false, default_state: "ENABLED" },
     ServiceInfo { name: "ble", desc: "Bluetooth Low Energy advertiser", is_system: false, default_state: "READY" },
     ServiceInfo { name: "ota", desc: "Dual-slot A/B update supervisor", is_system: true, default_state: "READY" },
+    ServiceInfo { name: "cron", desc: "Periodic task scheduler (/etc/crontab)", is_system: false, default_state: "ENABLED" },
+    ServiceInfo { name: "watchdog", desc: "Hardware watchdog timer & health monitor", is_system: true, default_state: "RUNNING" },
 ];
 
 #[no_mangle]
@@ -100,6 +102,18 @@ pub extern "C" fn main(argc: i32, argv: *const *const u8) -> i32 {
                         0
                     } else {
                         println!("[service] failed to spawn ble: {}", pid);
+                        1
+                    }
+                }
+                "cron" => {
+                    println!("[service] Running scheduled cron tasks...");
+                    let argv_child = [b"cron\0".as_ptr(), b"run\0".as_ptr(), core::ptr::null()];
+                    let pid = spawn("/bin/cron", argv_child.as_ptr());
+                    if pid >= 0 {
+                        println!("[service] cron executed (pid={})", pid);
+                        0
+                    } else {
+                        println!("[service] failed to spawn cron: {}", pid);
                         1
                     }
                 }

@@ -13,6 +13,8 @@ pub enum InodeKind {
     Device,
 
     Symlink,
+
+    Fifo,
 }
 
 #[derive(Clone, Debug)]

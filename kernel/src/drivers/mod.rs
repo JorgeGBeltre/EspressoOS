@@ -9,5 +9,6 @@ pub mod power;
 pub mod spi;
 pub mod ssh;
 pub mod uart;
+pub mod watchdog;
 pub mod wifi;
 pub mod wifi_store;

@@ -219,6 +219,7 @@ The system call ABI is frozen across syscall numbers 0 to 29 (`kernel/src/syscal
   - `/proc/meminfo`: Memory usage breakdown (SRAM heap, PSRAM heap, PSRAM exec slots).
   - `/proc/stacks`, `/proc/tasks`: Complete kernel task listing, states, and stack watermarks.
   - `/proc/net/sockets`: Active network socket table.
+  - `/proc/watchdog`: Watchdog enabled status, timeout, feed count, and boot reset reason.
   - `/proc/<pid>/status`: Process-specific status metrics.
 - **SysFs Synthesized Files (`/sys`)**:
   - `/sys/kernel`: Kernel identification and version string.
@@ -228,7 +229,8 @@ The system call ABI is frozen across syscall numbers 0 to 29 (`kernel/src/syscal
 - **Sockets** (`kernel/src/vfs/socket.rs`): Userland socket interface over `smoltcp` for TCP and UDP.
 - **Flash & Memory Filesystems**:
   - **EspFs** (`kernel/src/fs/espfs/`): Log-structured filesystem on NOR flash with atomic superblocks and compaction ping-pong.
-  - **ramfs** (`kernel/src/fs/ramfs.rs`): In-memory volatile filesystem backing `/tmp` and root `/` fallback.
+  - **ramfs** (`kernel/src/fs/ramfs.rs`): In-memory volatile filesystem backing `/tmp` and `/mnt`.
+  - **LittleFs** (`kernel/src/fs/littlefs/`): Resilient hierarchical Inode-based filesystem engine supporting files, directories, read/write/truncate, and mount points.
 
 ---
 
@@ -245,6 +247,9 @@ Data-carrying drivers follow a unified architecture pattern: `open("/dev/<node>"
 | `passwd` | — (crypto only) | `SET_PASSWORD_CMD` (0). `PasswdReq` struct (max 64 bytes user, 128 bytes password); salts+hashes (SHA-256) before writing `/etc/passwd`. | Functional |
 | `wlan0` | `esp-wifi` STA | `WLAN_NOP` (0), `WLAN_CONNECT` (1), `WLAN_DISCONNECT` (2), `WLAN_SCAN` (3). | Hardware-Verified |
 | `ble0` | `esp-wifi` BLE | `BLE_ADVERTISE` (0). Queues atomic advertising request. | Hardware-Verified |
+| `gpio` | GPIO Matrix (pins 0..48) | `GPIO_IOC_CONFIGURE` (0x4701), `GPIO_IOC_WRITE` (0x4702), `GPIO_IOC_READ` (0x4703), `GPIO_IOC_TOGGLE` (0x4704). Also accepts text commands on write. | Hardware-Verified |
+| `watchdog` | RTC/Timer Watchdog | `WDT_IOC_FEED` (0x5701), `WDT_IOC_GET_STATUS` (0x5702), `WDT_IOC_SET_TIMEOUT` (0x5703), `WDT_IOC_ENABLE` (0x5704). Writing feeds watchdog. | Hardware-Verified |
+| `random` / `urandom` | Hardware TRNG | Read streams cryptographically secure entropy from on-chip TRNG. | Hardware-Verified |
 
 ---
 
@@ -458,6 +463,11 @@ The system includes **63 userland binaries** in `/bin` alongside shell built-in 
 61. **`which`**: Locate executable binary in `/bin` command path (`which PROGRAM`).
 62. **`true`**: Standard Unix utility returning exit code 0 (`true`).
 63. **`false`**: Standard Unix utility returning exit code 1 (`false`).
+64. **`wdt`**: Watchdog timer control and diagnostics (`wdt [status | ping | feed [N]]`).
+65. **`gpio`**: GPIO pin mode configuration, digital read, write, and toggle (`gpio [mode | write | read | toggle | status] [PIN] [VAL]`).
+66. **`ifconfig`**: Unix standard network interface status and configuration (`ifconfig [interface] [-a]`).
+67. **`uname`**: Print system information, kernel release, and hardware architecture (`uname [-a | -s | -n | -r | -v | -m]`).
+68. **`hostname`**: Print or set system network host name (`hostname [NAME]`).
 
 ---
 
@@ -490,7 +500,7 @@ Each serial or SSH connection runs an isolated session (`SessionChannel`) with d
 
 ### Userland programs (`/bin`)
 
-See the full 32-binary table in §3.7. Selected usage:
+See the full 68-binary list in §5. Selected usage:
 
 ```text
 EspressoOS:~$ /bin/echo hola mundo | /bin/cat
@@ -650,6 +660,16 @@ Flash layout defined in `kernel/src/prelude.rs` and `partitions.csv`:
 - **Phase 7: Advanced Capabilities, Feature Gates & Test Suite Expansion (P3)**:
   - Verified clean release compilation with dual-core symmetric multiprocessing (SMP) and memory protection unit (PMS) feature gates.
   - Extended automated test suite to 135 tests passing with 100% success rate across DNS, crypto, VFS logic, and file search algorithms.
+- **Phase 8: Hardware Watchdog, GPIO Subsystem, LittleFS Engine & Core Unix Expansion (P1/P2)**:
+  - Implemented hardware Watchdog Timer driver with automatic boot reset reason decoding from on-chip ROM, distinguishing cold power-on, software reboot, deep sleep wakeup, RTC watchdog, timer group watchdogs, and brownout detector events.
+  - Added dedicated character device for the watchdog supporting single-byte ping writes, structured status inspection on read, and control ioctls for feeding, status checking, and timeout configuration.
+  - Integrated periodic background watchdog feeding into the kernel heartbeat task to continuously monitor scheduler liveness and guard against system hangs.
+  - Exposed live watchdog metrics and boot reset reason diagnostics in the virtual process filesystem.
+  - Implemented dedicated GPIO character device providing userland control over pin direction configuration, digital level writes, pin reads, and output toggling for pins 0 through 48.
+  - Implemented a resilient LittleFS hierarchical filesystem engine featuring inode abstractions, subdirectories, byte-level file reads and writes, directory traversal, file truncation, and unlinking.
+  - Expanded userland application suite to **68 dynamic ELF binaries**, linking watchdog administration (`wdt`), direct GPIO manipulation (`gpio`), Unix network interface reporter (`ifconfig`), standard system information tool (`uname`), and host name manager (`hostname`).
+  - Initialized system host name configuration and startup profile in the persistent configuration hierarchy.
+  - Extended the automated test suite to 142 tests passing with 100% success rate across watchdog logic, GPIO pin bounds, filesystem geometry, and system utilities.
 
 ### [0.1.0] - 2026-08-06
 

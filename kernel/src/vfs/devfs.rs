@@ -159,6 +159,8 @@ pub fn init() -> KResult<Arc<DevFs>> {
     register(&devfs, "passwd", crate::drivers::passwd::devfs_device())?;
     register(&devfs, "power", crate::drivers::power::devfs_device())?;
     register(&devfs, "ble0", crate::drivers::ble::devfs_device())?;
+    register(&devfs, "gpio", crate::drivers::gpio::devfs_device())?;
+    register(&devfs, "watchdog", crate::drivers::watchdog::devfs_device())?;
 
     let rand_dev = Arc::new(RandomDevice);
     register(&devfs, "random", rand_dev.clone())?;

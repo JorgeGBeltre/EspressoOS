@@ -89,6 +89,9 @@ impl Inode for ProcFsRoot {
         if name == "mounts" {
             return Ok(Arc::new(ProcFsFile::Mounts));
         }
+        if name == "watchdog" {
+            return Ok(Arc::new(ProcFsFile::Watchdog));
+        }
         if let Ok(pid) = name.parse::<u32>() {
             let pt = crate::scheduler::process::PROCESS_TABLE.lock();
             if pt.table.contains_key(&pid) {
@@ -176,16 +179,23 @@ impl Inode for ProcFsRoot {
                 ino: 10,
             }));
         }
+        if index == 11 {
+            return Ok(Some(DirEntry {
+                name: "watchdog".to_string(),
+                kind: InodeKind::File,
+                ino: 11,
+            }));
+        }
 
         let pids: Vec<u32> = {
             let pt = crate::scheduler::process::PROCESS_TABLE.lock();
             pt.table.keys().copied().collect()
         };
 
-        if index < 11 {
+        if index < 12 {
             return Ok(None);
         }
-        let pid_idx = index - 11;
+        let pid_idx = index - 12;
         if pid_idx < pids.len() {
             let pid = pids[pid_idx];
             return Ok(Some(DirEntry {
@@ -315,6 +325,7 @@ enum ProcFsFile {
     Version,
     CpuInfo,
     Mounts,
+    Watchdog,
 }
 
 impl Inode for ProcFsFile {
@@ -328,6 +339,16 @@ impl Inode for ProcFsFile {
 
     fn read_at(&self, off: u64, buf: &mut [u8]) -> KResult<usize> {
         let content = match self {
+            ProcFsFile::Watchdog => {
+                let reason = crate::drivers::watchdog::get_reset_reason();
+                alloc::format!(
+                    "watchdog\t: {}\ntimeout\t\t: {}s\nfeeds\t\t: {}\nreset_reason\t: {}\n",
+                    if crate::drivers::watchdog::is_enabled() { "enabled" } else { "disabled" },
+                    crate::drivers::watchdog::timeout_secs(),
+                    crate::drivers::watchdog::feeds_count(),
+                    reason.as_str()
+                )
+            }
             ProcFsFile::CpuInfo => {
                 alloc::format!(
                     "processor\t: 0\nmodel name\t: Xtensa LX7 dual-core\ncpu MHz\t\t: 240.00\nfeatures\t: fpu, mac, esp32s3, windowed_abi\ncache size\t: 32 KB I-Cache, 32 KB D-Cache\n\n\

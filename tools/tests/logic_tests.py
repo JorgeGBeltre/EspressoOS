@@ -1728,8 +1728,80 @@ class TestStringsAndTimeoutLogic(unittest.TestCase):
         self.assertEqual(POSIX_TIMEOUT_EXIT, 124)
 
 
+class TestTarAndArchiveLogic(unittest.TestCase):
+    def test_ustar_header_layout(self):
+        filename = "test.txt"
+        file_size = 42
+
+        header = bytearray(512)
+        # Name: 0..100
+        header[:len(filename)] = filename.encode("ascii")
+        # Mode: 100..108
+        header[100:108] = b"0000644\x00"
+        # Magic: 257..263
+        header[257:263] = b"ustar\x00"
+
+        # Octal size at 124..136
+        oct_sz = f"{file_size:011o}\x00".encode("ascii")
+        header[124:136] = oct_sz
+
+        self.assertEqual(header[257:263], b"ustar\x00")
+        self.assertEqual(header[100:108], b"0000644\x00")
+
+    def test_tar_block_padding(self):
+        def tar_pad_len(size: int) -> int:
+            return (512 - (size % 512)) % 512
+
+        self.assertEqual(tar_pad_len(512), 0)
+        self.assertEqual(tar_pad_len(513), 511)
+        self.assertEqual(tar_pad_len(1), 511)
+        self.assertEqual(tar_pad_len(1024), 0)
+
+
+class TestDiffAndEditorLogic(unittest.TestCase):
+    def test_diff_line_comparison(self):
+        doc1 = ["line 1", "line 2", "line 3"]
+        doc2 = ["line 1", "line 2 modified", "line 3"]
+
+        diffs = []
+        for i in range(max(len(doc1), len(doc2))):
+            l1 = doc1[i] if i < len(doc1) else None
+            l2 = doc2[i] if i < len(doc2) else None
+            if l1 != l2:
+                diffs.append((i + 1, l1, l2))
+
+        self.assertEqual(diffs, [(2, "line 2", "line 2 modified")])
+
+    def test_ed_buffer_delete(self):
+        buf = ["first", "second", "third", "fourth"]
+        # Delete line 2 (1-based)
+        del_idx = 2
+        buf.pop(del_idx - 1)
+        self.assertEqual(buf, ["first", "third", "fourth"])
+
+
+class TestIdAndVmstatLogic(unittest.TestCase):
+    def test_id_mapping(self):
+        def user_to_ids(user: str):
+            if user == "root":
+                return 0, 0, "root"
+            return 1000, 1000, "users"
+
+        self.assertEqual(user_to_ids("root"), (0, 0, "root"))
+        self.assertEqual(user_to_ids("youareme"), (1000, 1000, "users"))
+
+    def test_vmstat_rate_calculation(self):
+        uptime_ms = 50000
+        ticks = uptime_ms // 10
+        interrupts = (ticks // 2) % 10000
+        ctx_switches = (ticks // 5) % 10000
+        self.assertEqual(interrupts, 2500)
+        self.assertEqual(ctx_switches, 1000)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
 
 
 

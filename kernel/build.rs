@@ -16,6 +16,8 @@ const APPS: &[&str] = &[
     "clear", "pwd", "poweroff", "mount", "umount", "less", "find", "du",
     "service", "pkg", "which", "true", "false",
     "wdt", "gpio", "ifconfig", "uname", "hostname",
+    "top", "whoami", "cut", "tr", "base64", "hexdump",
+    "adc", "pwm", "cal", "basename", "dirname", "lsof",
 ];
 
 // Every binary links at the same address and the loader relocates it into whatever

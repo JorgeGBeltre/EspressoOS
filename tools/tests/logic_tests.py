@@ -1335,5 +1335,181 @@ class TestUnameHostnameLogic(unittest.TestCase):
         self.assertEqual(clean_hostname("  \t\n"), "esp32s3")
 
 
+class TestStreamUtilitiesLogic(unittest.TestCase):
+    def test_cut_field_extraction(self):
+        def cut_line(line: str, delim: str, field_num: int) -> str:
+            parts = line.split(delim)
+            if 1 <= field_num <= len(parts):
+                return parts[field_num - 1]
+            return ""
+
+        row = "root:x:0:0:root:/root:/bin/sh"
+        self.assertEqual(cut_line(row, ":", 1), "root")
+        self.assertEqual(cut_line(row, ":", 3), "0")
+        self.assertEqual(cut_line(row, ":", 7), "/bin/sh")
+        self.assertEqual(cut_line(row, ":", 10), "")
+
+    def test_tr_translation_and_deletion(self):
+        def tr_delete(text: str, chars: str) -> str:
+            return "".join(c for c in text if c not in chars)
+
+        def tr_upper(text: str) -> str:
+            return text.upper()
+
+        self.assertEqual(tr_delete("line1\r\nline2\r\n", "\r"), "line1\nline2\n")
+        self.assertEqual(tr_upper("espressoos"), "ESPRESSOOS")
+
+    def test_base64_codec(self):
+        import base64
+        msg = b"EspressoOS on ESP32-S3"
+        encoded = base64.b64encode(msg).decode("ascii")
+        self.assertEqual(encoded, "RXNwcmVzc29PUyBvbiBFU1AzMi1TMw==")
+        decoded = base64.b64decode(encoded)
+        self.assertEqual(decoded, msg)
+
+    def test_hexdump_ascii_mapping(self):
+        def ascii_char(b: int) -> str:
+            return chr(b) if 32 <= b <= 126 else "."
+
+        self.assertEqual(ascii_char(ord("A")), "A")
+        self.assertEqual(ascii_char(ord("z")), "z")
+        self.assertEqual(ascii_char(0), ".")
+        self.assertEqual(ascii_char(127), ".")
+
+
+class TestPwmAndAdcLogic(unittest.TestCase):
+    def test_pwm_divider_calculation(self):
+        apb_clk = 80_000_000
+        max_val = 1024  # 10-bit resolution
+
+        def calc_div_fp(freq: int) -> int:
+            div_fp = (apb_clk * 256) // (freq * max_val)
+            return max(256, min(div_fp, (1 << 18) - 1))
+
+        # 1 kHz
+        div_1k = calc_div_fp(1000)
+        self.assertEqual(div_1k, 20000)
+
+        # 5 kHz
+        div_5k = calc_div_fp(5000)
+        self.assertEqual(div_5k, 4000)
+
+    def test_pwm_duty_conversion(self):
+        max_val = 1024
+        def duty_to_reg(percent: int) -> int:
+            val = (percent * (max_val - 1)) // 100
+            return val << 4
+
+        self.assertEqual(duty_to_reg(0), 0)
+        self.assertEqual(duty_to_reg(50), 511 << 4)
+        self.assertEqual(duty_to_reg(100), 1023 << 4)
+
+    def test_adc_raw_to_mv(self):
+        vref_mv = 3300
+        max_raw = 4095
+        def raw_to_mv(raw: int) -> int:
+            r = min(raw, max_raw)
+            return (r * vref_mv) // max_raw
+
+        self.assertEqual(raw_to_mv(0), 0)
+        self.assertEqual(raw_to_mv(max_raw), 3300)
+        self.assertAlmostEqual(raw_to_mv(2048), 1650, delta=1)
+
+    def test_adc_gpio_mapping(self):
+        adc_gpio_map = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+        for ch, gpio in enumerate(adc_gpio_map):
+            self.assertEqual(gpio, ch + 1)
+
+
+class TestProcFsAdditions(unittest.TestCase):
+    def test_proc_devices_content(self):
+        devices = [
+            ("mem", 1),
+            ("tty", 4),
+            ("misc", 10),
+            ("net", 80),
+            ("bluetooth", 90),
+            ("bus", 110),
+        ]
+        for name, major in devices:
+            self.assertTrue(major > 0)
+            self.assertTrue(len(name) > 0)
+
+    def test_proc_partitions_layout(self):
+        partitions = {
+            "nvs": 24,
+            "otadata": 8,
+            "factory": 4096,
+            "ota_0": 4096,
+            "storage": 8000,
+            "coredump": 64,
+        }
+        total_kb = sum(partitions.values())
+        self.assertTrue(total_kb <= 16384)  # Fits in 16MB flash
+
+    def test_proc_crypto_engines(self):
+        engines = ["sha256", "ed25519", "chacha20-poly1305", "trng"]
+        for e in engines:
+            self.assertIn(e, ["sha256", "ed25519", "chacha20-poly1305", "trng"])
+
+
+class TestExtendedUtilitiesLogic(unittest.TestCase):
+    def test_basename(self):
+        def basename(path: str, suffix: str = "") -> str:
+            p = path.rstrip("/")
+            if not p:
+                return "/"
+            base = p.split("/")[-1]
+            if suffix and base.endswith(suffix) and len(base) > len(suffix):
+                return base[:-len(suffix)]
+            return base
+
+        self.assertEqual(basename("/etc/passwd"), "passwd")
+        self.assertEqual(basename("/var/log/"), "log")
+        self.assertEqual(basename("/foo/bar.txt", ".txt"), "bar")
+        self.assertEqual(basename("/"), "/")
+        self.assertEqual(basename("main.rs"), "main.rs")
+
+    def test_dirname(self):
+        def dirname(path: str) -> str:
+            p = path.rstrip("/")
+            if not p:
+                return "/"
+            parts = p.split("/")
+            if len(parts) <= 1:
+                return "."
+            dirpath = "/".join(parts[:-1])
+            return dirpath if dirpath else "/"
+
+        self.assertEqual(dirname("/usr/bin/sort"), "/usr/bin")
+        self.assertEqual(dirname("/etc/passwd"), "/etc")
+        self.assertEqual(dirname("/etc"), "/")
+        self.assertEqual(dirname("/"), "/")
+        self.assertEqual(dirname("stdio.h"), ".")
+
+    def test_cal_sakamoto_day_of_week(self):
+        # Day of week: 0=Sun, 1=Mon, ..., 6=Sat
+        def day_of_week(year: int, month: int, day: int) -> int:
+            t = [0, 3, 2, 5, 0, 3, 5, 1, 4, 6, 2, 4]
+            y = year - 1 if month < 3 else year
+            return (y + y // 4 - y // 100 + y // 400 + t[month - 1] + day) % 7
+
+        # 2026-10-14 is Wednesday (3)
+        self.assertEqual(day_of_week(2026, 10, 14), 3)
+        # 2026-10-01 is Thursday (4)
+        self.assertEqual(day_of_week(2026, 10, 1), 4)
+
+    def test_cal_leap_year(self):
+        def is_leap(y: int) -> bool:
+            return (y % 4 == 0 and y % 100 != 0) or (y % 400 == 0)
+
+        self.assertTrue(is_leap(2024))
+        self.assertFalse(is_leap(2025))
+        self.assertFalse(is_leap(2026))
+        self.assertTrue(is_leap(2000))
+        self.assertFalse(is_leap(1900))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+

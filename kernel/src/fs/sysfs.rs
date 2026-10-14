@@ -68,6 +68,9 @@ impl Inode for SysFsRoot {
         if name == "pms" {
             return Ok(Arc::new(SysFsFile::Pms));
         }
+        if name == "power" {
+            return Ok(Arc::new(SysFsFile::Power));
+        }
         Err(KError::NotFound)
     }
 
@@ -107,6 +110,13 @@ impl Inode for SysFsRoot {
                 ino: 4,
             }));
         }
+        if index == 5 {
+            return Ok(Some(DirEntry {
+                name: "power".to_string(),
+                kind: InodeKind::File,
+                ino: 5,
+            }));
+        }
         Ok(None)
     }
 }
@@ -115,6 +125,7 @@ enum SysFsFile {
     KernelInfo,
     Smp,
     Pms,
+    Power,
 }
 
 impl Inode for SysFsFile {
@@ -153,6 +164,15 @@ impl Inode for SysFsFile {
                 } else {
                     String::from("pms: disabled (build --features pms)\n")
                 }
+            }
+            SysFsFile::Power => {
+                alloc::format!(
+                    "cpu_freq_mhz: 240\n\
+                     apb_freq_mhz: 80\n\
+                     xtal_freq_mhz: 40\n\
+                     sleep_modes: deep_sleep, reboot\n\
+                     dvfs: disabled\n"
+                )
             }
         };
 

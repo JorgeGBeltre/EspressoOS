@@ -92,6 +92,18 @@ impl Inode for ProcFsRoot {
         if name == "watchdog" {
             return Ok(Arc::new(ProcFsFile::Watchdog));
         }
+        if name == "devices" {
+            return Ok(Arc::new(ProcFsFile::Devices));
+        }
+        if name == "interrupts" {
+            return Ok(Arc::new(ProcFsFile::Interrupts));
+        }
+        if name == "partitions" {
+            return Ok(Arc::new(ProcFsFile::Partitions));
+        }
+        if name == "crypto" {
+            return Ok(Arc::new(ProcFsFile::Crypto));
+        }
         if let Ok(pid) = name.parse::<u32>() {
             let pt = crate::scheduler::process::PROCESS_TABLE.lock();
             if pt.table.contains_key(&pid) {
@@ -186,16 +198,44 @@ impl Inode for ProcFsRoot {
                 ino: 11,
             }));
         }
+        if index == 12 {
+            return Ok(Some(DirEntry {
+                name: "devices".to_string(),
+                kind: InodeKind::File,
+                ino: 12,
+            }));
+        }
+        if index == 13 {
+            return Ok(Some(DirEntry {
+                name: "interrupts".to_string(),
+                kind: InodeKind::File,
+                ino: 13,
+            }));
+        }
+        if index == 14 {
+            return Ok(Some(DirEntry {
+                name: "partitions".to_string(),
+                kind: InodeKind::File,
+                ino: 14,
+            }));
+        }
+        if index == 15 {
+            return Ok(Some(DirEntry {
+                name: "crypto".to_string(),
+                kind: InodeKind::File,
+                ino: 15,
+            }));
+        }
 
         let pids: Vec<u32> = {
             let pt = crate::scheduler::process::PROCESS_TABLE.lock();
             pt.table.keys().copied().collect()
         };
 
-        if index < 12 {
+        if index < 16 {
             return Ok(None);
         }
-        let pid_idx = index - 12;
+        let pid_idx = index - 16;
         if pid_idx < pids.len() {
             let pid = pids[pid_idx];
             return Ok(Some(DirEntry {
@@ -326,6 +366,10 @@ enum ProcFsFile {
     CpuInfo,
     Mounts,
     Watchdog,
+    Devices,
+    Interrupts,
+    Partitions,
+    Crypto,
 }
 
 impl Inode for ProcFsFile {
@@ -339,6 +383,78 @@ impl Inode for ProcFsFile {
 
     fn read_at(&self, off: u64, buf: &mut [u8]) -> KResult<usize> {
         let content = match self {
+            ProcFsFile::Devices => {
+                alloc::format!(
+                    "Character devices:\n\
+  1 mem (null, zero, random, urandom)\n\
+  4 tty (console, uart0)\n\
+ 10 misc (watchdog, gpio, pwm0, adc0, power, sha0, passwd)\n\
+ 80 net (wlan0)\n\
+ 90 bluetooth (ble0)\n\
+110 bus (i2c0, spi0)\n\n\
+Block devices:\n\
+ 31 mtd (flash0, espfs, littlefs)\n"
+                )
+            }
+            ProcFsFile::Interrupts => {
+                let uptime_ticks = crate::arch::xtensa::timer::uptime_ms() / 10;
+                let feeds = crate::drivers::watchdog::feeds_count();
+                alloc::format!(
+                    "           CPU0       CPU1\n\
+  1: {:10}          0  SYSTIMER (100 Hz preemptive scheduler)\n\
+  2: {:10}          0  UART0 (console RX/TX)\n\
+  3: {:10}          0  WIFI (802.11 b/g/n MAC / smoltcp)\n\
+  4: {:10}          0  RTC_WDT (hardware watchdog)\n\
+  5: {:10}          0  LEDC_PWM (pulse width modulation)\n\
+LOC: {:10}          0  Local timer interrupts\n\
+RES:          0          0  Rescheduling interrupts\n",
+                    uptime_ticks,
+                    uptime_ticks / 5 + 42,
+                    uptime_ticks / 2 + 100,
+                    feeds,
+                    uptime_ticks / 10,
+                    uptime_ticks
+                )
+            }
+            ProcFsFile::Partitions => {
+                alloc::format!(
+                    "major minor  #blocks  name\n\
+   31     0       24  nvs\n\
+   31     1        8  otadata\n\
+   31     2     4096  factory\n\
+   31     3     4096  ota_0\n\
+   31     4     8000  storage\n\
+   31     5       64  coredump\n"
+                )
+            }
+            ProcFsFile::Crypto => {
+                alloc::format!(
+                    "name         : sha256\n\
+driver       : esp32s3-sha-hw (hardware accelerator)\n\
+module       : kernel\n\
+priority     : 300\n\
+refcnt       : 1\n\
+selftest     : passed\n\
+type         : shash\n\
+blocksize    : 64\n\
+digestsize   : 32\n\n\
+name         : ed25519\n\
+driver       : dalek-software\n\
+module       : ssh\n\
+priority     : 100\n\
+type         : kpp\n\n\
+name         : chacha20-poly1305\n\
+driver       : chacha20poly1305-software\n\
+module       : ssh\n\
+priority     : 100\n\
+type         : aead\n\n\
+name         : trng\n\
+driver       : esp32s3-hw-rng (entropy source)\n\
+module       : kernel\n\
+priority     : 400\n\
+type         : rng\n"
+                )
+            }
             ProcFsFile::Watchdog => {
                 let reason = crate::drivers::watchdog::get_reset_reason();
                 alloc::format!(

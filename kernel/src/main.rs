@@ -90,6 +90,7 @@ fn main() -> ! {
     }
 
     drivers::power::init(peripherals.LPWR);
+    drivers::watchdog::init();
     drivers::device::init();
 
     if let Err(e) = drivers::uart::init() {
@@ -319,6 +320,7 @@ fn heartbeat_task(_arg: usize) {
     loop {
         encendido = !encendido;
         let _ = drivers::gpio::write(LED_GPIO, encendido);
+        drivers::watchdog::feed();
 
         sleep_ms(HEARTBEAT_MS);
     }

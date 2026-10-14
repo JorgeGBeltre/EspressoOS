@@ -1222,5 +1222,118 @@ class TestServicePkgWhichLogic(unittest.TestCase):
         self.assertNotIn("apache", services)
 
 
+class TestWatchdogLogic(unittest.TestCase):
+    def test_reset_reason_decoding(self):
+        def decode_reset_reason(raw: int) -> str:
+            reasons = {
+                1: "Power-on Reset",
+                3: "Software Reset",
+                4: "RTC Watchdog Reset",
+                5: "Deep Sleep Wakeup",
+                7: "Timer Group 0 Watchdog Reset",
+                8: "Timer Group 1 Watchdog Reset",
+                9: "RTC Watchdog Reset",
+                11: "Timer Group 0 Watchdog Reset",
+                13: "RTC Watchdog Reset",
+                15: "Brown-out Detector Reset",
+                16: "RTC Watchdog Reset",
+            }
+            return reasons.get(raw, "Other / Unknown Reset")
+
+        self.assertEqual(decode_reset_reason(1), "Power-on Reset")
+        self.assertEqual(decode_reset_reason(3), "Software Reset")
+        self.assertEqual(decode_reset_reason(5), "Deep Sleep Wakeup")
+        self.assertEqual(decode_reset_reason(7), "Timer Group 0 Watchdog Reset")
+        self.assertEqual(decode_reset_reason(15), "Brown-out Detector Reset")
+        self.assertEqual(decode_reset_reason(999), "Other / Unknown Reset")
+
+    def test_watchdog_timeout_validation(self):
+        def validate_timeout(secs: int) -> bool:
+            return 1 <= secs <= 3600
+
+        self.assertTrue(validate_timeout(1))
+        self.assertTrue(validate_timeout(10))
+        self.assertTrue(validate_timeout(3600))
+        self.assertFalse(validate_timeout(0))
+        self.assertFalse(validate_timeout(3601))
+
+
+class TestGpioLogic(unittest.TestCase):
+    def test_pin_range_validation(self):
+        def check_pin(pin: int) -> bool:
+            return 0 <= pin <= 48
+
+        self.assertTrue(check_pin(0))
+        self.assertTrue(check_pin(2))
+        self.assertTrue(check_pin(48))
+        self.assertFalse(check_pin(49))
+        self.assertFalse(check_pin(100))
+
+    def test_output_mask_tracking(self):
+        mask_lo = 0
+        mask_hi = 0
+
+        def set_output(pin: int, is_out: bool):
+            nonlocal mask_lo, mask_hi
+            if pin < 32:
+                bit = 1 << pin
+                mask_lo = (mask_lo | bit) if is_out else (mask_lo & ~bit)
+            else:
+                bit = 1 << (pin - 32)
+                mask_hi = (mask_hi | bit) if is_out else (mask_hi & ~bit)
+
+        set_output(2, True)
+        self.assertTrue(mask_lo & (1 << 2))
+        set_output(2, False)
+        self.assertFalse(mask_lo & (1 << 2))
+
+        set_output(35, True)
+        self.assertTrue(mask_hi & (1 << 3))
+        set_output(35, False)
+        self.assertFalse(mask_hi & (1 << 3))
+
+
+class TestLittleFsLogic(unittest.TestCase):
+    def test_lfs_abs_offset(self):
+        block_size = 4096
+        region_offset = 0x820000
+        block_count = 100
+
+        def abs_offset(block: int, off: int, size: int) -> Optional[int]:
+            if block >= block_count or off + size > block_size:
+                return None
+            return region_offset + block * block_size + off
+
+        self.assertEqual(abs_offset(0, 0, 16), 0x820000)
+        self.assertEqual(abs_offset(1, 0, 16), 0x820000 + 4096)
+        self.assertEqual(abs_offset(0, 4080, 16), 0x820000 + 4080)
+        self.assertIsNone(abs_offset(0, 4081, 16))  # Exceeds block size
+        self.assertIsNone(abs_offset(100, 0, 16))   # Block out of range
+
+
+class TestUnameHostnameLogic(unittest.TestCase):
+    def test_uname_formatting(self):
+        info = {
+            "sysname": "EspressoOS",
+            "nodename": "esp32s3",
+            "release": "0.2.0-dev",
+            "version": "#1 PREEMPT Xtensa-LX7-240MHz",
+            "machine": "xtensa-esp32s3",
+        }
+        all_info = f"{info['sysname']} {info['nodename']} {info['release']} {info['version']} {info['machine']}"
+        self.assertEqual(
+            all_info,
+            "EspressoOS esp32s3 0.2.0-dev #1 PREEMPT Xtensa-LX7-240MHz xtensa-esp32s3",
+        )
+
+    def test_hostname_normalization(self):
+        def clean_hostname(raw: str) -> str:
+            clean = raw.strip()
+            return clean if clean else "esp32s3"
+
+        self.assertEqual(clean_hostname("my-esp32\n"), "my-esp32")
+        self.assertEqual(clean_hostname("  \t\n"), "esp32s3")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

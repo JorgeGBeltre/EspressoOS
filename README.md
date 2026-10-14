@@ -36,6 +36,7 @@ All runtime output and shells are in **English**, identifying the system as **Es
 - [7. Repository Structure](#7-repository-structure)
 - [8. Memory Map & Partition Table](#8-memory-map--partition-table)
 - [9. Known Issues & Technical Debt](#9-known-issues--technical-debt)
+- [10. Changelog & Implementation History](#10-changelog--implementation-history)
 - [License](#license)
 - [Contact](#contact)
 - [Support](#support)
@@ -66,11 +67,14 @@ EspressoOS boots and executes on physical ESP32-S3 hardware. The system acquires
 - **Compilation & Linking**: Clean compilation in `--release` mode for `xtensa-esp32s3-none-elf`.
 - **Kernel Boot**: HAL initialization, 128 KB SRAM internal heap, VFS mounts (`/` EspFs on flash, `/tmp` ramfs in RAM, `/dev` devfs, `/proc` procfs, `/sys` sysfs).
 - **PSRAM Execution (PSRAM-Exec)**: 8 MB PSRAM carve-up with 1 MB reserved for code execution on the instruction bus (`0x42800000`). Boot selftest verifies instruction execution in PSRAM returning code 42.
-- **Preemptive Multitasking**: Scheduler driven by SYSTIMER at 100 Hz, 50 ms quantum, and Model B in-ISR context switching.
-- **Dynamic Userland ELFs**: ELF binary execution from PSRAM with `argv` support, 32-slot pool, and load-time relocation without requiring Position Independent Code (PIC).
-- **Wi-Fi + TCP/IP Stack**: Station (STA) mode, DHCP client, and active TCP/IP stack (`smoltcp`). Runtime Wi-Fi scan, connect, and disconnect. Credential persistence in flash NVS.
-- **SSH-2.0 Server**: Server supporting curve25519-sha256, ssh-ed25519, and chacha20-poly1305@openssh.com. Password authentication reads `/etc/passwd`.
-- **`passwd` Command & Credential Management**: Userland application `/bin/passwd` creates or updates `/etc/passwd` in persistent flash storage (EspFs).
+- **Preemptive Multitasking & Process Management**: Scheduler driven by SYSTIMER at 100 Hz, 50 ms quantum, and Model B in-ISR context switching. Automatic reparenting of orphan processes to PID 1 (`init-sup`) and non-blocking zombie reaping with `waitpid` (`WNOHANG`), preventing PSRAM-Exec slot leaks.
+- **Dynamic Userland ELFs**: Suite of **44 ELF binaries** executing from PSRAM with `argv` support, 32-slot pool, and load-time relocation without requiring Position Independent Code (PIC).
+- **Wi-Fi + TCP/IP Stack**: Station (STA) mode, DHCP client, and active TCP/IP stack (`smoltcp`). Runtime Wi-Fi scan, connect, and disconnect. Credential persistence in flash NVS sector 0 (`0x0000_9000`).
+- **Hardened SSH-2.0 Server**: Server supporting curve25519-sha256, ssh-ed25519, and chacha20-poly1305@openssh.com.
+  - **Persistent Host Key**: Unique Ed25519 host key generated via hardware TRNG on first boot and persisted to NVS flash sector 1 (`0x0000_A000`, `ESHK` format).
+  - **Public-Key Authentication**: Supports OpenSSH `ssh-ed25519` keys in `/etc/authorized_keys` with constant-time cryptographic verification (`ct_eq`).
+  - **Connection Resilience**: 60s authentication deadline, 300s session idle timeout, and clean TCP socket teardown on remote FIN/RST (`CloseWait`).
+- **`passwd` Command & Credential Management**: Userland application `/bin/passwd` creates or updates `/etc/passwd` in persistent flash storage (EspFs) using salted SHA-256 (`$s5$<salt>$<hash>`).
 - **Persistent EspFs Filesystem**: Log-structured filesystem on NOR flash surviving reboots and re-flashes.
 - **Hardware Cryptography**: Driver `/dev/sha0` exposing the hardware SHA-256 accelerator.
 - **Power Management & Reboot**: Driver `/dev/power` with working software reboot.
@@ -258,20 +262,32 @@ The system integrates identity management and user authentication for the SSH se
   - User and password strings cannot contain `:` or newline `\n` characters.
 - **Storage format**: `passwd(1)` sends `{user, password}` to `/dev/passwd` via `ioctl(SET_PASSWORD_CMD)`; the kernel generates a 16-byte salt from the hardware TRNG, computes `SHA-256(salt || password)`, and writes a single line `user:$s5$<salt-hex>$<hash-hex>\n` to `/etc/passwd` (`O_WRONLY_CREATE_TRUNC`). The plaintext password is never written to flash. Stored on EspFs flash storage, making the credential change **persistent across reboots and re-flashes**.
 
-#### Kernel SSH Authentication Verification
-- **Source Location**: `kernel/src/drivers/ssh/auth.rs` (`check_password`).
-- **Validation Flow**:
-  1. On SSH password login request, the server attempts to resolve `/etc/passwd` via VFS (`vfs::mount::resolve("/etc/passwd")`).
-  2. If `/etc/passwd` exists, it reads the file and matches the target user line (username comparison is constant-time too, via `ct_eq`).
-  3. If the stored field starts with `$s5$`, the kernel re-hashes the supplied password with the stored salt and compares the two hashes in constant time (`ct_eq`). Fields without that prefix are compared as plaintext (`ct_eq`) — kept only so a pre-existing `/etc/passwd` from before this change is not silently locked out; running `passwd` again replaces it with the salted form.
-  4. If `/etc/passwd` does not exist or the user is not found, authentication falls back to compiled dev credentials (`DEV_USER` = `"youareme"`, `DEV_PASSWORD` in `kernel/src/drivers/ssh/config.rs` — still plaintext-in-source; that is a separate, still-open hardening item, see the security notes on the hardcoded default credential and shared SSH host key).
+#### Kernel SSH Authentication & Host Key Management
+- **Persistent Host Key**:
+  - Generated on first boot via the hardware TRNG (`esp_hal::rng::Rng`).
+  - Stored in dedicated NVS flash sector 1 (`0x0000_A000`, record magic `ESHK` + CRC checksum) so the host fingerprint is stable across reboots without throwing host key mismatch warnings on SSH clients.
+  - Automatically announced on the serial console at boot: `[ssh] host key ssh-ed25519 fingerprint: SHA256:...`.
+- **Public-Key Authentication (`/etc/authorized_keys`)**:
+  - The SSH server parses `/etc/authorized_keys` via VFS.
+  - Supports standard OpenSSH format (`ssh-ed25519 <base64-blob> [comment]`).
+  - Decoded using the kernel's RFC 4648 Base64 engine (`drivers::ssh::base64`) and verified against the incoming client signature in constant time (`ct_eq`).
+- **Password Authentication (`/etc/passwd`)**:
+  - On SSH password login request, the server attempts to resolve `/etc/passwd` via VFS (`vfs::mount::resolve("/etc/passwd")`).
+  - Matches the user in constant time (`ct_eq`). If the stored field starts with `$s5$`, it verifies `SHA-256(salt || password)`.
+  - If `/etc/passwd` does not exist, it falls back to compiled developer credentials (`DEV_USER` / `DEV_PASSWORD`).
+- **Connection Timeouts & Socket Teardown**:
+  - **Auth Timeout**: Non-authenticated sessions terminate after 60 seconds of inactivity.
+  - **Idle Timeout**: Interactive sessions terminate after 300 seconds (5 minutes) of silence.
+  - **TCP FIN/RST Teardown**: Sockets in `CloseWait` or abruptly closed by the client are immediately torn down, freeing the session shell and channel.
 
 #### Boot Warnings & Credentials Reset
 - **Kernel Boot Behavior** (`kernel/src/main.rs`):
-  - The system never seeds a default `/etc/passwd` on boot.
+  - The system never seeds a default `/etc/passwd` or `/etc/authorized_keys` on boot.
   - If `/etc/passwd` is detected at boot, the kernel issues a serial console warning:
     `[kernel] WARNING: /etc/passwd exists and overrides the compiled SSH credential; 'rm /etc/passwd' to fall back to it`.
-  - Executing `rm /etc/passwd` from the shell removes the file and reverts SSH authentication to compiled defaults.
+  - If `/etc/authorized_keys` is detected:
+    `[kernel] NOTICE: /etc/authorized_keys exists and enables SSH public-key authentication`.
+  - Executing `rm /etc/passwd` from the shell removes custom password credentials; `rm /etc/authorized_keys` disables public-key authentication.
 
 ---
 
@@ -279,10 +295,14 @@ The system integrates identity management and user authentication for the SSH se
 
 - **Userland Compilation**: Located in `userland/`. Compiled as an independent workspace with linker scripts generated by `kernel/build.rs`.
 - **Load-Time Relocation**: Xtensa LLVM backend lacks PIC/PIE support. EspressoOS compiles binaries as static executables and extracts `R_XTENSA_32` data relocations via `ld --emit-relocs`. `build.rs` appends a fixup table trailer to each ELF. On `spawn`, the loader (`kernel/src/fs/elf.rs`) copies the binary into a free PSRAM slot and patches data literal pointers without altering CPU instruction bytes.
+- **Process Lifecycle & Reaping**:
+  - When an exited process has live child processes, they are automatically reparented to `PID 1` (`init-sup`).
+  - `sys_wait` (`syscall 7`) implements `WNOHANG`, exposed via `libc::waitpid(pid, status, options)`.
+  - `/bin/sh` non-blockingly reaps background jobs (`&`) before displaying each interactive prompt, eliminating zombie accumulation and PSRAM slot leaks.
 - **`libc` Library** (`userland/libc/`): Provides entry `_start`, panic handler, 32 KB non-reclaiming bump allocator, and typed wrappers for all 30 syscalls.
 - **Userland Shell (`/bin/sh`)**:
   - Interactive shell located at `/bin/sh`.
-  - Supports multi-stage pipelines (`|`), input/output redirection (`>`, `>>`), command sequencing (`;`), and quote parsing.
+  - Supports multi-stage pipelines (`|`), input/output redirection (`>`, `>>`), command sequencing (`;`), background execution (`&`), and quote parsing.
   - Built-in commands: `cd`, `pwd`, `clear`, `sudo` (no-op prefix), `exit`, `help`.
 
 ---
@@ -330,7 +350,7 @@ cargo build --release
 cargo run --release
 ```
 
-`kernel/build.rs` automatically compiles all 35 userland binaries, generates relocation fixup tables, and embeds them into the kernel image.
+`kernel/build.rs` automatically compiles all 44 userland binaries, generates relocation fixup tables, and embeds them into the kernel image.
 
 ### 4.4 Feature Gates
 
@@ -357,10 +377,11 @@ The following feature flags are available in `kernel/Cargo.toml`:
 ========================================
 [kernel] flash: 16 MB usable
 [kernel] / mounted on flash (espfs)
-[kernel] userland: 32 binaries installed/updated in EspFs
+[kernel] userland: 44 binaries installed/updated in EspFs
 [net] connecting to SSID '...'
 [net] associated with AP; negotiating DHCP...
 [net] IP = 192.168.2.146
+[ssh] host key ssh-ed25519 fingerprint: SHA256:d8Q+...
 [net] SSH listening on port 22, ECHO on 2323, OTA on 3300
 
 EspressoOS:~$
@@ -370,12 +391,12 @@ EspressoOS:~$
 
 ## 5. Complete Command Reference
 
-The system includes **35 userland binaries** in `/bin` alongside shell built-in commands.
+The system includes **44 userland binaries** in `/bin` alongside shell built-in commands.
 
 ### Userland Binaries (`/bin/*`)
 
 1. **`init`**: Supervisor process executing `/etc/rc` and launching interactive `/bin/sh`.
-2. **`sh`**: Primary interactive command shell with pipe, redirection, and variable support.
+2. **`sh`**: Primary interactive command shell with pipe, redirection, background jobs (`&`), and variable support.
 3. **`cat`**: Display file contents or stream standard input.
 4. **`echo`**: Print text arguments (`echo [-n] TEXT`).
 5. **`ls`**: List directory contents.
@@ -392,12 +413,12 @@ The system includes **35 userland binaries** in `/bin` alongside shell built-in 
 16. **`sntp`**: Synchronize system clock via SNTP protocol (`sntp [SERVER_IP]`).
 17. **`httpd`**: HTTP/1.1 web server exposing `/proc/uptime` and `/proc/meminfo` metrics (`httpd [PORT]`).
 18. **`netstat`**: Print active socket table from `/proc/net/sockets`.
-19. **`uptime`**: Show system uptime.
+19. **`uptime`**: Show system uptime in seconds.
 20. **`free`**: Report heap memory usage and PSRAM execution slot metrics.
-21. **`ps`**: List active tasks and processes.
+21. **`ps`**: List active tasks and processes with PID, state, and name.
 22. **`kill`**: Send signals to running processes (`kill -SIGKILL PID`).
 23. **`sha256`**: Calculate SHA-256 digest using hardware acceleration engine.
-24. **`power`**: Manage system power modes (`power deep-sleep`, `power reboot`). `power sleep` was removed (see Known Issues).
+24. **`power`**: Manage system power modes (`power deep-sleep`, `power reboot`).
 25. **`reboot`**: Trigger software reset.
 26. **`ble`**: Control Bluetooth Low Energy advertiser (`ble status`, `ble advertise`).
 27. **`i2c`**: I2C bus diagnostic tool (`i2c scan`, `i2c read`, `i2c write`).
@@ -405,10 +426,19 @@ The system includes **35 userland binaries** in `/bin` alongside shell built-in 
 29. **`ota`**: OTA A/B firmware update utility (`ota status`, `ota mark-valid`, `ota rollback`).
 30. **`smp`**: Display multiprocessor status.
 31. **`pms`**: Display memory protection status.
-32. **`sleep`**: Pause execution for specified duration.
+32. **`sleep`**: Pause execution for specified duration (`sleep SECONDS`).
 33. **`badptr`**: Test utility triggering invalid memory accesses to verify kernel fault handling.
 34. **`cwdtest`**: Test utility verifying directory change and getcwd behavior.
 35. **`ioctltest`**: Stress test and bounds check utility for `ioctl` interface.
+36. **`cp`**: Copy file contents from source to destination using chunked buffer streaming (`cp SRC DST`).
+37. **`head`**: Print first N lines of standard input or files (`head [-n N] [FILE...]`).
+38. **`tail`**: Print last N lines using a circular ring buffer (`tail [-n N] [FILE...]`).
+39. **`wc`**: Print newline, word, and byte counts for files or stdin (`wc [FILE...]`).
+40. **`grep`**: Print lines matching a specified pattern in files or stdin (`grep PATTERN [FILE...]`).
+41. **`df`**: Report filesystem disk space usage, block sizes, and mount points (`df`).
+42. **`dmesg`**: Dump kernel circular diagnostic ring buffer with microsecond timestamps (`dmesg`).
+43. **`date`**: Format and display current system uptime clock (`date`).
+44. **`sync`**: Explicitly flush in-memory buffers to persistent flash storage (`sync`).
 
 ---
 
@@ -503,7 +533,7 @@ Flash layout defined in `kernel/src/prelude.rs` and `partitions.csv`:
 ```text
 0x00000000 - 0x00007FFF : Second-stage Bootloader (32 KB)
 0x00008000 - 0x00008FFF : Partition Table (4 KB)
-0x00009000 - 0x0000EFFF : NVS Storage (24 KB - Saved Wi-Fi credentials)
+0x00009000 - 0x0000EFFF : NVS Storage (24 KB - Wi-Fi creds @ 0x9000, SSH Host Key @ 0xA000)
 0x0000F000 - 0x0001FFFF : OTA Control Data otadata (68 KB)
 0x00020000 - 0x0041FFFF : Factory Partition / Slot A (Primary kernel, 4 MB)
 0x00420000 - 0x0081FFFF : OTA_0 Partition / Slot B (Secondary kernel, 4 MB)
@@ -525,9 +555,71 @@ Flash layout defined in `kernel/src/prelude.rs` and `partitions.csv`:
 ## 9. Known Issues & Technical Debt
 
 1. **Light Sleep — REMOVED**: `power sleep` and the `POWER_SLEEP` ioctl were removed. esp-hal's `rtc.sleep_light()` hung the CPU on this hardware/HAL generation, a platform limitation rather than something fixable in this kernel. `power deep-sleep` and `power reboot` remain and cover the same use cases without that risk.
-2. **EspFs Compaction Limit**: EspFs log-structured compaction requires free flash space. Extremely low flash conditions may return a `NoSpace` error during compaction. Reviewed `partitions.csv`: the 16 MB flash map has **zero unallocated space at the tail** (`coredump` ends exactly at `0x1000000`); the only gap is ~60 KB between `otadata` and `factory`, required by the `app`-partition 64 KB alignment rule and not reclaimable for `fs`. Growing `fs` further would require shrinking `ota_0` (losing A/B OTA redundancy) or `coredump` (losing crash-dump capacity) — a real trade-off, left to a deliberate decision rather than made here. That said, enlarging the partition would not address the actual failure mode anyway: each EspFs half is already ~4 MB against a live data set of only ~180 KB, so `NoSpace` here comes from a specific compaction edge case (a compacted image can grow larger than its source — sparse holes materialize as explicit zero bytes, and each chunk carries its own record header), not from running low on raw flash. `compact()` already fails with an honest `NoSpace` error instead of corrupting data (see the comment at `kernel/src/fs/espfs/mod.rs:360`); the real fix (preserving holes and coalescing chunks) is left as documented debt rather than implemented here.
-3. **Plaintext Password Storage — FIXED**: `/etc/passwd` now stores `user:$s5$<salt-hex>$<hash-hex>` (SHA-256 of a 16-byte random salt + the password), written by the new `/dev/passwd` device (`kernel/src/drivers/passwd.rs`) so hashing happens kernel-side — userland's `passwd(1)` never touches crypto/RNG directly. `ssh::auth::check_password` verifies by re-hashing and comparing in constant time (`ct_eq`); it still accepts bare-plaintext entries on read for backward compatibility with files written before this change, but `passwd(1)` always writes the new salted format. The compiled fallback credential (`DEV_USER`/`DEV_PASSWORD` in `kernel/src/drivers/ssh/config.rs`) is unchanged by this fix — see the separate hardening note on hardcoded default credentials and the shared SSH host key.
-4. **Non-Reentrant Kernel Mutex**: Kernel `Mutex` disables CPU interrupts while held. Acquiring the same mutex twice on the same core will result in a silent dead lock. Audited: no call site in the tree currently re-enters the same `Mutex` while already holding it. Left as a documented invariant rather than converted to a recursive mutex, since a recursive mutex would silently paper over a future double-lock instead of surfacing it as the bug it is.
+2. **EspFs Compaction Limit**: EspFs log-structured compaction requires free flash space. Extremely low flash conditions may return a `NoSpace` error during compaction. Reviewed `partitions.csv`: the 16 MB flash map has **zero unallocated space at the tail** (`coredump` ends exactly at `0x1000000`); the only gap is ~60 KB between `otadata` and `factory`, required by the `app`-partition 64 KB alignment rule and not reclaimable for `fs`. Growing `fs` further would require shrinking `ota_0` (losing A/B OTA redundancy) or `coredump` (losing crash-dump capacity). `compact()` already fails with an honest `NoSpace` error instead of corrupting data (see `kernel/src/fs/espfs/mod.rs:360`); preserving sparse holes and coalescing chunks is documented debt.
+3. **Plaintext Password Storage — FIXED**: `/etc/passwd` stores `user:$s5$<salt-hex>$<hash-hex>` (SHA-256 of a 16-byte random salt + password), written by `/dev/passwd` (`kernel/src/drivers/passwd.rs`) so hashing occurs kernel-side. `ssh::auth::check_password` re-hashes and compares in constant time (`ct_eq`).
+4. **Shared SSH Host Key — FIXED**: The SSH daemon no longer relies on a shared hardcoded development seed. On initial boot, the kernel generates a cryptographically secure 32-byte Ed25519 seed from the hardware TRNG (`esp_hal::rng::Rng`) and stores it in dedicated NVS flash sector 1 (`0x0000_A000`, `ESHK` format + CRC). Subsequent boots read the stored seed, ensuring consistent host fingerprints without client host key rotation warnings.
+5. **Passwordless Public-Key Authentication — IMPLEMENTED**: OpenSSH `ssh-ed25519` keys configured in `/etc/authorized_keys` are dynamically resolved via VFS, base64-decoded, and verified in constant time (`ct_eq`), enabling passwordless SSH access.
+6. **Process Slot Leaks & Reparenting — FIXED**: Orphaned child processes are automatically reparented to `PID 1` (`init-sup`). `sys_wait` implements `WNOHANG` (exposed via `libc::waitpid`), and `/bin/sh` non-blockingly reaps background jobs (`&`), preventing PSRAM-Exec slot exhaustion.
+7. **Non-Reentrant Kernel Mutex**: Kernel `Mutex` disables CPU interrupts while held. Acquiring the same mutex twice on the same core will result in a silent dead lock. Audited: no call site in the tree currently re-enters the same `Mutex` while already holding it. Left as a documented invariant rather than converted to a recursive mutex.
+
+---
+
+## 10. Changelog & Implementation History
+
+All notable modifications to this project are documented below in reverse chronological order. Format adheres to [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and semantic versioning.
+
+### [0.2.0-dev] - 2026-10-14
+
+#### Added
+- **Master Plan Specification Compliance**:
+  - Authored 13 comprehensive architectural specifications covering subsystem maturity audit (Levels 1–5), modular architecture boundaries, layered contracts, memory layout, preemptive scheduling, 30-syscall frozen ABI, VFS interfaces, Wi-Fi/TCP networking, SSH-2.0 cryptosystem, A/B OTA partition scheme, automated testing methodology, hardware pinout mapping, and POSIX/Linux NOMMU compatibility matrix.
+- **Phase 1: Process Control & Orphan Reaping (P0)**:
+  - Automatic reparenting of orphaned child processes to PID 1 (`init-sup`) upon parent exit.
+  - Non-blocking `WNOHANG` flag support in `wait` system call.
+  - Standard `waitpid(pid, status, options)` library function in userland libc.
+  - Non-blocking background job reaping (`&`) in shell before printing interactive prompts.
+  - Periodic supervisor reaping loop draining adopted zombie processes, preventing PSRAM-Exec slot exhaustion.
+- **Phase 2: POSIX Userland Tools & Observability Expansion (P0/P1)**:
+  - Implemented 9 new core Unix utilities, bringing the active userland suite to 44 binaries:
+    - `cp`: File copy with chunked streaming buffer transfer.
+    - `head`: Print first N lines from files or standard input (`-n N`).
+    - `tail`: Print last N lines using a circular ring buffer (`-n N`).
+    - `wc`: Multi-file line, word, and byte counter.
+    - `grep`: Substring pattern filtering over files or standard input.
+    - `df`: VFS disk usage, block sizes, and mount point statistics.
+    - `dmesg`: Userland viewer for kernel circular diagnostic buffer.
+    - `date`: Human-readable system uptime clock formatter.
+    - `sync`: Explicit VFS buffer flush utility to persistent flash storage.
+  - Added diagnostic circular ring buffer with microsecond timestamps and system version identifiers to ProcFs.
+- **Phase 3: Security Hardening & SSH Engine (P1)**:
+  - Hardware TRNG generation of Ed25519 host key on initial boot.
+  - Persistence of host key seed in dedicated NVS flash storage (`ESHK` format with CRC checksum), guaranteeing stable host identity across reboots.
+  - Standalone RFC 4648 Base64 encoding and decoding engine.
+  - Passwordless public-key SSH login support for `ssh-ed25519` keys via authorized keys file with constant-time verification.
+  - SSH connection timeouts: 60-second authentication deadline and 300-second session idle timeout.
+  - Clean TCP socket teardown on remote FIN/RST (`CloseWait`), immediately releasing shell sessions and channels.
+  - 6 new automated regression test suites, bringing test coverage to 128 tests passing with 100% success rate.
+- **Phase 4 & 5: Bus Drivers, BLE & OTA Resilience (P2)**:
+  - Verified I2C and full-duplex SPI master drivers with userland ioctl memory protection.
+  - Non-blocking BLE advertising integrated directly into the network task service loop.
+  - Fixed OTA state machine image validation logic (correctly transitioning candidate images to `VALID` state).
+  - Enhanced firmware image header verification with minimum size and segment bounds checks.
+  - Bootloader slot and candidate verification state detection and notice printed during startup.
+- **Phase 6: Advanced Capabilities & Feature Gates (P3)**:
+  - Verified clean release compilation with dual-core symmetric multiprocessing (SMP) and memory protection unit (PMS) feature gates.
+
+### [0.1.0] - 2026-08-06
+
+#### Added
+- Initial release of EspressoOS monolithic `no_std` kernel in Rust for ESP32-S3.
+- Preemptive multitasking driven by SYSTIMER at 100 Hz.
+- 8 MB Octal PSRAM support with 1 MB reserved for PSRAM execution pool (32 slots of 16 KB).
+- Dynamic ELF binary loader with literal fixup table relocations.
+- Persistent EspFs log-structured filesystem on NOR flash.
+- Wi-Fi Station (STA) driver with `smoltcp` IPv4 TCP/UDP stack and DHCP client.
+- SSH-2.0 daemon supporting curve25519-sha256, ssh-ed25519, and chacha20-poly1305@openssh.com.
+- Interactive `/bin/sh` shell with multi-stage pipelines and redirection.
+- Initial suite of 35 userland binaries in `/bin/*`.
 
 ---
 

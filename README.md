@@ -68,7 +68,7 @@ EspressoOS boots and executes on physical ESP32-S3 hardware. The system acquires
 - **Kernel Boot**: HAL initialization, 128 KB SRAM internal heap, VFS mounts (`/` EspFs on flash, `/tmp` ramfs in RAM, `/dev` devfs, `/proc` procfs, `/sys` sysfs).
 - **PSRAM Execution (PSRAM-Exec)**: 8 MB PSRAM carve-up with 1 MB reserved for code execution on the instruction bus (`0x42800000`). Boot selftest verifies instruction execution in PSRAM returning code 42.
 - **Preemptive Multitasking & Process Management**: Scheduler driven by SYSTIMER at 100 Hz, 50 ms quantum, and Model B in-ISR context switching. Automatic reparenting of orphan processes to PID 1 (`init-sup`) and non-blocking zombie reaping with `waitpid` (`WNOHANG`), preventing PSRAM-Exec slot leaks.
-- **Dynamic Userland ELFs**: Suite of **92 ELF binaries** executing from PSRAM with `argv` support, 32-slot pool, and load-time relocation without requiring Position Independent Code (PIC).
+- **Dynamic Userland ELFs**: Suite of **98 ELF binaries** executing from PSRAM with `argv` support, 32-slot pool, and load-time relocation without requiring Position Independent Code (PIC).
 - **Wi-Fi + TCP/IP Stack**: Station (STA) mode, DHCP client, and active TCP/IP stack (`smoltcp`). Runtime Wi-Fi scan, connect, and disconnect. Credential persistence in flash NVS sector 0 (`0x0000_9000`).
 - **Hardened SSH-2.0 Server**: Server supporting curve25519-sha256, ssh-ed25519, and chacha20-poly1305@openssh.com.
   - **Persistent Host Key**: Unique Ed25519 host key generated via hardware TRNG on first boot and persisted to NVS flash sector 1 (`0x0000_A000`, `ESHK` format).
@@ -366,7 +366,7 @@ cargo build --release
 cargo run --release
 ```
 
-`kernel/build.rs` automatically compiles all 92 userland binaries, generates relocation fixup tables, and embeds them into the kernel image.
+`kernel/build.rs` automatically compiles all 98 userland binaries, generates relocation fixup tables, and embeds them into the kernel image.
 
 ### 4.4 Feature Gates
 
@@ -393,7 +393,7 @@ The following feature flags are available in `kernel/Cargo.toml`:
 ========================================
 [kernel] flash: 16 MB usable
 [kernel] / mounted on flash (espfs)
-[kernel] userland: 92 binaries installed/updated in EspFs
+[kernel] userland: 98 binaries installed/updated in EspFs
 [net] connecting to SSID '...'
 [net] associated with AP; negotiating DHCP...
 [net] IP = 192.168.2.146
@@ -407,7 +407,7 @@ EspressoOS:~$
 
 ## 5. Complete Command Reference
 
-The system includes **92 userland binaries** in `/bin` alongside shell built-in commands.
+The system includes **98 userland binaries** in `/bin` alongside shell built-in commands.
 
 ### Userland Binaries (`/bin/*`)
 
@@ -503,6 +503,12 @@ The system includes **92 userland binaries** in `/bin` alongside shell built-in 
 90. **`mktemp`**: Generate unique temporary files and directories in `/tmp` (`mktemp [-d] [template]`).
 91. **`ipcs`**: Report active Inter-Process Communication facilities, named pipes, and socket endpoints (`ipcs`).
 92. **`timeout`**: Run a command with an execution time limit and SIGKILL termination (`timeout <duration_sec> <command> [args...]`).
+93. **`ed`**: Interactive Unix line-oriented text editor (`ed [file]`).
+94. **`id`**: Print real and effective user and group identification numbers (`id [-u | -g | -un | -gn]`).
+95. **`su`**: Switch session user identity and spawn user shell environment (`su [username]`).
+96. **`tar`**: Tape archive manipulation tool supporting creation, listing, and extraction (`tar [-c | -t | -x] <archive> [files...]`).
+97. **`vmstat`**: Virtual memory, process scheduling, and system activity reporter (`vmstat [-d delay] [count]`).
+98. **`diff`**: Compare files line-by-line with unified difference indicators (`diff <file1> <file2>`).
 
 ---
 
@@ -535,7 +541,7 @@ Each serial or SSH connection runs an isolated session (`SessionChannel`) with d
 
 ### Userland programs (`/bin`)
 
-See the full 92-binary list in §5. Selected usage:
+See the full 98-binary list in §5. Selected usage:
 
 ```text
 EspressoOS:~$ /bin/echo hola mundo | /bin/cat
@@ -752,6 +758,15 @@ Flash layout defined in `kernel/src/prelude.rs` and `partitions.csv`:
   - Implemented command execution timeout supervisor (`timeout`) enforcing time limits and process termination.
   - Expanded userland application suite to **92 dynamic ELF binaries**, all linking within their 16 KB PSRAM execution slot budgets.
   - Expanded automated test suite to **171 tests passing with 100% success rate** covering Gregorian date math, crontab parsing, mktemp entropy suffixes, strings extraction, and timeout status codes.
+- **Phase 13: Interactive Text Editor, Archival Tooling & POSIX User Administration (P1/P2/P3)**:
+  - Implemented interactive Unix line editor (`ed`) supporting line-by-line file inspection, text buffer appending, deletion, and persistent storage saving.
+  - Implemented user and group identity reporter (`id`) resolving real and effective numerical and symbolic user and group identifiers.
+  - Implemented session user switching utility (`su`) allowing seamless invocation of interactive shells with specified user credentials.
+  - Implemented standard USTAR tape archiver (`tar`) supporting multi-file archive creation, table of contents inspection, and byte-precise file extraction.
+  - Implemented virtual memory and system activity observer (`vmstat`) reporting thread scheduling frequencies, memory allocations, and tick rates.
+  - Implemented line-by-line file difference comparator (`diff`) detecting divergences with unified difference indicators.
+  - Expanded userland application suite to **98 dynamic ELF binaries**, all linking within their 16 KB PSRAM execution slot budgets.
+  - Expanded automated test suite to **177 tests passing with 100% success rate** covering USTAR block layouts, diff comparisons, line editor buffers, and user identity mappings.
 
 ### [0.1.0] - 2026-08-06
 

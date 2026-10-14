@@ -28,6 +28,8 @@ const APPS: &[&str] = &[
     "time", "readlink", "tty", "groups", "hostid", "dc",
     "sysctl", "nproc", "logname", "chroot", "pr", "bc",
     "fmt", "tsort", "csplit", "nice", "dos2unix", "unix2dos", "export",
+    "who", "w", "base32", "chown", "chmod", "host",
+    "unlink", "truncate", "usleep", "pathchk", "reset", "column",
 ];
 
 // Every binary links at the same address and the loader relocates it into whatever

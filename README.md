@@ -68,7 +68,7 @@ EspressoOS boots and executes on physical ESP32-S3 hardware. The system acquires
 - **Kernel Boot**: HAL initialization, 128 KB SRAM internal heap, VFS mounts (`/` EspFs on flash, `/tmp` ramfs in RAM, `/dev` devfs, `/proc` procfs, `/sys` sysfs).
 - **PSRAM Execution (PSRAM-Exec)**: 8 MB PSRAM carve-up with 1 MB reserved for code execution on the instruction bus (`0x42800000`). Boot selftest verifies instruction execution in PSRAM returning code 42.
 - **Preemptive Multitasking & Process Management**: Scheduler driven by SYSTIMER at 100 Hz, 50 ms quantum, and Model B in-ISR context switching. Automatic reparenting of orphan processes to PID 1 (`init-sup`) and non-blocking zombie reaping with `waitpid` (`WNOHANG`), preventing PSRAM-Exec slot leaks.
-- **Dynamic Userland ELFs**: Suite of **153 ELF binaries** executing from PSRAM with `argv` support, 32-slot pool, and load-time relocation without requiring Position Independent Code (PIC).
+- **Dynamic Userland ELFs**: Suite of **159 ELF binaries** executing from PSRAM with `argv` support, 32-slot pool, and load-time relocation without requiring Position Independent Code (PIC).
 - **Wi-Fi + TCP/IP Stack**: Station (STA) mode, DHCP client, and active TCP/IP stack (`smoltcp`). Runtime Wi-Fi scan, connect, and disconnect. Credential persistence in flash NVS sector 0 (`0x0000_9000`).
 - **Hardened SSH-2.0 Server**: Server supporting curve25519-sha256, ssh-ed25519, and chacha20-poly1305@openssh.com.
   - **Persistent Host Key**: Unique Ed25519 host key generated via hardware TRNG on first boot and persisted to NVS flash sector 1 (`0x0000_A000`, `ESHK` format).
@@ -565,6 +565,12 @@ The system includes **122 userland binaries** in `/bin` alongside shell built-in
 151. **`pathchk`**: Validate whether file pathnames are portable and conform to POSIX path and component limits (`pathchk [-p] [-P] PATH...`).
 152. **`reset`**: Reinitialize terminal modes, restore text attributes, and clear the terminal screen (`reset`).
 153. **`column`**: Columnate lists and format text streams or files into aligned tables (`column [-t] [-s DELIM] [FILE...]`).
+154. **`users`**: Print the login names of currently logged-in users space-separated (`users`).
+155. **`chgrp`**: Change group ownership of files and directories (`chgrp [-R] [-v] GROUP FILE...`).
+156. **`ln`**: Create hard or symbolic links to target files (`ln [-s] [-f] [-v] TARGET LINK_NAME`).
+157. **`sum`**: Compute 16-bit checksum and block count of files using BSD or System V algorithms (`sum [-r | -s] [FILE...]`).
+158. **`dd`**: Copy and convert raw data blocks between files or streams with block counts and offsets (`dd [if=FILE] [of=FILE] [bs=BYTES] [count=N] [skip=N] [seek=N]`).
+159. **`size`**: Inspect and display ELF binary section and segment sizes (`size [-d | -x] [FILE...]`).
 
 ---
 
@@ -597,7 +603,7 @@ Each serial or SSH connection runs an isolated session (`SessionChannel`) with d
 
 ### Userland programs (`/bin`)
 
-See the full 153-binary list in §5. Selected usage:
+See the full 159-binary list in §5. Selected usage:
 
 ```text
 EspressoOS:~$ /bin/echo hola mundo | /bin/cat
@@ -621,7 +627,7 @@ EspressoOS/
 │   └── config.toml          # Xtensa target config and espflash runner setup
 ├── bootloader/              # Second-stage bootloader skeleton (future phase)
 ├── kernel/                  # EspressoOS Kernel crate
-│   ├── build.rs             # Build script: compiles 153 userland ELFs and generates fixup tables
+│   ├── build.rs             # Build script: compiles 159 userland ELFs and generates fixup tables
 │   ├── src/
 │   │   ├── arch/xtensa/     # Context switch, ISR vectors, and SYSTIMER driver
 │   │   ├── drivers/         # Drivers: gpio, uart, i2c, spi, crypto, flash, power, ble, wifi, ssh
@@ -638,7 +644,7 @@ EspressoOS/
 │   └── Cargo.toml
 ├── tools/                   # Partition generation tools and test scripts
 ├── userland/                # no_std userland workspace (executes from PSRAM)
-│   ├── apps/src/bin/        # Source code for 153 userland binaries (/bin/*)
+│   ├── apps/src/bin/        # Source code for 159 userland binaries (/bin/*)
 │   ├── libc/                # Userland base library: _start, syscall wrappers, allocator
 │   └── Cargo.toml
 ├── Cargo.lock               # Cargo workspace lockfile
@@ -917,6 +923,16 @@ Flash layout defined in `kernel/src/prelude.rs` and `partitions.csv`:
   - Implemented tabular stream and file columnation utility (`column`) aligning variable-width fields into formatted tables with custom delimiter support.
   - Expanded userland application suite to **153 dynamic ELF binaries**, all linking within their 16 KB PSRAM execution slot budgets.
   - Expanded automated test suite to **224 tests passing with 100% success rate** covering memory zone parsing, path portability rules, truncation sizing suffixes, microsecond time conversions, and table columnation.
+- **Phase 23: Disk I/O Introspection, Block Duplication, ELF Sizing & User/Link Management (P1/P2/P3)**:
+  - Implemented kernel storage I/O statistics introspection (`/proc/diskstats`) in the virtual process filesystem providing standard Linux-compliant sector counts, read/write I/O operations, and device metrics.
+  - Implemented active user reporting utility (`users`) enumerating active login sessions and printing logged-in user names.
+  - Implemented POSIX file group ownership administration utility (`chgrp`) supporting recursive directory traversals, numeric GIDs, and group names.
+  - Implemented standard link creation utility (`ln`) creating symbolic and hard links with force overwriting and verbosity options.
+  - Implemented classic 16-bit checksum and block count utility (`sum`) implementing both BSD right-rotation and System V accumulation checksum algorithms.
+  - Implemented low-level data duplicator and block transfer utility (`dd`) supporting custom block sizes (`bs`, `ibs`, `obs`), block skips, seek offsets, block counts, and transfer telemetry reporting.
+  - Implemented ELF binary inspector utility (`size`) parsing ELF headers, section headers, and program load segments to report text, data, and bss allocations in decimal and hexadecimal.
+  - Expanded userland application suite to **159 dynamic ELF binaries**, all linking within their 16 KB PSRAM execution slot budgets.
+  - Expanded automated test suite to **228 tests passing with 100% success rate** covering diskstats parsing, block multiplier parsing, BSD/SysV checksum math, and ELF segment sizing.
 
 ### [0.1.0] - 2026-08-06
 

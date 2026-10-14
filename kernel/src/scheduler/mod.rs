@@ -394,7 +394,9 @@ pub fn run() -> ! {
 
 fn idle_entry(_arg: usize) {
     loop {
-        core::hint::spin_loop();
+        unsafe {
+            core::arch::asm!("waiti 0");
+        }
         yield_now();
     }
 }

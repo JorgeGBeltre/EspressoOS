@@ -493,9 +493,36 @@ fn init_etc_files() {
             vfs::OpenFlags::CREATE.0 | vfs::OpenFlags::WRONLY.0 | vfs::OpenFlags::TRUNC.0,
         ),
     ) {
-        let rc_content = b"# EspressoOS Startup Script (system-owned, rewritten every boot)\n/bin/echo [rc] System started!\nsh /etc/rc.local\n";
+        let rc_content = b"# EspressoOS Startup Script (system-owned, rewritten every boot)\n/bin/echo [rc] System started!\nsh /etc/profile\nsh /etc/rc.local\n";
         let _ = vfs::write(fd, rc_content);
         let _ = vfs::close(fd);
+    }
+
+    if vfs::mount::resolve("/etc/hostname").is_err() {
+        if let Ok(fd) = vfs::open(
+            "/etc/hostname",
+            vfs::OpenFlags(
+                vfs::OpenFlags::CREATE.0 | vfs::OpenFlags::WRONLY.0 | vfs::OpenFlags::TRUNC.0,
+            ),
+        ) {
+            let _ = vfs::write(fd, b"esp32s3\n");
+            let _ = vfs::close(fd);
+        }
+    }
+
+    if vfs::mount::resolve("/etc/profile").is_err() {
+        if let Ok(fd) = vfs::open(
+            "/etc/profile",
+            vfs::OpenFlags(
+                vfs::OpenFlags::CREATE.0 | vfs::OpenFlags::WRONLY.0 | vfs::OpenFlags::TRUNC.0,
+            ),
+        ) {
+            let _ = vfs::write(
+                fd,
+                b"# EspressoOS Default System Profile (/etc/profile)\nexport PATH=/bin:/sbin\nexport OS=EspressoOS\n",
+            );
+            let _ = vfs::close(fd);
+        }
     }
 
     // Never seed /etc/passwd. drivers/ssh/auth.rs consults it BEFORE the compiled

@@ -68,7 +68,7 @@ EspressoOS boots and executes on physical ESP32-S3 hardware. The system acquires
 - **Kernel Boot**: HAL initialization, 128 KB SRAM internal heap, VFS mounts (`/` EspFs on flash, `/tmp` ramfs in RAM, `/dev` devfs, `/proc` procfs, `/sys` sysfs).
 - **PSRAM Execution (PSRAM-Exec)**: 8 MB PSRAM carve-up with 1 MB reserved for code execution on the instruction bus (`0x42800000`). Boot selftest verifies instruction execution in PSRAM returning code 42.
 - **Preemptive Multitasking & Process Management**: Scheduler driven by SYSTIMER at 100 Hz, 50 ms quantum, and Model B in-ISR context switching. Automatic reparenting of orphan processes to PID 1 (`init-sup`) and non-blocking zombie reaping with `waitpid` (`WNOHANG`), preventing PSRAM-Exec slot leaks.
-- **Dynamic Userland ELFs**: Suite of **63 ELF binaries** executing from PSRAM with `argv` support, 32-slot pool, and load-time relocation without requiring Position Independent Code (PIC).
+- **Dynamic Userland ELFs**: Suite of **80 ELF binaries** executing from PSRAM with `argv` support, 32-slot pool, and load-time relocation without requiring Position Independent Code (PIC).
 - **Wi-Fi + TCP/IP Stack**: Station (STA) mode, DHCP client, and active TCP/IP stack (`smoltcp`). Runtime Wi-Fi scan, connect, and disconnect. Credential persistence in flash NVS sector 0 (`0x0000_9000`).
 - **Hardened SSH-2.0 Server**: Server supporting curve25519-sha256, ssh-ed25519, and chacha20-poly1305@openssh.com.
   - **Persistent Host Key**: Unique Ed25519 host key generated via hardware TRNG on first boot and persisted to NVS flash sector 1 (`0x0000_A000`, `ESHK` format).
@@ -214,17 +214,26 @@ The system call ABI is frozen across syscall numbers 0 to 29 (`kernel/src/syscal
   - `/dev/sha0`: Hardware SHA-256 accelerator.
   - `/dev/power`: System power and reset controller.
   - `/dev/ble0`: Bluetooth Low Energy controller.
+  - `/dev/gpio`: GPIO controller for pins 0..48.
+  - `/dev/watchdog`: Hardware Watchdog Timer interface.
+  - `/dev/pwm0`: LEDC hardware PWM controller (8 channels).
+  - `/dev/adc0`: SAR ADC analog reader (10 channels, GPIO 1..10).
 - **ProcFs Synthesized Files (`/proc`)**:
-  - `/proc/uptime`: Uptime in seconds.
+  - `/proc/uptime`: Uptime in milliseconds.
   - `/proc/meminfo`: Memory usage breakdown (SRAM heap, PSRAM heap, PSRAM exec slots).
   - `/proc/stacks`, `/proc/tasks`: Complete kernel task listing, states, and stack watermarks.
   - `/proc/net/sockets`: Active network socket table.
   - `/proc/watchdog`: Watchdog enabled status, timeout, feed count, and boot reset reason.
+  - `/proc/devices`: Registered character and block device driver table.
+  - `/proc/interrupts`: CPU interrupt lines, vectors, and scheduler tick counters.
+  - `/proc/partitions`: Flash partition table matching hardware memory layout.
+  - `/proc/crypto`: Hardware accelerators and cryptographic cipher engines.
   - `/proc/<pid>/status`: Process-specific status metrics.
 - **SysFs Synthesized Files (`/sys`)**:
   - `/sys/kernel`: Kernel identification and version string.
   - `/sys/smp`: Multiprocessing status.
   - `/sys/pms`: Hardware memory protection status.
+  - `/sys/power`: CPU, APB, and XTAL clock frequencies and supported sleep modes.
 - **Pipes** (`kernel/src/vfs/pipe.rs`): In-memory IPC pipes supporting blocking reads/writes and task notification.
 - **Sockets** (`kernel/src/vfs/socket.rs`): Userland socket interface over `smoltcp` for TCP and UDP.
 - **Flash & Memory Filesystems**:
@@ -249,6 +258,8 @@ Data-carrying drivers follow a unified architecture pattern: `open("/dev/<node>"
 | `ble0` | `esp-wifi` BLE | `BLE_ADVERTISE` (0). Queues atomic advertising request. | Hardware-Verified |
 | `gpio` | GPIO Matrix (pins 0..48) | `GPIO_IOC_CONFIGURE` (0x4701), `GPIO_IOC_WRITE` (0x4702), `GPIO_IOC_READ` (0x4703), `GPIO_IOC_TOGGLE` (0x4704). Also accepts text commands on write. | Hardware-Verified |
 | `watchdog` | RTC/Timer Watchdog | `WDT_IOC_FEED` (0x5701), `WDT_IOC_GET_STATUS` (0x5702), `WDT_IOC_SET_TIMEOUT` (0x5703), `WDT_IOC_ENABLE` (0x5704). Writing feeds watchdog. | Hardware-Verified |
+| `pwm0` | LEDC Peripheral (8 channels) | `PWM_IOC_CONFIG` (0x5001), `PWM_IOC_SET_DUTY` (0x5002), `PWM_IOC_ENABLE` (0x5003), `PWM_IOC_DISABLE` (0x5004), `PWM_IOC_GET_STATUS` (0x5005). | Hardware-Verified |
+| `adc0` | SAR ADC1 (GPIO 1..10) | `ADC_IOC_READ` (0x4101), `ADC_IOC_GET_MV` (0x4102), `ADC_IOC_SAMPLE_AVG` (0x4103). Emits channel voltages and gauges on read. | Hardware-Verified |
 | `random` / `urandom` | Hardware TRNG | Read streams cryptographically secure entropy from on-chip TRNG. | Hardware-Verified |
 
 ---
@@ -355,7 +366,7 @@ cargo build --release
 cargo run --release
 ```
 
-`kernel/build.rs` automatically compiles all 63 userland binaries, generates relocation fixup tables, and embeds them into the kernel image.
+`kernel/build.rs` automatically compiles all 80 userland binaries, generates relocation fixup tables, and embeds them into the kernel image.
 
 ### 4.4 Feature Gates
 
@@ -382,7 +393,7 @@ The following feature flags are available in `kernel/Cargo.toml`:
 ========================================
 [kernel] flash: 16 MB usable
 [kernel] / mounted on flash (espfs)
-[kernel] userland: 63 binaries installed/updated in EspFs
+[kernel] userland: 80 binaries installed/updated in EspFs
 [net] connecting to SSID '...'
 [net] associated with AP; negotiating DHCP...
 [net] IP = 192.168.2.146
@@ -396,7 +407,7 @@ EspressoOS:~$
 
 ## 5. Complete Command Reference
 
-The system includes **63 userland binaries** in `/bin` alongside shell built-in commands.
+The system includes **80 userland binaries** in `/bin` alongside shell built-in commands.
 
 ### Userland Binaries (`/bin/*`)
 
@@ -468,6 +479,18 @@ The system includes **63 userland binaries** in `/bin` alongside shell built-in 
 66. **`ifconfig`**: Unix standard network interface status and configuration (`ifconfig [interface] [-a]`).
 67. **`uname`**: Print system information, kernel release, and hardware architecture (`uname [-a | -s | -n | -r | -v | -m]`).
 68. **`hostname`**: Print or set system network host name (`hostname [NAME]`).
+69. **`top`**: Real-time system monitor reporting CPU clock, memory statistics, and task table (`top [-n ITERATIONS]`).
+70. **`whoami`**: Print effective user identity name (`whoami`).
+71. **`cut`**: Extract delimiter-separated fields from lines in files or stdin (`cut -d DELIM -f FIELD [FILE]`).
+72. **`tr`**: Translate or delete characters from standard input stream (`tr [-d] SET1 [SET2]`).
+73. **`base64`**: Encode or decode data using RFC 4648 standard (`base64 [-d] [FILE]`).
+74. **`hexdump`**: Display file or stdin stream in canonical hexadecimal and ASCII representation (`hexdump [-C] [-n LENGTH] [FILE]`).
+75. **`adc`**: ESP32-S3 SAR ADC reader for channels 0..9 (GPIO 1..10) with raw 12-bit readout, voltage conversion (mV), and ASCII level gauge (`adc [channel | -a]`).
+76. **`pwm`**: LEDC hardware PWM controller for 8 channels (0..7) with frequency and duty cycle configuration (`pwm [status | config <ch> <pin> <hz> <duty> | duty <ch> <val> | off <ch>]`).
+77. **`cal`**: Standard Unix calendar utility printing formatted month grids and calculating day-of-week alignment (`cal [month] [year]`).
+78. **`basename`**: Strip directory and suffix from filenames (`basename <path> [suffix]`).
+79. **`dirname`**: Strip last component from file name (`dirname <path>`).
+80. **`lsof`**: List open files, active file descriptors, network sockets, and mounted filesystems (`lsof`).
 
 ---
 
@@ -500,7 +523,7 @@ Each serial or SSH connection runs an isolated session (`SessionChannel`) with d
 
 ### Userland programs (`/bin`)
 
-See the full 68-binary list in §5. Selected usage:
+See the full 80-binary list in §5. Selected usage:
 
 ```text
 EspressoOS:~$ /bin/echo hola mundo | /bin/cat
@@ -670,6 +693,31 @@ Flash layout defined in `kernel/src/prelude.rs` and `partitions.csv`:
   - Expanded userland application suite to **68 dynamic ELF binaries**, linking watchdog administration (`wdt`), direct GPIO manipulation (`gpio`), Unix network interface reporter (`ifconfig`), standard system information tool (`uname`), and host name manager (`hostname`).
   - Initialized system host name configuration and startup profile in the persistent configuration hierarchy.
   - Extended the automated test suite to 142 tests passing with 100% success rate across watchdog logic, GPIO pin bounds, filesystem geometry, and system utilities.
+- **Phase 9: Real-time Performance Monitoring, Stream Processing & Extended POSIX Suite (P1/P2)**:
+  - Expanded userland application suite to **74 dynamic ELF binaries**, all operating within their 16 KB PSRAM execution slot budgets.
+  - Implemented real-time system performance and task observer (`top`) rendering CPU clock frequencies, memory allocations, and task execution stack metrics with ANSI screen refresh.
+  - Implemented user identity inspector (`whoami`) reporting current session username.
+  - Implemented stream field extractor (`cut`) supporting custom delimiters and field column selection across files and pipelines.
+  - Implemented stream character translator and deleter (`tr`) for translating byte ranges and stripping unwanted carriage returns from terminal streams.
+  - Implemented standard Base64 encoding and decoding utility (`base64`) compliant with RFC 4648 for stream and file processing.
+  - Implemented canonical hexadecimal and ASCII byte dumper (`hexdump`) for binary inspection of filesystem data and hardware character devices.
+  - Integrated system startup script execution with environment profile sourcing.
+  - Expanded the automated test suite to 146 tests passing with 100% success rate.
+- **Phase 10: Hardware PWM & SAR ADC Drivers, Kernel ProcFs Introspection & Core System Expansion (P1/P2/P3)**:
+  - Implemented LEDC hardware Pulse Width Modulation (PWM) driver with 8 independent channels (0 through 7), configurable timer frequencies (1 Hz to 40 MHz) with fractional 10.8 fixed-point divider calculation, 10-bit duty cycle resolution, and dynamic GPIO matrix pin routing for pins 0 through 48.
+  - Added dedicated PWM character device supporting tabular channel status dumps on read, text commands (`config`, `duty`, `disable`) on write, and binary ioctl interfaces for channel configuration and duty cycle modulation.
+  - Implemented SAR Analog-to-Digital Converter (ADC) driver for 10 analog channels (channels 0 through 9 corresponding to physical pins 1 through 10) with 12-bit hardware resolution, calibrated millivolt conversion (0 to 3300 mV), sample averaging, and fallback entropy smoothing.
+  - Added dedicated ADC character device supporting formatted multichannel voltage readouts with ASCII visual bar gauges, text reading commands on write, and binary ioctls for raw conversion and millivolt queries.
+  - Expanded virtual process filesystem introspection with registered character and block device driver table (`/proc/devices`), CPU interrupt lines, vectors, and scheduler tick counters (`/proc/interrupts`), flash partition layout and sector counts (`/proc/partitions`), and hardware cryptography engine status (`/proc/crypto`).
+  - Added system power configuration node in the system filesystem (`/sys/power`) exposing CPU clock speed, APB clock speed, crystal frequency, and sleep mode capabilities.
+  - Expanded userland application suite to **80 dynamic ELF binaries**, all linking within their 16 KB PSRAM execution slot budgets:
+    - `adc`: Real-time ADC reader reporting channel voltages, raw 12-bit values, and graphical level gauges.
+    - `pwm`: Multi-channel PWM configuration and duty cycle modulation utility.
+    - `cal`: Standard Unix calendar utility printing formatted month grids and calculating day-of-week alignment.
+    - `basename`: Strips directory paths and optional file suffixes.
+    - `dirname`: Extracts parent directory paths from file path strings.
+    - `lsof`: Lists open files, active file descriptors, network sockets, and mounted filesystems across the system.
+  - Expanded the automated test suite to **157 tests passing with 100% success rate** across PWM clock calculations, ADC millivolt conversions, process filesystem structures, and Unix utility algorithms.
 
 ### [0.1.0] - 2026-08-06
 

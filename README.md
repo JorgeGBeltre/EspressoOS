@@ -68,7 +68,7 @@ EspressoOS boots and executes on physical ESP32-S3 hardware. The system acquires
 - **Kernel Boot**: HAL initialization, 128 KB SRAM internal heap, VFS mounts (`/` EspFs on flash, `/tmp` ramfs in RAM, `/dev` devfs, `/proc` procfs, `/sys` sysfs).
 - **PSRAM Execution (PSRAM-Exec)**: 8 MB PSRAM carve-up with 1 MB reserved for code execution on the instruction bus (`0x42800000`). Boot selftest verifies instruction execution in PSRAM returning code 42.
 - **Preemptive Multitasking & Process Management**: Scheduler driven by SYSTIMER at 100 Hz, 50 ms quantum, and Model B in-ISR context switching. Automatic reparenting of orphan processes to PID 1 (`init-sup`) and non-blocking zombie reaping with `waitpid` (`WNOHANG`), preventing PSRAM-Exec slot leaks.
-- **Dynamic Userland ELFs**: Suite of **104 ELF binaries** executing from PSRAM with `argv` support, 32-slot pool, and load-time relocation without requiring Position Independent Code (PIC).
+- **Dynamic Userland ELFs**: Suite of **110 ELF binaries** executing from PSRAM with `argv` support, 32-slot pool, and load-time relocation without requiring Position Independent Code (PIC).
 - **Wi-Fi + TCP/IP Stack**: Station (STA) mode, DHCP client, and active TCP/IP stack (`smoltcp`). Runtime Wi-Fi scan, connect, and disconnect. Credential persistence in flash NVS sector 0 (`0x0000_9000`).
 - **Hardened SSH-2.0 Server**: Server supporting curve25519-sha256, ssh-ed25519, and chacha20-poly1305@openssh.com.
   - **Persistent Host Key**: Unique Ed25519 host key generated via hardware TRNG on first boot and persisted to NVS flash sector 1 (`0x0000_A000`, `ESHK` format).
@@ -516,6 +516,12 @@ The system includes **98 userland binaries** in `/bin` alongside shell built-in 
 102. **`arp`**: Display or manipulate the system ARP neighbor table (`arp [-a] [-n] [-d <host>] [-s <host> <hw_addr>]`).
 103. **`logrotate`**: Rotate and archive system log files based on file size thresholds (`logrotate [-f] [-v] [logfile]`).
 104. **`fbtest`**: Framebuffer graphics diagnostic and rendering test utility (`fbtest`).
+105. **`nc`**: Arbitrary TCP connection and listener utility (`nc [-l] [-p port] [host] [port]`).
+106. **`printenv`**: Print all or specific environment variable values (`printenv [VAR...]`).
+107. **`comm`**: Compare two sorted files line by line with three-column output (`comm [-123] <file1> <file2>`).
+108. **`nl`**: Number lines of files with right-aligned formatting (`nl [-ba] [-bt] [-w width] [file]`).
+109. **`fold`**: Wrap input lines to fit in a specified column width (`fold [-w width] [-s] [file]`).
+110. **`split`**: Split a file into fixed-size byte or line pieces (`split [-b bytes] [-l lines] [file [prefix]]`).
 
 ---
 
@@ -548,7 +554,7 @@ Each serial or SSH connection runs an isolated session (`SessionChannel`) with d
 
 ### Userland programs (`/bin`)
 
-See the full 104-binary list in §5. Selected usage:
+See the full 110-binary list in §5. Selected usage:
 
 ```text
 EspressoOS:~$ /bin/echo hola mundo | /bin/cat
@@ -572,7 +578,7 @@ EspressoOS/
 │   └── config.toml          # Xtensa target config and espflash runner setup
 ├── bootloader/              # Second-stage bootloader skeleton (future phase)
 ├── kernel/                  # EspressoOS Kernel crate
-│   ├── build.rs             # Build script: compiles 104 userland ELFs and generates fixup tables
+│   ├── build.rs             # Build script: compiles 110 userland ELFs and generates fixup tables
 │   ├── src/
 │   │   ├── arch/xtensa/     # Context switch, ISR vectors, and SYSTIMER driver
 │   │   ├── drivers/         # Drivers: gpio, uart, i2c, spi, crypto, flash, power, ble, wifi, ssh
@@ -785,6 +791,16 @@ Flash layout defined in `kernel/src/prelude.rs` and `partitions.csv`:
   - Implemented framebuffer graphics diagnostic utility validating screen dimensions, drawing test patterns, inverting pixels, and verifying display buffers.
   - Expanded userland application suite to **104 dynamic ELF binaries**, all linking within their 16 KB PSRAM execution slot budgets.
   - Expanded automated test suite to **183 tests passing with 100% success rate** covering framebuffer geometry calculations, arithmetic expression evaluation, POSIX conditional operators, diff patching, log rotation thresholds, and ARP table parsing.
+- **Phase 15: Network Socket Plumbing, Terminal Introspection & Core Data Processing Tools (P1/P2/P3)**:
+  - Added network device traffic statistics and routing table entries to the virtual process filesystem.
+  - Implemented arbitrary TCP network connection and listener tool (`nc`) supporting client socket connections, server port listening, and bidirectional data streaming.
+  - Implemented environment variable introspection utility (`printenv`) querying active session variables or displaying specific values.
+  - Implemented sorted file comparison utility (`comm`) outputting unique and shared lines across three text columns with line suppression options.
+  - Implemented line numbering utility (`nl`) formatting input streams with right-aligned line numbers and customizable padding.
+  - Implemented text folding utility (`fold`) wrapping long lines to fixed column widths with whitespace-aware word boundaries.
+  - Implemented file splitting utility (`split`) dividing large files into byte-size or line-count segments with alphabetic suffixes.
+  - Expanded userland application suite to **110 dynamic ELF binaries**, all linking within their 16 KB PSRAM execution slot budgets.
+  - Expanded automated test suite to **189 tests passing with 100% success rate** covering sorted file column generation, line numbering padding, text folding, chunk suffix calculation, environment lookups, and network device metrics.
 
 ### [0.1.0] - 2026-08-06
 

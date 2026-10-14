@@ -2264,6 +2264,125 @@ class TestPhase16Logic(unittest.TestCase):
         self.assertEqual(format_ms(1200), "1.200s")
         self.assertEqual(format_ms(0), "0.000s")
 
+    def test_procfs_sys_hierarchy(self):
+        sys_params = {
+            "kernel.hostname": "/proc/sys/kernel/hostname",
+            "kernel.osrelease": "/proc/sys/kernel/osrelease",
+            "kernel.ostype": "/proc/sys/kernel/ostype",
+            "kernel.version": "/proc/sys/kernel/version",
+            "vm.free_ram": "/proc/sys/vm/free_ram",
+            "vm.total_ram": "/proc/sys/vm/total_ram",
+        }
+        for k, v in sys_params.items():
+            self.assertTrue(v.startswith("/proc/sys/"))
+            parts = k.split('.')
+            self.assertEqual(len(parts), 2)
+            self.assertEqual(f"/proc/sys/{parts[0]}/{parts[1]}", v)
+
+    def test_bc_infix_calculator(self):
+        def eval_bc(expr: str) -> int:
+            def precedence(op: str) -> int:
+                if op in ('+', '-'): return 1
+                if op in ('*', '/', '%'): return 2
+                if op == '^': return 3
+                return 0
+
+            tokens = []
+            i = 0
+            while i < len(expr):
+                if expr[i].isspace():
+                    i += 1
+                elif expr[i] in '()+-*/%^':
+                    tokens.append(expr[i])
+                    i += 1
+                elif expr[i].isdigit():
+                    num = 0
+                    while i < len(expr) and expr[i].isdigit():
+                        num = num * 10 + int(expr[i])
+                        i += 1
+                    tokens.append(num)
+                else:
+                    i += 1
+
+            vals = []
+            ops = []
+            for t in tokens:
+                if isinstance(t, int):
+                    vals.append(t)
+                elif t == '(':
+                    ops.append(t)
+                elif t == ')':
+                    while ops and ops[-1] != '(':
+                        op = ops.pop()
+                        b, a = vals.pop(), vals.pop()
+                        if op == '+': vals.append(a + b)
+                        elif op == '-': vals.append(a - b)
+                        elif op == '*': vals.append(a * b)
+                        elif op == '/': vals.append(a // b)
+                        elif op == '%': vals.append(a % b)
+                        elif op == '^': vals.append(a ** b)
+                    if ops and ops[-1] == '(':
+                        ops.pop()
+                else:
+                    while ops and ops[-1] != '(' and precedence(ops[-1]) >= precedence(t):
+                        op = ops.pop()
+                        b, a = vals.pop(), vals.pop()
+                        if op == '+': vals.append(a + b)
+                        elif op == '-': vals.append(a - b)
+                        elif op == '*': vals.append(a * b)
+                        elif op == '/': vals.append(a // b)
+                        elif op == '%': vals.append(a % b)
+                        elif op == '^': vals.append(a ** b)
+                    ops.append(t)
+
+            while ops:
+                op = ops.pop()
+                if op in '()': continue
+                b, a = vals.pop(), vals.pop()
+                if op == '+': vals.append(a + b)
+                elif op == '-': vals.append(a - b)
+                elif op == '*': vals.append(a * b)
+                elif op == '/': vals.append(a // b)
+                elif op == '%': vals.append(a % b)
+                elif op == '^': vals.append(a ** b)
+
+            return vals[-1] if vals else 0
+
+        self.assertEqual(eval_bc("2 + 3 * 4"), 14)
+        self.assertEqual(eval_bc("(10 + 20) / 3"), 10)
+        self.assertEqual(eval_bc("2 ^ 8"), 256)
+        self.assertEqual(eval_bc("100 - 5 * 10"), 50)
+        self.assertEqual(eval_bc("17 % 5"), 2)
+
+    def test_pr_pagination_geometry(self):
+        page_len = 66
+        body_len = page_len - 10
+        self.assertEqual(body_len, 56)
+        # 120 lines spans 3 pages (56 + 56 + 8)
+        pages = (120 + body_len - 1) // body_len
+        self.assertEqual(pages, 3)
+
+    def test_nproc_logic(self):
+        def parse_nproc(smp_content: str, all_flag: bool) -> int:
+            if all_flag:
+                return 2
+            if "smp: enabled" in smp_content:
+                return 2
+            return 1
+
+        self.assertEqual(parse_nproc("smp: enabled\ncore: 0\n", False), 2)
+        self.assertEqual(parse_nproc("smp: disabled\ncore: 0\n", False), 1)
+        self.assertEqual(parse_nproc("smp: disabled\ncore: 0\n", True), 2)
+
+    def test_chroot_execution_path(self):
+        def resolve_cmd(cmd: str) -> str:
+            if cmd.startswith('/'):
+                return cmd
+            return f"/bin/{cmd}"
+
+        self.assertEqual(resolve_cmd("sh"), "/bin/sh")
+        self.assertEqual(resolve_cmd("/usr/bin/env"), "/usr/bin/env")
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

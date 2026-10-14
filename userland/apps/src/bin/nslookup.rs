@@ -2,7 +2,8 @@
 #![no_main]
 
 use libc::{
-    arg, close, connect, print, println, read, setsockopt_timeout, sockaddr_in, socket, write,
+    arg, close, connect, open, print, println, read, setsockopt_timeout, sockaddr_in, socket, write,
+    O_RDONLY,
 };
 
 fn parse_ip(s: &str) -> Option<[u8; 4]> {
@@ -34,6 +35,66 @@ fn parse_ip(s: &str) -> Option<[u8; 4]> {
     }
     ip[3] = val as u8;
     Some(ip)
+}
+
+fn check_etc_hosts(host: &str) -> Option<[u8; 4]> {
+    let fd = open("/etc/hosts", O_RDONLY);
+    if fd < 0 {
+        return None;
+    }
+    let mut buf = [0u8; 512];
+    let n = read(fd as i32, &mut buf);
+    let _ = close(fd as i32);
+    if n <= 0 {
+        return None;
+    }
+    let s = core::str::from_utf8(&buf[..n as usize]).ok()?;
+    for line in s.split('\n') {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        let mut parts = trimmed.split_whitespace();
+        if let Some(ip_str) = parts.next() {
+            for h in parts {
+                if h.eq_ignore_ascii_case(host) {
+                    return parse_ip(ip_str);
+                }
+            }
+        }
+    }
+    None
+}
+
+fn get_nameserver_ip() -> Option<[u8; 4]> {
+    let fd = open("/etc/resolv.conf", O_RDONLY);
+    if fd < 0 {
+        return None;
+    }
+    let mut buf = [0u8; 256];
+    let n = read(fd as i32, &mut buf);
+    let _ = close(fd as i32);
+    if n <= 0 {
+        return None;
+    }
+    let s = core::str::from_utf8(&buf[..n as usize]).ok()?;
+    for line in s.split('\n') {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        let mut parts = trimmed.split_whitespace();
+        if let Some(tok) = parts.next() {
+            if tok == "nameserver" {
+                if let Some(ip_str) = parts.next() {
+                    if let Some(ip) = parse_ip(ip_str) {
+                        return Some(ip);
+                    }
+                }
+            }
+        }
+    }
+    None
 }
 
 fn print_dec(mut n: usize) {
@@ -75,18 +136,33 @@ pub extern "C" fn main(argc: i32, argv: *const *const u8) -> i32 {
     }
 
     let host = unsafe { arg(argv, 1) };
-    let server_str = if argc > 2 {
-        unsafe { arg(argv, 2) }
-    } else {
-        "8.8.8.8"
-    };
 
-    let server_ip = match parse_ip(server_str) {
-        Some(ip) => ip,
-        None => {
-            println!("nslookup: invalid DNS server IP '{}'", server_str);
-            return 1;
+    // 1. Check static mapping in /etc/hosts
+    if let Some(ip) = check_etc_hosts(host) {
+        println!("Server:    /etc/hosts");
+        println!("Address:   127.0.0.1:53\n");
+        println!("Non-authoritative answer:");
+        print!("Name:      ");
+        println!("{}", host);
+        print!("Address:   ");
+        print_ip(&ip);
+        println!("");
+        return 0;
+    }
+
+    let (server_ip, server_str) = if argc > 2 {
+        let s = unsafe { arg(argv, 2) };
+        match parse_ip(s) {
+            Some(ip) => (ip, s),
+            None => {
+                println!("nslookup: invalid DNS server IP '{}'", s);
+                return 1;
+            }
         }
+    } else if let Some(ip) = get_nameserver_ip() {
+        (ip, "")
+    } else {
+        ([8, 8, 8, 8], "8.8.8.8")
     };
 
     let fd = socket(2, 2, 0); // AF_INET, SOCK_DGRAM
@@ -105,7 +181,13 @@ pub extern "C" fn main(argc: i32, argv: *const *const u8) -> i32 {
     };
 
     if connect(fd as i32, &server_addr) < 0 {
-        println!("nslookup: failed to connect UDP socket to {}:53", server_str);
+        print!("nslookup: failed to connect UDP socket to ");
+        if !server_str.is_empty() {
+            print!("{}", server_str);
+        } else {
+            print_ip(&server_ip);
+        }
+        println!(":53");
         close(fd as i32);
         return 1;
     }
@@ -172,9 +254,16 @@ pub extern "C" fn main(argc: i32, argv: *const *const u8) -> i32 {
     }
 
     print!("Server:    ");
-    println!("{}", server_str);
-    print!("Address:   ");
-    print!("{}", server_str);
+    if !server_str.is_empty() {
+        println!("{}", server_str);
+        print!("Address:   ");
+        print!("{}", server_str);
+    } else {
+        print_ip(&server_ip);
+        println!("");
+        print!("Address:   ");
+        print_ip(&server_ip);
+    }
     println!(":53\n");
     println!("Non-authoritative answer:");
     print!("Name:      ");

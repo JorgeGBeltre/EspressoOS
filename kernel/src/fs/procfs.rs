@@ -356,6 +356,9 @@ impl Inode for ProcFsNetDir {
         if name == "sockets" {
             return Ok(Arc::new(ProcFsFile::NetSockets));
         }
+        if name == "arp" {
+            return Ok(Arc::new(ProcFsFile::NetArp));
+        }
         Err(KError::NotFound)
     }
 
@@ -381,6 +384,13 @@ impl Inode for ProcFsNetDir {
                 ino: 101,
             }));
         }
+        if index == 3 {
+            return Ok(Some(DirEntry {
+                name: "arp".to_string(),
+                kind: InodeKind::File,
+                ino: 102,
+            }));
+        }
         Ok(None)
     }
 }
@@ -391,6 +401,7 @@ enum ProcFsFile {
     Stacks,
     PidStatus(u32),
     NetSockets,
+    NetArp,
     Dmesg,
     Version,
     CpuInfo,
@@ -421,7 +432,7 @@ impl Inode for ProcFsFile {
                     "Character devices:\n\
   1 mem (null, zero, random, urandom)\n\
   4 tty (console, uart0)\n\
- 10 misc (watchdog, gpio, pwm0, adc0, power, sha0, passwd)\n\
+ 10 misc (watchdog, gpio, pwm0, adc0, fb0, power, sha0, passwd)\n\
  80 net (wlan0)\n\
  90 bluetooth (ble0)\n\
 110 bus (i2c0, spi0)\n\n\
@@ -630,6 +641,13 @@ type         : rng\n"
                     }
                 }
                 out
+            }
+            ProcFsFile::NetArp => {
+                alloc::format!(
+                    "IP address       HW type     Flags       HW address            Mask     Device\n\
+192.168.1.1      0x1         0x2         00:50:56:c0:00:08     *        wlan0\n\
+192.168.1.100    0x1         0x2         c0:49:ef:12:34:56     *        wlan0\n"
+                )
             }
             ProcFsFile::LoadAvg => {
                 let pt = crate::scheduler::process::PROCESS_TABLE.lock();

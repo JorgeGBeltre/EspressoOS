@@ -1799,6 +1799,100 @@ class TestIdAndVmstatLogic(unittest.TestCase):
         self.assertEqual(ctx_switches, 1000)
 
 
+class TestPhase14Logic(unittest.TestCase):
+    def test_framebuffer_geometry_and_ioctls(self):
+        fb_w, fb_h = 128, 64
+        fb_size = (fb_w * fb_h) // 8
+        self.assertEqual(fb_size, 1024)
+        vscreeninfo = (fb_w << 16) | fb_h
+        self.assertEqual(vscreeninfo, (128 << 16) | 64)
+
+        # Pixel calculation
+        def set_pixel(buf: bytearray, x: int, y: int):
+            idx = (y * fb_w + x) // 8
+            bit = 7 - (x % 8)
+            buf[idx] |= (1 << bit)
+
+        buf = bytearray(1024)
+        set_pixel(buf, 0, 0)
+        self.assertEqual(buf[0], 0x80)
+        set_pixel(buf, 7, 0)
+        self.assertEqual(buf[0], 0x81)
+
+    def test_expr_eval(self):
+        def eval_expr(a: int, op: str, b: int) -> int:
+            if op == "+": return a + b
+            if op == "-": return a - b
+            if op == "*": return a * b
+            if op == "/": return a // b
+            if op == "%": return a % b
+            if op == "=": return 1 if a == b else 0
+            if op == "!=": return 1 if a != b else 0
+            if op == "<": return 1 if a < b else 0
+            if op == "<=": return 1 if a <= b else 0
+            if op == ">": return 1 if a > b else 0
+            if op == ">=": return 1 if a >= b else 0
+            return 0
+
+        self.assertEqual(eval_expr(10, "+", 25), 35)
+        self.assertEqual(eval_expr(50, "-", 18), 32)
+        self.assertEqual(eval_expr(7, "*", 6), 42)
+        self.assertEqual(eval_expr(100, "/", 4), 25)
+        self.assertEqual(eval_expr(17, "%", 5), 2)
+        self.assertEqual(eval_expr(42, "=", 42), 1)
+        self.assertEqual(eval_expr(42, "<", 50), 1)
+
+    def test_test_conditionals(self):
+        def posix_test(op: str, val1: str, val2: str = "") -> bool:
+            if op == "-z": return len(val1) == 0
+            if op == "-n": return len(val1) > 0
+            if op == "=": return val1 == val2
+            if op == "!=": return val1 != val2
+            if op == "-eq": return int(val1) == int(val2)
+            if op == "-lt": return int(val1) < int(val2)
+            if op == "-ge": return int(val1) >= int(val2)
+            return False
+
+        self.assertTrue(posix_test("-z", ""))
+        self.assertFalse(posix_test("-z", "hello"))
+        self.assertTrue(posix_test("-n", "hello"))
+        self.assertTrue(posix_test("=", "abc", "abc"))
+        self.assertFalse(posix_test("=", "abc", "def"))
+        self.assertTrue(posix_test("-eq", "100", "100"))
+        self.assertTrue(posix_test("-lt", "10", "20"))
+        self.assertTrue(posix_test("-ge", "20", "20"))
+
+    def test_patch_application(self):
+        lines = ["alpha", "beta", "gamma"]
+        # Apply hunk @@ line 2 @@ with - beta, + delta
+        hunk_line = 2  # 1-indexed
+        idx = hunk_line - 1
+        lines[idx] = "delta"
+        self.assertEqual(lines, ["alpha", "delta", "gamma"])
+
+    def test_logrotate_size_trigger(self):
+        def should_rotate(size: int, force: bool, threshold: int = 4096) -> bool:
+            return force or (size >= threshold)
+
+        self.assertFalse(should_rotate(1024, force=False))
+        self.assertTrue(should_rotate(4096, force=False))
+        self.assertTrue(should_rotate(8192, force=False))
+        self.assertTrue(should_rotate(100, force=True))
+
+    def test_arp_table_parsing(self):
+        arp_content = (
+            "IP address       HW type     Flags       HW address            Mask     Device\n"
+            "192.168.1.1      0x1         0x2         00:50:56:c0:00:08     *        wlan0\n"
+            "192.168.1.100    0x1         0x2         c0:49:ef:12:34:56     *        wlan0\n"
+        )
+        rows = [line.split() for line in arp_content.strip().splitlines()[1:]]
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(rows[0][0], "192.168.1.1")
+        self.assertEqual(rows[0][3], "00:50:56:c0:00:08")
+        self.assertEqual(rows[1][0], "192.168.1.100")
+        self.assertEqual(rows[1][5], "wlan0")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
 

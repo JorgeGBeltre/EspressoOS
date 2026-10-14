@@ -2,6 +2,7 @@ pub mod adc;
 pub mod ble;
 pub mod crypto;
 pub mod device;
+pub mod fb;
 pub mod flash;
 pub mod gpio;
 pub mod i2c;

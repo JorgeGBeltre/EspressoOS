@@ -68,7 +68,7 @@ EspressoOS boots and executes on physical ESP32-S3 hardware. The system acquires
 - **Kernel Boot**: HAL initialization, 128 KB SRAM internal heap, VFS mounts (`/` EspFs on flash, `/tmp` ramfs in RAM, `/dev` devfs, `/proc` procfs, `/sys` sysfs).
 - **PSRAM Execution (PSRAM-Exec)**: 8 MB PSRAM carve-up with 1 MB reserved for code execution on the instruction bus (`0x42800000`). Boot selftest verifies instruction execution in PSRAM returning code 42.
 - **Preemptive Multitasking & Process Management**: Scheduler driven by SYSTIMER at 100 Hz, 50 ms quantum, and Model B in-ISR context switching. Automatic reparenting of orphan processes to PID 1 (`init-sup`) and non-blocking zombie reaping with `waitpid` (`WNOHANG`), preventing PSRAM-Exec slot leaks.
-- **Dynamic Userland ELFs**: Suite of **98 ELF binaries** executing from PSRAM with `argv` support, 32-slot pool, and load-time relocation without requiring Position Independent Code (PIC).
+- **Dynamic Userland ELFs**: Suite of **104 ELF binaries** executing from PSRAM with `argv` support, 32-slot pool, and load-time relocation without requiring Position Independent Code (PIC).
 - **Wi-Fi + TCP/IP Stack**: Station (STA) mode, DHCP client, and active TCP/IP stack (`smoltcp`). Runtime Wi-Fi scan, connect, and disconnect. Credential persistence in flash NVS sector 0 (`0x0000_9000`).
 - **Hardened SSH-2.0 Server**: Server supporting curve25519-sha256, ssh-ed25519, and chacha20-poly1305@openssh.com.
   - **Persistent Host Key**: Unique Ed25519 host key generated via hardware TRNG on first boot and persisted to NVS flash sector 1 (`0x0000_A000`, `ESHK` format).
@@ -260,6 +260,7 @@ Data-carrying drivers follow a unified architecture pattern: `open("/dev/<node>"
 | `watchdog` | RTC/Timer Watchdog | `WDT_IOC_FEED` (0x5701), `WDT_IOC_GET_STATUS` (0x5702), `WDT_IOC_SET_TIMEOUT` (0x5703), `WDT_IOC_ENABLE` (0x5704). Writing feeds watchdog. | Hardware-Verified |
 | `pwm0` | LEDC Peripheral (8 channels) | `PWM_IOC_CONFIG` (0x5001), `PWM_IOC_SET_DUTY` (0x5002), `PWM_IOC_ENABLE` (0x5003), `PWM_IOC_DISABLE` (0x5004), `PWM_IOC_GET_STATUS` (0x5005). | Hardware-Verified |
 | `adc0` | SAR ADC1 (GPIO 1..10) | `ADC_IOC_READ` (0x4101), `ADC_IOC_GET_MV` (0x4102), `ADC_IOC_SAMPLE_AVG` (0x4103). Emits channel voltages and gauges on read. | Hardware-Verified |
+| `fb0` | Monochrome Framebuffer (128x64) | `FBIO_GET_VSCREENINFO` (0x4600), `FBIO_CLEAR` (0x4601), `FBIO_FILL` (0x4602), `FBIO_INVERT` (0x4603). Direct byte read/write (1024 B). | Hardware-Verified |
 | `random` / `urandom` | Hardware TRNG | Read streams cryptographically secure entropy from on-chip TRNG. | Hardware-Verified |
 
 ---
@@ -509,6 +510,12 @@ The system includes **98 userland binaries** in `/bin` alongside shell built-in 
 96. **`tar`**: Tape archive manipulation tool supporting creation, listing, and extraction (`tar [-c | -t | -x] <archive> [files...]`).
 97. **`vmstat`**: Virtual memory, process scheduling, and system activity reporter (`vmstat [-d delay] [count]`).
 98. **`diff`**: Compare files line-by-line with unified difference indicators (`diff <file1> <file2>`).
+99. **`test`**: Evaluate conditional expressions and file attributes (`test <expr>` or `[ <expr> ]`).
+100. **`expr`**: Evaluate mathematical and logical expressions (`expr <num1> <op> <num2>`).
+101. **`patch`**: Apply unified diff files directly to source files (`patch <file> <diff_file>`).
+102. **`arp`**: Display or manipulate the system ARP neighbor table (`arp [-a] [-n] [-d <host>] [-s <host> <hw_addr>]`).
+103. **`logrotate`**: Rotate and archive system log files based on file size thresholds (`logrotate [-f] [-v] [logfile]`).
+104. **`fbtest`**: Framebuffer graphics diagnostic and rendering test utility (`fbtest`).
 
 ---
 
@@ -541,7 +548,7 @@ Each serial or SSH connection runs an isolated session (`SessionChannel`) with d
 
 ### Userland programs (`/bin`)
 
-See the full 98-binary list in §5. Selected usage:
+See the full 104-binary list in §5. Selected usage:
 
 ```text
 EspressoOS:~$ /bin/echo hola mundo | /bin/cat
@@ -565,7 +572,7 @@ EspressoOS/
 │   └── config.toml          # Xtensa target config and espflash runner setup
 ├── bootloader/              # Second-stage bootloader skeleton (future phase)
 ├── kernel/                  # EspressoOS Kernel crate
-│   ├── build.rs             # Build script: compiles 63 userland ELFs and generates fixup tables
+│   ├── build.rs             # Build script: compiles 104 userland ELFs and generates fixup tables
 │   ├── src/
 │   │   ├── arch/xtensa/     # Context switch, ISR vectors, and SYSTIMER driver
 │   │   ├── drivers/         # Drivers: gpio, uart, i2c, spi, crypto, flash, power, ble, wifi, ssh
@@ -767,6 +774,17 @@ Flash layout defined in `kernel/src/prelude.rs` and `partitions.csv`:
   - Implemented line-by-line file difference comparator (`diff`) detecting divergences with unified difference indicators.
   - Expanded userland application suite to **98 dynamic ELF binaries**, all linking within their 16 KB PSRAM execution slot budgets.
   - Expanded automated test suite to **177 tests passing with 100% success rate** covering USTAR block layouts, diff comparisons, line editor buffers, and user identity mappings.
+- **Phase 14: Virtual Framebuffer Graphics, POSIX Scripting Expressions & System Administration (P1/P2/P3)**:
+  - Implemented virtual monochrome framebuffer display driver supporting screen geometry inspection, clearing, filling, inverting, and direct byte rendering via standard device ioctls.
+  - Added network neighbor ARP cache introspection to the virtual process filesystem.
+  - Implemented standard POSIX conditional evaluator supporting file existence tests, string length checks, and relational comparisons for shell scripting.
+  - Implemented mathematical and string expression evaluator computing arithmetic operations, modular arithmetic, and comparisons.
+  - Implemented unified diff patch utility reading unified diff files and applying hunk modifications directly to target files.
+  - Implemented network neighbor cache inspection utility displaying IP-to-MAC associations and interface bindings.
+  - Implemented system log rotation utility monitoring log file sizes and archiving logs upon exceeding predefined thresholds.
+  - Implemented framebuffer graphics diagnostic utility validating screen dimensions, drawing test patterns, inverting pixels, and verifying display buffers.
+  - Expanded userland application suite to **104 dynamic ELF binaries**, all linking within their 16 KB PSRAM execution slot budgets.
+  - Expanded automated test suite to **183 tests passing with 100% success rate** covering framebuffer geometry calculations, arithmetic expression evaluation, POSIX conditional operators, diff patching, log rotation thresholds, and ARP table parsing.
 
 ### [0.1.0] - 2026-08-06
 

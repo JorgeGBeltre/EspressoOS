@@ -21,6 +21,7 @@ const APPS: &[&str] = &[
     "mkfifo", "cmp", "sort", "uniq", "logger", "xargs",
     "cron", "watch", "strings", "mktemp", "ipcs", "timeout",
     "ed", "id", "su", "tar", "vmstat", "diff",
+    "test", "expr", "patch", "arp", "logrotate", "fbtest",
 ];
 
 // Every binary links at the same address and the loader relocates it into whatever

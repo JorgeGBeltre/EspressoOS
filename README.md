@@ -68,7 +68,7 @@ EspressoOS boots and executes on physical ESP32-S3 hardware. The system acquires
 - **Kernel Boot**: HAL initialization, 128 KB SRAM internal heap, VFS mounts (`/` EspFs on flash, `/tmp` ramfs in RAM, `/dev` devfs, `/proc` procfs, `/sys` sysfs).
 - **PSRAM Execution (PSRAM-Exec)**: 8 MB PSRAM carve-up with 1 MB reserved for code execution on the instruction bus (`0x42800000`). Boot selftest verifies instruction execution in PSRAM returning code 42.
 - **Preemptive Multitasking & Process Management**: Scheduler driven by SYSTIMER at 100 Hz, 50 ms quantum, and Model B in-ISR context switching. Automatic reparenting of orphan processes to PID 1 (`init-sup`) and non-blocking zombie reaping with `waitpid` (`WNOHANG`), preventing PSRAM-Exec slot leaks.
-- **Dynamic Userland ELFs**: Suite of **116 ELF binaries** executing from PSRAM with `argv` support, 32-slot pool, and load-time relocation without requiring Position Independent Code (PIC).
+- **Dynamic Userland ELFs**: Suite of **122 ELF binaries** executing from PSRAM with `argv` support, 32-slot pool, and load-time relocation without requiring Position Independent Code (PIC).
 - **Wi-Fi + TCP/IP Stack**: Station (STA) mode, DHCP client, and active TCP/IP stack (`smoltcp`). Runtime Wi-Fi scan, connect, and disconnect. Credential persistence in flash NVS sector 0 (`0x0000_9000`).
 - **Hardened SSH-2.0 Server**: Server supporting curve25519-sha256, ssh-ed25519, and chacha20-poly1305@openssh.com.
   - **Persistent Host Key**: Unique Ed25519 host key generated via hardware TRNG on first boot and persisted to NVS flash sector 1 (`0x0000_A000`, `ESHK` format).
@@ -367,7 +367,7 @@ cargo build --release
 cargo run --release
 ```
 
-`kernel/build.rs` automatically compiles all 98 userland binaries, generates relocation fixup tables, and embeds them into the kernel image.
+`kernel/build.rs` automatically compiles all 122 userland binaries, generates relocation fixup tables, and embeds them into the kernel image.
 
 ### 4.4 Feature Gates
 
@@ -394,7 +394,7 @@ The following feature flags are available in `kernel/Cargo.toml`:
 ========================================
 [kernel] flash: 16 MB usable
 [kernel] / mounted on flash (espfs)
-[kernel] userland: 98 binaries installed/updated in EspFs
+[kernel] userland: 122 binaries installed/updated in EspFs
 [net] connecting to SSID '...'
 [net] associated with AP; negotiating DHCP...
 [net] IP = 192.168.2.146
@@ -408,7 +408,7 @@ EspressoOS:~$
 
 ## 5. Complete Command Reference
 
-The system includes **98 userland binaries** in `/bin` alongside shell built-in commands.
+The system includes **122 userland binaries** in `/bin` alongside shell built-in commands.
 
 ### Userland Binaries (`/bin/*`)
 
@@ -528,6 +528,12 @@ The system includes **98 userland binaries** in `/bin` alongside shell built-in 
 114. **`expand`**: Convert tabs to spaces (`expand [-t tabstop] [file]`).
 115. **`unexpand`**: Convert spaces to tabs (`unexpand [-t tabstop] [file]`).
 116. **`factor`**: Print prime factors of numbers (`factor [number...]`).
+117. **`seq`**: Print sequences of numbers with configurable increments, custom separators, and zero-padding (`seq [-s sep] [-w] [first [incr]] last`).
+118. **`nohup`**: Run commands immune to hangups with output redirection to `nohup.out` (`nohup COMMAND [ARG...]`).
+119. **`shuf`**: Generate random permutations of lines, arguments, or number ranges using Fisher-Yates shuffling (`shuf [-e] [-i lo-hi] [-n count] [file]`).
+120. **`od`**: Dump files in octal, character, hex, or decimal representations (`od [-b | -c | -x | -d | -o] [file...]`).
+121. **`realpath`**: Resolve and canonicalize relative file and directory paths against current working directory (`realpath [-q] [-s] file...`).
+122. **`cksum`**: Compute POSIX standard 32-bit CRC checksum and byte counts for files or standard input (`cksum [file...]`).
 
 ---
 
@@ -601,7 +607,7 @@ EspressoOS/
 │   └── Cargo.toml
 ├── tools/                   # Partition generation tools and test scripts
 ├── userland/                # no_std userland workspace (executes from PSRAM)
-│   ├── apps/src/bin/        # Source code for 63 userland binaries (/bin/*)
+│   ├── apps/src/bin/        # Source code for 122 userland binaries (/bin/*)
 │   ├── libc/                # Userland base library: _start, syscall wrappers, allocator
 │   └── Cargo.toml
 ├── Cargo.lock               # Cargo workspace lockfile
@@ -644,12 +650,12 @@ Flash layout defined in `kernel/src/prelude.rs` and `partitions.csv`:
 ## 9. Known Issues & Technical Debt
 
 1. **Light Sleep — REMOVED**: `power sleep` and the `POWER_SLEEP` ioctl were removed. esp-hal's `rtc.sleep_light()` hung the CPU on this hardware/HAL generation, a platform limitation rather than something fixable in this kernel. `power deep-sleep` and `power reboot` remain and cover the same use cases without that risk.
-2. **EspFs Compaction Limit**: EspFs log-structured compaction requires free flash space. Extremely low flash conditions may return a `NoSpace` error during compaction. Reviewed `partitions.csv`: the 16 MB flash map has **zero unallocated space at the tail** (`coredump` ends exactly at `0x1000000`); the only gap is ~60 KB between `otadata` and `factory`, required by the `app`-partition 64 KB alignment rule and not reclaimable for `fs`. Growing `fs` further would require shrinking `ota_0` (losing A/B OTA redundancy) or `coredump` (losing crash-dump capacity). `compact()` already fails with an honest `NoSpace` error instead of corrupting data (see `kernel/src/fs/espfs/mod.rs:360`); preserving sparse holes and coalescing chunks is documented debt.
+2. **EspFs Compaction Sparse Hole Preservation — FIXED**: Log-structured filesystem compaction previously materialized sparse holes as explicit zero-filled flash records and assigned distinct extent headers for every chunk, risking size expansion on heavily fragmented or sparse files. Compaction now actively inspects extent data buffers: all-zero chunk extents are omitted from flash writes, preserving sparse holes. If the file contains trailing zero regions or is completely sparse, a lightweight 8-byte `Truncate` log record is appended to preserve the logical file size upon reboot/replay without consuming data payload flash sectors.
 3. **Plaintext Password Storage — FIXED**: `/etc/passwd` stores `user:$s5$<salt-hex>$<hash-hex>` (SHA-256 of a 16-byte random salt + password), written by `/dev/passwd` (`kernel/src/drivers/passwd.rs`) so hashing occurs kernel-side. `ssh::auth::check_password` re-hashes and compares in constant time (`ct_eq`).
 4. **Shared SSH Host Key — FIXED**: The SSH daemon no longer relies on a shared hardcoded development seed. On initial boot, the kernel generates a cryptographically secure 32-byte Ed25519 seed from the hardware TRNG (`esp_hal::rng::Rng`) and stores it in dedicated NVS flash sector 1 (`0x0000_A000`, `ESHK` format + CRC). Subsequent boots read the stored seed, ensuring consistent host fingerprints without client host key rotation warnings.
 5. **Passwordless Public-Key Authentication — IMPLEMENTED**: OpenSSH `ssh-ed25519` keys configured in `/etc/authorized_keys` are dynamically resolved via VFS, base64-decoded, and verified in constant time (`ct_eq`), enabling passwordless SSH access.
 6. **Process Slot Leaks & Reparenting — FIXED**: Orphaned child processes are automatically reparented to `PID 1` (`init-sup`). `sys_wait` implements `WNOHANG` (exposed via `libc::waitpid`), and `/bin/sh` non-blockingly reaps background jobs (`&`), preventing PSRAM-Exec slot exhaustion.
-7. **Non-Reentrant Kernel Mutex**: Kernel `Mutex` disables CPU interrupts while held. Acquiring the same mutex twice on the same core will result in a silent dead lock. Audited: no call site in the tree currently re-enters the same `Mutex` while already holding it. Left as a documented invariant rather than converted to a recursive mutex.
+7. **Non-Reentrant Kernel Mutex Deadlock Diagnostics — FIXED**: Kernel `Mutex` disables CPU interrupts while held to protect shared resources across task contexts and interrupt handlers. To eliminate silent deadlocks when a mutex was inadvertently acquired twice on the same CPU core, atomic owner tracking was implemented. Re-entering an already held mutex on the same core is detected immediately in `lock()` and aborts with a descriptive panic indicating the core ID before spinning, preventing un-diagnosable hardware watchdog hangs. In `try_lock()`, same-core re-entrancy returns `None` safely.
 
 ---
 
@@ -817,6 +823,18 @@ Flash layout defined in `kernel/src/prelude.rs` and `partitions.csv`:
   - Implemented prime factorization utility (`factor`) decomposing large integer inputs into prime factors using trial division and 6k±1 optimization.
   - Expanded userland application suite to **116 dynamic ELF binaries**, all linking within their 16 KB PSRAM execution slot budgets.
   - Expanded automated test suite to **194 tests passing with 100% success rate** covering prime factor decomposition, string reversal, multi-file line merging, tab expansion, and boot command-line introspection.
+- **Phase 17: System Statistics Introspection, POSIX Integrity & Extended Command Toolchain (P1/P2/P3)**:
+  - Added system-wide CPU tick counters, context switch tallies, process counters, and boot timestamps (`/proc/stat`) to the virtual process filesystem.
+  - Implemented sequence generator utility (`seq`) supporting positive/negative increments, customizable separators, and equalized zero-padding.
+  - Implemented hangup-immune process execution utility (`nohup`) with automatic output redirection to non-volatile terminal logs.
+  - Implemented random permutation and shuffling tool (`shuf`) with Fisher-Yates entropy scrambling over input files, command arguments, and numeric ranges.
+  - Implemented classic octal/hex/decimal dump utility (`od`) formatting byte sequences with octal offsets and character escape visualization.
+  - Implemented absolute path canonicalization tool (`realpath`) resolving relative directory segments, parent traversal, and current working directory prefixes.
+  - Implemented POSIX standard 32-bit CRC checksum and byte count utility (`cksum`) compliant with IEEE Std 1003.1.
+  - Expanded userland application suite to **122 dynamic ELF binaries**, all linking within their 16 KB PSRAM execution slot budgets.
+  - Resolved EspFs compaction log size expansion by skipping all-zero chunks to preserve sparse holes and recording logical file sizes with lightweight truncation markers.
+  - Resolved non-reentrant kernel mutex hangs by implementing core-aware owner tracking and immediate panic diagnostics on same-core re-entry.
+  - Expanded automated test suite to **198 tests passing with 100% success rate** covering sequence generation, path canonicalization, POSIX checksum vectors, and CPU statistics introspection.
 
 ### [0.1.0] - 2026-08-06
 

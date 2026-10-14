@@ -116,6 +116,9 @@ impl Inode for ProcFsRoot {
         if name == "cmdline" {
             return Ok(Arc::new(ProcFsFile::Cmdline));
         }
+        if name == "stat" {
+            return Ok(Arc::new(ProcFsFile::Stat));
+        }
         if let Ok(pid) = name.parse::<u32>() {
             let pt = crate::scheduler::process::PROCESS_TABLE.lock();
             if pt.table.contains_key(&pid) {
@@ -266,16 +269,23 @@ impl Inode for ProcFsRoot {
                 ino: 19,
             }));
         }
+        if index == 20 {
+            return Ok(Some(DirEntry {
+                name: "stat".to_string(),
+                kind: InodeKind::File,
+                ino: 20,
+            }));
+        }
 
         let pids: Vec<u32> = {
             let pt = crate::scheduler::process::PROCESS_TABLE.lock();
             pt.table.keys().copied().collect()
         };
 
-        if index < 20 {
+        if index < 21 {
             return Ok(None);
         }
-        let pid_idx = index - 20;
+        let pid_idx = index - 21;
         if pid_idx < pids.len() {
             let pid = pids[pid_idx];
             return Ok(Some(DirEntry {
@@ -447,6 +457,7 @@ enum ProcFsFile {
     Filesystems,
     Ipc,
     Cmdline,
+    Stat,
 }
 
 impl Inode for ProcFsFile {
@@ -725,6 +736,33 @@ wlan0\t00000000\t0101A8C0\t0003\t0\t0\t0\t00000000\t0\t0\t0\n"
             }
             ProcFsFile::Cmdline => {
                 alloc::format!("console=ttyS0,115200 root=/dev/flash0 rw init=/bin/init quiet\n")
+            }
+            ProcFsFile::Stat => {
+                let ms = crate::arch::xtensa::timer::uptime_ms();
+                let user_ticks = (ms / 10) as u64;
+                let idle_ticks = (ms * 3 / 10) as u64;
+                let pt = crate::scheduler::process::PROCESS_TABLE.lock();
+                let total_procs = pt.next_pid.saturating_sub(1);
+                let running = pt.table.len();
+                alloc::format!(
+                    "cpu  {} 0 {} {} 0 0 0 0 0 0\n\
+                     cpu0 {} 0 {} {} 0 0 0 0 0 0\n\
+                     intr 0\n\
+                     ctxt {}\n\
+                     btime 1700000000\n\
+                     processes {}\n\
+                     procs_running {}\n\
+                     procs_blocked 0\n",
+                    user_ticks,
+                    user_ticks / 2,
+                    idle_ticks,
+                    user_ticks,
+                    user_ticks / 2,
+                    idle_ticks,
+                    user_ticks * 2,
+                    total_procs,
+                    running
+                )
             }
         };
 

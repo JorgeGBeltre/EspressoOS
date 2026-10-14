@@ -24,6 +24,7 @@ const APPS: &[&str] = &[
     "test", "expr", "patch", "arp", "logrotate", "fbtest",
     "nc", "printenv", "comm", "nl", "fold", "split",
     "yes", "rev", "paste", "expand", "unexpand", "factor",
+    "seq", "nohup", "shuf", "od", "realpath", "cksum",
 ];
 
 // Every binary links at the same address and the loader relocates it into whatever

@@ -1,11 +1,13 @@
 #![allow(dead_code)]
 
 pub mod auth;
+pub mod base64;
 pub mod channel;
 pub mod config;
 pub mod crypt;
 pub mod crypto_rng;
 pub mod crypto_smoke;
+pub mod host_key_store;
 pub mod kex;
 pub mod proto;
 
@@ -19,7 +21,7 @@ use crate::prelude::*;
 
 use channel::Channel;
 use crypt::Aead;
-use crypto_rng::HwRng;
+pub use crypto_rng::HwRng;
 use ed25519_dalek::SigningKey;
 use proto::{frame_packet, Reader, Writer};
 
@@ -70,6 +72,25 @@ impl HostKey {
         }
     }
 
+    /// Carga la clave de host de NVS flash si existe, o genera una nueva vía TRNG
+    /// y la persiste en flash (sector 1 de NVS, 0x0000_A000).
+    pub fn load_or_generate(rng: &mut HwRng) -> Self {
+        if let Some(seed) = host_key_store::load_seed() {
+            println!("[ssh] loaded persistent host key from NVS flash (0x0000_A000)");
+            return Self::from_seed(&seed);
+        }
+
+        println!("[ssh] generating persistent Ed25519 host key via TRNG...");
+        let mut seed = [0u8; 32];
+        rng.fill_bytes(&mut seed);
+        if let Err(e) = host_key_store::save_seed(&seed) {
+            println!("[ssh] WARN: failed to save host key to NVS ({:?}); using ephemeral", e);
+        } else {
+            println!("[ssh] host key persisted to NVS (0x0000_A000)");
+        }
+        Self::from_seed(&seed)
+    }
+
     fn signing(&self) -> &SigningKey {
         &self.signing
     }
@@ -82,30 +103,9 @@ impl HostKey {
         let blob = self.public_blob();
         let digest: [u8; 32] = Sha256::digest(&blob).into();
         let mut s = String::from("SHA256:");
-        s.push_str(&base64_nopad(&digest));
+        s.push_str(&base64::encode_nopad(&digest));
         s
     }
-}
-
-fn base64_nopad(data: &[u8]) -> String {
-    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = String::new();
-    let mut chunks = data.chunks(3);
-    for c in &mut chunks {
-        let b0 = c[0] as u32;
-        let b1 = *c.get(1).unwrap_or(&0) as u32;
-        let b2 = *c.get(2).unwrap_or(&0) as u32;
-        let n = (b0 << 16) | (b1 << 8) | b2;
-        out.push(ALPHABET[((n >> 18) & 63) as usize] as char);
-        out.push(ALPHABET[((n >> 12) & 63) as usize] as char);
-        if c.len() > 1 {
-            out.push(ALPHABET[((n >> 6) & 63) as usize] as char);
-        }
-        if c.len() > 2 {
-            out.push(ALPHABET[(n & 63) as usize] as char);
-        }
-    }
-    out
 }
 
 pub struct Connection {
@@ -139,11 +139,15 @@ pub struct Connection {
     closing: bool,
     closing_deadline: u64,
 
+    conn_start_ms: u64,
+    last_activity_ms: u64,
+
     rng: HwRng,
 }
 
 impl Connection {
     pub fn new(rng: HwRng) -> Self {
+        let now = crate::arch::xtensa::timer::uptime_ms();
         Self {
             state: State::VersionExchange,
             started: false,
@@ -166,6 +170,8 @@ impl Connection {
             channel: None,
             closing: false,
             closing_deadline: 0,
+            conn_start_ms: now,
+            last_activity_ms: now,
             rng,
         }
     }
@@ -193,6 +199,20 @@ impl Connection {
 
     pub fn pump<T: Transport>(&mut self, t: &mut T, host: &HostKey) -> KResult<()> {
         if self.state == State::Closed {
+            return Ok(());
+        }
+
+        let now = crate::arch::xtensa::timer::uptime_ms();
+
+        // Timeout de autenticación: cierra la conexión si no se autentica en 60s
+        if !self.authed && now >= self.conn_start_ms.saturating_add(60_000) {
+            self.disconnect(DISCONNECT_PROTOCOL_ERROR, "Authentication timeout (60s)")?;
+            return Ok(());
+        }
+
+        // Timeout de inactividad de sesión interactiva: desconecta tras 300s (5m) de silencio
+        if self.state == State::Session && now >= self.last_activity_ms.saturating_add(300_000) {
+            self.disconnect(DISCONNECT_BY_APPLICATION, "Session idle timeout (300s)")?;
             return Ok(());
         }
 
@@ -257,6 +277,7 @@ impl Connection {
                 Ok(0) => break,
                 Ok(n) => {
                     self.rx.extend_from_slice(&tmp[..n]);
+                    self.last_activity_ms = crate::arch::xtensa::timer::uptime_ms();
                     if n < tmp.len() {
                         break;
                     }

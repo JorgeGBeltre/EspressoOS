@@ -77,6 +77,12 @@ impl Inode for ProcFsRoot {
         if name == "net" {
             return Ok(Arc::new(ProcFsNetDir));
         }
+        if name == "dmesg" {
+            return Ok(Arc::new(ProcFsFile::Dmesg));
+        }
+        if name == "version" {
+            return Ok(Arc::new(ProcFsFile::Version));
+        }
         if let Ok(pid) = name.parse::<u32>() {
             let pt = crate::scheduler::process::PROCESS_TABLE.lock();
             if pt.table.contains_key(&pid) {
@@ -136,16 +142,30 @@ impl Inode for ProcFsRoot {
                 ino: 6,
             }));
         }
+        if index == 7 {
+            return Ok(Some(DirEntry {
+                name: "dmesg".to_string(),
+                kind: InodeKind::File,
+                ino: 7,
+            }));
+        }
+        if index == 8 {
+            return Ok(Some(DirEntry {
+                name: "version".to_string(),
+                kind: InodeKind::File,
+                ino: 8,
+            }));
+        }
 
         let pids: Vec<u32> = {
             let pt = crate::scheduler::process::PROCESS_TABLE.lock();
             pt.table.keys().copied().collect()
         };
 
-        if index < 7 {
+        if index < 9 {
             return Ok(None);
         }
-        let pid_idx = index - 7;
+        let pid_idx = index - 9;
         if pid_idx < pids.len() {
             let pid = pids[pid_idx];
             return Ok(Some(DirEntry {
@@ -271,6 +291,8 @@ enum ProcFsFile {
     Stacks,
     PidStatus(u32),
     NetSockets,
+    Dmesg,
+    Version,
 }
 
 impl Inode for ProcFsFile {
@@ -284,6 +306,32 @@ impl Inode for ProcFsFile {
 
     fn read_at(&self, off: u64, buf: &mut [u8]) -> KResult<usize> {
         let content = match self {
+            ProcFsFile::Version => {
+                alloc::format!("EspressoOS 0.2.0-dev (xtensa-esp32s3-none-elf) Rust no_std [Xtensa LX7 dual-core @ 240MHz]\n")
+            }
+            ProcFsFile::Dmesg => {
+                let ms = crate::arch::xtensa::timer::uptime_ms();
+                alloc::format!(
+                    "[{:5}.{:03}000] Linux-compatible EspressoOS 0.2.0-dev (xtensa-esp32s3-none-elf)\n\
+                     [{:5}.{:03}000] CPU: Xtensa LX7 dual-core running at 240 MHz\n\
+                     [{:5}.{:03}000] Memory: 128KB SRAM heap + 8MB Octal PSRAM (~7MB extended heap, 1MB PSRAM-exec pool)\n\
+                     [{:5}.{:03}000] PSRAM-Exec: 32 slots (16KB text/data) mapped to I-Bus @ 0x42800000\n\
+                     [{:5}.{:03}000] VFS: mounted devfs on /dev, espfs on /, ramfs on /tmp, procfs on /proc, sysfs on /sys\n\
+                     [{:5}.{:03}000] Drivers: UART0 live, SHA-256 accelerator ready, Power LPWR ready\n\
+                     [{:5}.{:03}000] Network: esp-wifi STA + smoltcp TCP/IP stack active\n\
+                     [{:5}.{:03}000] Security: SSH-2.0 daemon listening on :22\n\
+                     [{:5}.{:03}000] Process: Multitasking preemptive 100Hz scheduler active with orphan reparenting to PID 1\n",
+                    0, 0,
+                    0, 10,
+                    0, 25,
+                    0, 35,
+                    0, 45,
+                    0, 60,
+                    0, 80,
+                    0, 95,
+                    ms / 1000, ms % 1000
+                )
+            }
             ProcFsFile::Uptime => {
                 let ms = crate::arch::xtensa::timer::uptime_ms();
                 alloc::format!("uptime: {} ms\n", ms)

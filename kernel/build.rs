@@ -10,6 +10,8 @@ const APPS: &[&str] = &[
     "cwdtest", "mkdir", "touch", "rm", "write", "wifi", "ip", "nmcli", "ioctltest",
     "uptime", "free", "ps", "smp", "pms", "i2c", "spi",
     "sha256", "power", "ble", "reboot", "tcping", "kill", "passwd",
+    "cp", "head", "wc", "grep", "tail", "df",
+    "dmesg", "date", "sync",
 ];
 
 // Every binary links at the same address and the loader relocates it into whatever

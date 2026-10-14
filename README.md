@@ -68,7 +68,7 @@ EspressoOS boots and executes on physical ESP32-S3 hardware. The system acquires
 - **Kernel Boot**: HAL initialization, 128 KB SRAM internal heap, VFS mounts (`/` EspFs on flash, `/tmp` ramfs in RAM, `/dev` devfs, `/proc` procfs, `/sys` sysfs).
 - **PSRAM Execution (PSRAM-Exec)**: 8 MB PSRAM carve-up with 1 MB reserved for code execution on the instruction bus (`0x42800000`). Boot selftest verifies instruction execution in PSRAM returning code 42.
 - **Preemptive Multitasking & Process Management**: Scheduler driven by SYSTIMER at 100 Hz, 50 ms quantum, and Model B in-ISR context switching. Automatic reparenting of orphan processes to PID 1 (`init-sup`) and non-blocking zombie reaping with `waitpid` (`WNOHANG`), preventing PSRAM-Exec slot leaks.
-- **Dynamic Userland ELFs**: Suite of **141 ELF binaries** executing from PSRAM with `argv` support, 32-slot pool, and load-time relocation without requiring Position Independent Code (PIC).
+- **Dynamic Userland ELFs**: Suite of **153 ELF binaries** executing from PSRAM with `argv` support, 32-slot pool, and load-time relocation without requiring Position Independent Code (PIC).
 - **Wi-Fi + TCP/IP Stack**: Station (STA) mode, DHCP client, and active TCP/IP stack (`smoltcp`). Runtime Wi-Fi scan, connect, and disconnect. Credential persistence in flash NVS sector 0 (`0x0000_9000`).
 - **Hardened SSH-2.0 Server**: Server supporting curve25519-sha256, ssh-ed25519, and chacha20-poly1305@openssh.com.
   - **Persistent Host Key**: Unique Ed25519 host key generated via hardware TRNG on first boot and persisted to NVS flash sector 1 (`0x0000_A000`, `ESHK` format).
@@ -553,6 +553,18 @@ The system includes **122 userland binaries** in `/bin` alongside shell built-in
 139. **`dos2unix`**: Convert DOS/Windows CRLF line breaks to Unix LF line breaks (`dos2unix [-q] [file...]`).
 140. **`unix2dos`**: Convert Unix LF line breaks to DOS/Windows CRLF line breaks (`unix2dos [-q] [file...]`).
 141. **`export`**: Set export attribute for shell environment variables (`export [NAME[=VALUE]...]`).
+142. **`who`**: Show active user login sessions from the virtual process filesystem (`who [-H]`).
+143. **`w`**: Show who is logged on, system uptime, load averages, and active session processes (`w [-h]`).
+144. **`base32`**: Encode or decode files or standard input using standard RFC 4648 Base32 (`base32 [-d] [FILE]`).
+145. **`chown`**: Change file owner and group associations (`chown [-R] [-v] USER[:GROUP] FILE...`).
+146. **`chmod`**: Change file mode permissions bits and access rights (`chmod [-R] [-v] MODE FILE...`).
+147. **`host`**: Look up IP addresses and domain names using local host definitions and DNS queries (`host [-t TYPE] NAME [SERVER]`).
+148. **`unlink`**: Call the unlink system call directly to remove a single specified file (`unlink FILE`).
+149. **`truncate`**: Shrink or extend the size of a file to a specified byte length (`truncate [-s SIZE] [-c] FILE...`).
+150. **`usleep`**: Pause program execution for a specified duration in microseconds (`usleep MICROSECONDS`).
+151. **`pathchk`**: Validate whether file pathnames are portable and conform to POSIX path and component limits (`pathchk [-p] [-P] PATH...`).
+152. **`reset`**: Reinitialize terminal modes, restore text attributes, and clear the terminal screen (`reset`).
+153. **`column`**: Columnate lists and format text streams or files into aligned tables (`column [-t] [-s DELIM] [FILE...]`).
 
 ---
 
@@ -585,7 +597,7 @@ Each serial or SSH connection runs an isolated session (`SessionChannel`) with d
 
 ### Userland programs (`/bin`)
 
-See the full 141-binary list in §5. Selected usage:
+See the full 153-binary list in §5. Selected usage:
 
 ```text
 EspressoOS:~$ /bin/echo hola mundo | /bin/cat
@@ -609,7 +621,7 @@ EspressoOS/
 │   └── config.toml          # Xtensa target config and espflash runner setup
 ├── bootloader/              # Second-stage bootloader skeleton (future phase)
 ├── kernel/                  # EspressoOS Kernel crate
-│   ├── build.rs             # Build script: compiles 134 userland ELFs and generates fixup tables
+│   ├── build.rs             # Build script: compiles 153 userland ELFs and generates fixup tables
 │   ├── src/
 │   │   ├── arch/xtensa/     # Context switch, ISR vectors, and SYSTIMER driver
 │   │   ├── drivers/         # Drivers: gpio, uart, i2c, spi, crypto, flash, power, ble, wifi, ssh
@@ -626,7 +638,7 @@ EspressoOS/
 │   └── Cargo.toml
 ├── tools/                   # Partition generation tools and test scripts
 ├── userland/                # no_std userland workspace (executes from PSRAM)
-│   ├── apps/src/bin/        # Source code for 134 userland binaries (/bin/*)
+│   ├── apps/src/bin/        # Source code for 153 userland binaries (/bin/*)
 │   ├── libc/                # Userland base library: _start, syscall wrappers, allocator
 │   └── Cargo.toml
 ├── Cargo.lock               # Cargo workspace lockfile
@@ -887,8 +899,24 @@ Flash layout defined in `kernel/src/prelude.rs` and `partitions.csv`:
   - Implemented DOS-to-Unix line termination conversion utility (`dos2unix`) stripping carriage return characters from CRLF streams and files with in-place atomic replacement.
   - Implemented Unix-to-DOS line termination conversion utility (`unix2dos`) converting LF stream delimiters to CRLF sequences with in-place atomic file modification.
   - Implemented shell environment variable export utility (`export`) for runtime environment configuration and cleanly integrated system initialization hooks.
-  - Expanded userland application suite to **141 dynamic ELF binaries**, all linking within their 16 KB PSRAM execution slot budgets.
-  - Expanded automated test suite to **214 tests passing with 100% success rate** covering paragraph reflow geometries, topological ordering, context splitting, line break conversions, and persistent logging paths.
+- **Phase 21: Active Session Introspection, Base32 RFC Encoding, File Permissions & Host Resolution (P1/P2/P3)**:
+  - Implemented kernel active session tracking and exposed `/proc/sessions` in the virtual process filesystem reporting active session IDs, usernames, terminal lines, and connection status.
+  - Implemented standard Unix logged-in user inspection utility (`who`) displaying logged-on users, terminal assignments, and connection identifiers with optional table headers.
+  - Implemented comprehensive system uptime and session observer utility (`w`) reporting real system uptime, system load averages, and active session processes.
+  - Implemented RFC 4648 standard Base32 encoder and decoder utility (`base32`) supporting both stream encoding and decoding with standard 5-byte block padding.
+  - Implemented POSIX file ownership administration utility (`chown`) parsing user and group specifiers and applying ownership attributes to files.
+  - Implemented standard POSIX file permissions mode utility (`chmod`) parsing octal mode masks and updating file access bits.
+  - Implemented host domain name resolution utility (`host`) performing static lookup from system host tables with fallback to recursive domain name resolution.
+- **Phase 22: Dual-Zone Memory Introspection, Path Portability, Sizing & Table Columnation (P1/P2/P3)**:
+  - Implemented dual-zone memory architecture reporting (`/proc/zoneinfo`) in the virtual process filesystem distinguishing fast internal SRAM from external Octal PSRAM heaps and slot pools.
+  - Implemented standard POSIX single-file removal utility (`unlink`) invoking the file unlinking kernel syscall directly with path verification.
+  - Implemented file sizing and truncation utility (`truncate`) adjusting file sizes, padding with sparse zeros or truncating content with suffix support.
+  - Implemented sub-millisecond microsecond delay utility (`usleep`) facilitating fine-grained timing intervals for scripts and diagnostic tools.
+  - Implemented POSIX pathname portability validation utility (`pathchk`) validating path lengths, filename component limits, and portable character sets.
+  - Implemented terminal state and attribute reset utility (`reset`) sending standard ANSI initialization sequences and clearing display attributes.
+  - Implemented tabular stream and file columnation utility (`column`) aligning variable-width fields into formatted tables with custom delimiter support.
+  - Expanded userland application suite to **153 dynamic ELF binaries**, all linking within their 16 KB PSRAM execution slot budgets.
+  - Expanded automated test suite to **224 tests passing with 100% success rate** covering memory zone parsing, path portability rules, truncation sizing suffixes, microsecond time conversions, and table columnation.
 
 ### [0.1.0] - 2026-08-06
 

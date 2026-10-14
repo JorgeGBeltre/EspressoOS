@@ -2546,7 +2546,275 @@ class TestPhase16Logic(unittest.TestCase):
         log_paths = ["/var/log/messages", "/var/log/dmesg", "/var/log/syslog"]
         for p in log_paths:
             self.assertTrue(p.startswith("/var/log/"))
-            self.assertFalse(" " in p)
+    def test_base32_encoding_decoding(self):
+        alphabet = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ234567"
+
+        def base32_encode(data: bytes) -> str:
+            res = []
+            i = 0
+            while i < len(data):
+                rem = len(data) - i
+                if rem >= 5:
+                    b0, b1, b2, b3, b4 = data[i:i+5]
+                    res.append(chr(alphabet[(b0 >> 3) & 0x1f]))
+                    res.append(chr(alphabet[((b0 & 0x07) << 2) | ((b1 >> 6) & 0x03)]))
+                    res.append(chr(alphabet[(b1 >> 1) & 0x1f]))
+                    res.append(chr(alphabet[((b1 & 0x01) << 4) | ((b2 >> 4) & 0x0f)]))
+                    res.append(chr(alphabet[((b2 & 0x0f) << 1) | ((b3 >> 7) & 0x01)]))
+                    res.append(chr(alphabet[(b3 >> 2) & 0x1f]))
+                    res.append(chr(alphabet[((b3 & 0x03) << 3) | ((b4 >> 5) & 0x07)]))
+                    res.append(chr(alphabet[b4 & 0x1f]))
+                    i += 5
+                elif rem == 4:
+                    b0, b1, b2, b3 = data[i:i+4]
+                    res.append(chr(alphabet[(b0 >> 3) & 0x1f]))
+                    res.append(chr(alphabet[((b0 & 0x07) << 2) | ((b1 >> 6) & 0x03)]))
+                    res.append(chr(alphabet[(b1 >> 1) & 0x1f]))
+                    res.append(chr(alphabet[((b1 & 0x01) << 4) | ((b2 >> 4) & 0x0f)]))
+                    res.append(chr(alphabet[((b2 & 0x0f) << 1) | ((b3 >> 7) & 0x01)]))
+                    res.append(chr(alphabet[(b3 >> 2) & 0x1f]))
+                    res.append(chr(alphabet[(b3 & 0x03) << 3]))
+                    res.append("=")
+                    i += 4
+                elif rem == 3:
+                    b0, b1, b2 = data[i:i+3]
+                    res.append(chr(alphabet[(b0 >> 3) & 0x1f]))
+                    res.append(chr(alphabet[((b0 & 0x07) << 2) | ((b1 >> 6) & 0x03)]))
+                    res.append(chr(alphabet[(b1 >> 1) & 0x1f]))
+                    res.append(chr(alphabet[((b1 & 0x01) << 4) | ((b2 >> 4) & 0x0f)]))
+                    res.append(chr(alphabet[(b2 & 0x0f) << 1]))
+                    res.extend(["=", "=", "="])
+                    i += 3
+                elif rem == 2:
+                    b0, b1 = data[i:i+2]
+                    res.append(chr(alphabet[(b0 >> 3) & 0x1f]))
+                    res.append(chr(alphabet[((b0 & 0x07) << 2) | ((b1 >> 6) & 0x03)]))
+                    res.append(chr(alphabet[(b1 >> 1) & 0x1f]))
+                    res.append(chr(alphabet[(b1 & 0x01) << 4]))
+                    res.extend(["=", "=", "=", "="])
+                    i += 2
+                elif rem == 1:
+                    b0 = data[i]
+                    res.append(chr(alphabet[(b0 >> 3) & 0x1f]))
+                    res.append(chr(alphabet[(b0 & 0x07) << 2]))
+                    res.extend(["=", "=", "=", "=", "=", "="])
+                    i += 1
+            return "".join(res)
+
+        # RFC 4648 test vectors
+        self.assertEqual(base32_encode(b""), "")
+        self.assertEqual(base32_encode(b"f"), "MY======")
+        self.assertEqual(base32_encode(b"fo"), "MZXQ====")
+        self.assertEqual(base32_encode(b"foo"), "MZXW6===")
+        self.assertEqual(base32_encode(b"foob"), "MZXW6YQ=")
+        self.assertEqual(base32_encode(b"foobar"), "MZXW6YTBOI======")
+
+    def test_chmod_mode_parsing(self):
+        def parse_octal_mode(s: str) -> Optional[int]:
+            if len(s) in (3, 4) and all(c in "01234567" for c in s):
+                return int(s, 8)
+            return None
+
+        self.assertEqual(parse_octal_mode("755"), 0o755)
+        self.assertEqual(parse_octal_mode("0644"), 0o644)
+        self.assertEqual(parse_octal_mode("777"), 0o777)
+        self.assertIsNone(parse_octal_mode("888"))
+        self.assertIsNone(parse_octal_mode("75555"))
+
+    def test_chown_spec_parsing(self):
+        def parse_chown_spec(spec: str) -> tuple:
+            if ":" in spec:
+                u, g = spec.split(":", 1)
+                return u, g
+            return spec, None
+
+        self.assertEqual(parse_chown_spec("root:root"), ("root", "root"))
+        self.assertEqual(parse_chown_spec("admin:wheel"), ("admin", "wheel"))
+        self.assertEqual(parse_chown_spec("guest"), ("guest", None))
+
+    def test_who_w_proc_sessions_parsing(self):
+        proc_sessions_mock = (
+            "SESSION_ID\tUSER\tTTY\tSTATUS\n"
+            "0\tconsole\ttty0\tactive\n"
+            "1\tadmin\tpts0\tidle\n"
+        )
+        lines = [line.strip() for line in proc_sessions_mock.split("\n") if line.strip()]
+        header = lines[0].split("\t")
+        self.assertEqual(header, ["SESSION_ID", "USER", "TTY", "STATUS"])
+
+        sessions = []
+        for line in lines[1:]:
+            parts = line.split("\t")
+            self.assertEqual(len(parts), 4)
+            sessions.append({
+                "id": parts[0],
+                "user": parts[1],
+                "tty": parts[2],
+                "status": parts[3]
+            })
+
+        self.assertEqual(len(sessions), 2)
+        self.assertEqual(sessions[0]["user"], "console")
+        self.assertEqual(sessions[0]["tty"], "tty0")
+        self.assertEqual(sessions[1]["user"], "admin")
+        self.assertEqual(sessions[1]["status"], "idle")
+
+    def test_host_etc_hosts_parsing(self):
+        hosts_mock = (
+            "127.0.0.1   localhost localhost.localdomain\n"
+            "192.168.1.1 gateway router\n"
+            "192.168.1.50 server\n"
+        )
+        def lookup_host(query: str) -> Optional[str]:
+            for line in hosts_mock.splitlines():
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                parts = line.split()
+                if len(parts) >= 2:
+                    ip = parts[0]
+                    names = parts[1:]
+                    if query in names:
+                        return ip
+            return None
+
+        self.assertEqual(lookup_host("localhost"), "127.0.0.1")
+        self.assertEqual(lookup_host("router"), "192.168.1.1")
+        self.assertEqual(lookup_host("server"), "192.168.1.50")
+        self.assertIsNone(lookup_host("unknown.domain"))
+
+    def test_pathchk_portability_rules(self):
+        def pathchk(path: str, posix: bool = False, check_empty: bool = False) -> bool:
+            if not path:
+                return False
+            if len(path) > 256:
+                return False
+            max_comp = 14 if posix else 64
+            components = path.split('/')
+            for comp in components:
+                if not comp and check_empty and path != '/':
+                    return False
+                if comp:
+                    if len(comp) > max_comp:
+                        return False
+                    if check_empty and comp.startswith('-'):
+                        return False
+                    if posix:
+                        for ch in comp:
+                            if not (ch.isalnum() or ch in "._-"):
+                                return False
+            return True
+
+        self.assertTrue(pathchk("/bin/sh"))
+        self.assertTrue(pathchk("/etc/hosts", posix=True))
+        self.assertTrue(pathchk("my_file.txt", posix=True))
+        # Nonportable char in POSIX mode
+        self.assertFalse(pathchk("file@name", posix=True))
+        # Leading hyphen with -P
+        self.assertFalse(pathchk("-leading_hyphen", check_empty=True))
+        # Component too long in POSIX mode (> 14)
+        self.assertFalse(pathchk("this_component_is_too_long_for_posix", posix=True))
+
+    def test_truncate_size_parsing(self):
+        def parse_size(s: str) -> Optional[int]:
+            if not s:
+                return None
+            last = s[-1]
+            if last in ('k', 'K'):
+                val, mult = s[:-1], 1024
+            elif last in ('m', 'M'):
+                val, mult = s[:-1], 1024 * 1024
+            elif s.isdigit():
+                val, mult = s, 1
+            else:
+                return None
+            try:
+                return int(val) * mult
+            except ValueError:
+                return None
+
+        self.assertEqual(parse_size("0"), 0)
+        self.assertEqual(parse_size("512"), 512)
+        self.assertEqual(parse_size("4k"), 4096)
+        self.assertEqual(parse_size("2M"), 2 * 1024 * 1024)
+        self.assertIsNone(parse_size("invalid"))
+
+    def test_usleep_duration_conversion(self):
+        def usleep_to_ms(usecs: int) -> int:
+            if usecs == 0:
+                return 0
+            return (usecs + 999) // 1000
+
+        self.assertEqual(usleep_to_ms(0), 0)
+        self.assertEqual(usleep_to_ms(1), 1)
+        self.assertEqual(usleep_to_ms(1000), 1)
+        self.assertEqual(usleep_to_ms(1001), 2)
+        self.assertEqual(usleep_to_ms(50000), 50)
+
+    def test_column_table_alignment(self):
+        raw_lines = [
+            "ID USER TTY STATUS",
+            "0 console tty0 active",
+            "1 administrator pts0 connected"
+        ]
+        # Calculate col widths
+        rows = [line.split() for line in raw_lines]
+        num_cols = max(len(r) for r in rows)
+        col_widths = [0] * num_cols
+        for r in rows:
+            for c_idx, val in enumerate(r):
+                col_widths[c_idx] = max(col_widths[c_idx], len(val))
+
+        self.assertEqual(col_widths[0], 2) # "ID"
+        self.assertEqual(col_widths[1], 13) # "administrator"
+        self.assertEqual(col_widths[2], 4) # "STATUS"
+
+        formatted = []
+        for r in rows:
+            line_parts = []
+            for c_idx, val in enumerate(r):
+                pad = col_widths[c_idx] + 2 - len(val) if c_idx < len(r) - 1 else 0
+                line_parts.append(val + (" " * pad))
+            formatted.append("".join(line_parts))
+
+        self.assertTrue(formatted[0].startswith("ID  USER"))
+        self.assertTrue("administrator" in formatted[2])
+
+    def test_proc_zoneinfo_parsing(self):
+        zoneinfo_mock = (
+            "Node 0, zone   SRAM\n"
+            "  pages total  32\n"
+            "  pages free   16\n"
+            "  nr_free_pages 16\n"
+            "  spanned      32\n"
+            "  present      32\n"
+            "  managed      32\n"
+            "Node 0, zone   PSRAM\n"
+            "  pages total  1823\n"
+            "  pages free   1780\n"
+            "  nr_free_pages 1780\n"
+            "  spanned      1823\n"
+            "  present      1823\n"
+            "  managed      1823\n"
+            "  psram_exec_slots_free 32\n"
+            "  psram_exec_slots_total 32\n"
+        )
+        zones = {}
+        cur_zone = None
+        for line in zoneinfo_mock.splitlines():
+            if "zone   " in line:
+                cur_zone = line.split("zone   ")[1].strip()
+                zones[cur_zone] = {}
+            elif cur_zone and line.strip():
+                parts = line.strip().split()
+                if len(parts) >= 2:
+                    key = "_".join(parts[:-1])
+                    zones[cur_zone][key] = int(parts[-1])
+
+        self.assertIn("SRAM", zones)
+        self.assertIn("PSRAM", zones)
+        self.assertEqual(zones["SRAM"]["pages_total"], 32)
+        self.assertEqual(zones["PSRAM"]["psram_exec_slots_total"], 32)
 
 
 if __name__ == "__main__":

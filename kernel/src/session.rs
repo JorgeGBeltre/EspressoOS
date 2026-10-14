@@ -235,6 +235,20 @@ pub fn destroy(id: SessionId) {
     }
 }
 
+pub fn list_sessions() -> Vec<(SessionId, String, &'static str, bool)> {
+    let map = SESSIONS.lock();
+    let mut out = Vec::new();
+    for (&id, chan) in map.iter() {
+        let user = chan.user.clone().unwrap_or_else(|| String::from("console"));
+        let kind_str = match chan.kind {
+            ChannelKind::Uart => "tty0",
+            ChannelKind::Ssh { .. } => "pts/0",
+        };
+        out.push((id, user, kind_str, chan.is_open()));
+    }
+    out
+}
+
 /// A session's console as a VFS inode.
 ///
 /// It holds the `Arc<SessionChannel>` directly rather than a `SessionId`, so

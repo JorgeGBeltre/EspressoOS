@@ -122,6 +122,12 @@ impl Inode for ProcFsRoot {
         if name == "sys" {
             return Ok(Arc::new(ProcFsSysDir));
         }
+        if name == "sessions" {
+            return Ok(Arc::new(ProcFsFile::Sessions));
+        }
+        if name == "zoneinfo" {
+            return Ok(Arc::new(ProcFsFile::ZoneInfo));
+        }
         if let Ok(pid) = name.parse::<u32>() {
             let pt = crate::scheduler::process::PROCESS_TABLE.lock();
             if pt.table.contains_key(&pid) {
@@ -286,16 +292,30 @@ impl Inode for ProcFsRoot {
                 ino: 21,
             }));
         }
+        if index == 22 {
+            return Ok(Some(DirEntry {
+                name: "sessions".to_string(),
+                kind: InodeKind::File,
+                ino: 22,
+            }));
+        }
+        if index == 23 {
+            return Ok(Some(DirEntry {
+                name: "zoneinfo".to_string(),
+                kind: InodeKind::File,
+                ino: 23,
+            }));
+        }
 
         let pids: Vec<u32> = {
             let pt = crate::scheduler::process::PROCESS_TABLE.lock();
             pt.table.keys().copied().collect()
         };
 
-        if index < 22 {
+        if index < 24 {
             return Ok(None);
         }
-        let pid_idx = index - 22;
+        let pid_idx = index - 24;
         if pid_idx < pids.len() {
             let pid = pids[pid_idx];
             return Ok(Some(DirEntry {
@@ -594,6 +614,8 @@ enum ProcFsFile {
     SysKernelVersion,
     SysVmFreeRam,
     SysVmTotalRam,
+    Sessions,
+    ZoneInfo,
 }
 
 impl Inode for ProcFsFile {
@@ -935,6 +957,53 @@ wlan0\t00000000\t0101A8C0\t0003\t0\t0\t0\t00000000\t0\t0\t0\n"
             ProcFsFile::SysVmTotalRam => {
                 let s = crate::mm::heap::stats();
                 alloc::format!("{}\n", s.total)
+            }
+            ProcFsFile::Sessions => {
+                let sessions = crate::session::list_sessions();
+                let mut out = alloc::string::String::from("ID\tUSER\tTTY\tSTATUS\n");
+                for (id, user, tty, is_open) in sessions {
+                    let st = if is_open { "active" } else { "closed" };
+                    out.push_str(&alloc::format!("{}\t{}\t{}\t{}\n", id, user, tty, st));
+                }
+                out
+            }
+            ProcFsFile::ZoneInfo => {
+                let stats = crate::mm::heap::stats();
+                let slots_used = crate::mm::psram_exec::slots_in_use();
+                let slots_free = crate::mm::psram_exec::SLOT_COUNT.saturating_sub(slots_used);
+                let sram_total = 128 * 1024;
+                let sram_free = 64 * 1024;
+                alloc::format!(
+                    "Node 0, zone   SRAM\n\
+  pages total  {}\n\
+  pages free   {}\n\
+  nr_free_pages {}\n\
+  spanned      {}\n\
+  present      {}\n\
+  managed      {}\n\
+Node 0, zone   PSRAM\n\
+  pages total  {}\n\
+  pages free   {}\n\
+  nr_free_pages {}\n\
+  spanned      {}\n\
+  present      {}\n\
+  managed      {}\n\
+  psram_exec_slots_free {}\n\
+  psram_exec_slots_total 32\n",
+                    sram_total / 4096,
+                    sram_free / 4096,
+                    sram_free / 4096,
+                    sram_total / 4096,
+                    sram_total / 4096,
+                    sram_total / 4096,
+                    stats.total / 4096,
+                    stats.free / 4096,
+                    stats.free / 4096,
+                    stats.total / 4096,
+                    stats.total / 4096,
+                    stats.total / 4096,
+                    slots_free,
+                )
             }
         };
 

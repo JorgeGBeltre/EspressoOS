@@ -359,6 +359,12 @@ impl Inode for ProcFsNetDir {
         if name == "arp" {
             return Ok(Arc::new(ProcFsFile::NetArp));
         }
+        if name == "dev" {
+            return Ok(Arc::new(ProcFsFile::NetDev));
+        }
+        if name == "route" {
+            return Ok(Arc::new(ProcFsFile::NetRoute));
+        }
         Err(KError::NotFound)
     }
 
@@ -391,6 +397,20 @@ impl Inode for ProcFsNetDir {
                 ino: 102,
             }));
         }
+        if index == 4 {
+            return Ok(Some(DirEntry {
+                name: "dev".to_string(),
+                kind: InodeKind::File,
+                ino: 103,
+            }));
+        }
+        if index == 5 {
+            return Ok(Some(DirEntry {
+                name: "route".to_string(),
+                kind: InodeKind::File,
+                ino: 104,
+            }));
+        }
         Ok(None)
     }
 }
@@ -402,6 +422,8 @@ enum ProcFsFile {
     PidStatus(u32),
     NetSockets,
     NetArp,
+    NetDev,
+    NetRoute,
     Dmesg,
     Version,
     CpuInfo,
@@ -647,6 +669,21 @@ type         : rng\n"
                     "IP address       HW type     Flags       HW address            Mask     Device\n\
 192.168.1.1      0x1         0x2         00:50:56:c0:00:08     *        wlan0\n\
 192.168.1.100    0x1         0x2         c0:49:ef:12:34:56     *        wlan0\n"
+                )
+            }
+            ProcFsFile::NetDev => {
+                alloc::format!(
+                    "Inter-|   Receive                                                |  Transmit\n\
+ face |bytes    packets errs drop fifo frame compressed multicast|bytes    packets errs drop fifo colls carrier compressed\n\
+    lo:       0       0    0    0    0     0          0         0        0       0    0    0    0     0       0          0\n\
+ wlan0: 1048576    4096    0    0    0     0          0         0  1048576    4096    0    0    0     0       0          0\n"
+                )
+            }
+            ProcFsFile::NetRoute => {
+                alloc::format!(
+                    "Iface\tDestination\tGateway\tFlags\tRefCnt\tUse\tMetric\tMask\tMTU\tWindow\tIRTT\n\
+wlan0\t0001A8C0\t00000000\t0001\t0\t0\t0\t00FFFFFF\t0\t0\t0\n\
+wlan0\t00000000\t0101A8C0\t0003\t0\t0\t0\t00000000\t0\t0\t0\n"
                 )
             }
             ProcFsFile::LoadAvg => {

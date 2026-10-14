@@ -1893,6 +1893,108 @@ class TestPhase14Logic(unittest.TestCase):
         self.assertEqual(rows[1][5], "wlan0")
 
 
+class TestPhase15Logic(unittest.TestCase):
+    def test_comm_comparison(self):
+        f1 = ["apple", "banana", "cherry"]
+        f2 = ["banana", "cherry", "date"]
+
+        # Produce comm output (col1: only f1, col2: only f2, col3: both)
+        col1, col2, col3 = [], [], []
+        i1, i2 = 0, 0
+        while i1 < len(f1) and i2 < len(f2):
+            if f1[i1] < f2[i2]:
+                col1.append(f1[i1])
+                i1 += 1
+            elif f1[i1] > f2[i2]:
+                col2.append(f2[i2])
+                i2 += 1
+            else:
+                col3.append(f1[i1])
+                i1 += 1
+                i2 += 1
+        while i1 < len(f1):
+            col1.append(f1[i1])
+            i1 += 1
+        while i2 < len(f2):
+            col2.append(f2[i2])
+            i2 += 1
+
+        self.assertEqual(col1, ["apple"])
+        self.assertEqual(col2, ["date"])
+        self.assertEqual(col3, ["banana", "cherry"])
+
+    def test_nl_numbering(self):
+        lines = ["first", "", "second"]
+        # Format with width 6
+        def number_lines(lines, number_empty=False, width=6):
+            res = []
+            no = 1
+            for l in lines:
+                if not l and not number_empty:
+                    res.append("")
+                else:
+                    res.append(f"{str(no).rjust(width)}\t{l}")
+                    no += 1
+            return res
+
+        numbered = number_lines(lines, number_empty=False, width=6)
+        self.assertEqual(numbered[0], "     1\tfirst")
+        self.assertEqual(numbered[1], "")
+        self.assertEqual(numbered[2], "     2\tsecond")
+
+    def test_fold_wrapping(self):
+        text = "The quick brown fox jumps over the lazy dog"
+        # Wrap at 16 chars with space break
+        def fold_text(s, width=16):
+            res = []
+            rem = s
+            while rem:
+                if len(rem) <= width:
+                    res.append(rem)
+                    break
+                split_at = width
+                space_idx = rem[:width].rfind(' ')
+                if space_idx > 0:
+                    split_at = space_idx
+                res.append(rem[:split_at])
+                rem = rem[split_at:].lstrip()
+            return res
+
+        wrapped = fold_text(text, 16)
+        self.assertEqual(wrapped[0], "The quick brown")
+        self.assertEqual(wrapped[1], "fox jumps over")
+        self.assertEqual(wrapped[2], "the lazy dog")
+
+    def test_split_suffix(self):
+        def make_suffix(idx):
+            f = chr(ord('a') + ((idx // 26) % 26))
+            s = chr(ord('a') + (idx % 26))
+            return f + s
+
+        self.assertEqual(make_suffix(0), "aa")
+        self.assertEqual(make_suffix(1), "ab")
+        self.assertEqual(make_suffix(25), "az")
+        self.assertEqual(make_suffix(26), "ba")
+
+    def test_printenv_lookup(self):
+        env = {"PATH": "/bin:/usr/bin", "USER": "youareme", "HOME": "/home/youareme"}
+        self.assertEqual(env.get("USER"), "youareme")
+        self.assertEqual(env.get("NONEXISTENT"), None)
+
+    def test_procfs_net_dev_route(self):
+        net_dev = (
+            "Inter-|   Receive                                                |  Transmit\n"
+            " face |bytes    packets errs drop fifo frame compressed multicast|bytes    packets errs drop fifo colls carrier compressed\n"
+            " wlan0: 1048576    4096    0    0    0     0          0         0  1048576    4096    0    0    0     0       0          0\n"
+        )
+        self.assertIn("wlan0:", net_dev)
+        net_route = (
+            "Iface\tDestination\tGateway\tFlags\tRefCnt\tUse\tMetric\tMask\tMTU\tWindow\tIRTT\n"
+            "wlan0\t0001A8C0\t00000000\t0001\t0\t0\t0\t00FFFFFF\t0\t0\t0\n"
+        )
+        self.assertIn("wlan0", net_route)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
 

@@ -2816,6 +2816,90 @@ class TestPhase16Logic(unittest.TestCase):
         self.assertEqual(zones["SRAM"]["pages_total"], 32)
         self.assertEqual(zones["PSRAM"]["psram_exec_slots_total"], 32)
 
+    def test_proc_diskstats_parsing(self):
+        diskstats_mock = (
+            "   1       0 ram0 0 0 0 0 0 0 0 0 0 0 0\n"
+            "  31       0 mtdblock0 42 0 336 12 18 0 144 8 0 20 20\n"
+        )
+        devices = {}
+        for line in diskstats_mock.splitlines():
+            parts = line.split()
+            if len(parts) >= 14:
+                dev = parts[2]
+                devices[dev] = {
+                    "major": int(parts[0]),
+                    "minor": int(parts[1]),
+                    "reads": int(parts[3]),
+                    "r_sectors": int(parts[5]),
+                    "writes": int(parts[7]),
+                    "w_sectors": int(parts[9]),
+                }
+        self.assertIn("mtdblock0", devices)
+        self.assertEqual(devices["mtdblock0"]["major"], 31)
+        self.assertEqual(devices["mtdblock0"]["reads"], 42)
+        self.assertEqual(devices["mtdblock0"]["writes"], 18)
+
+    def test_dd_multiplier_parsing(self):
+        def parse_num(s: str):
+            if not s:
+                return None
+            mults = {'c': 1, 'w': 2, 'b': 512, 'k': 1024, 'K': 1024, 'm': 1024*1024, 'M': 1024*1024}
+            last = s[-1]
+            if last in mults:
+                val = int(s[:-1])
+                return val * mults[last]
+            return int(s)
+
+        self.assertEqual(parse_num("512"), 512)
+        self.assertEqual(parse_num("4k"), 4096)
+        self.assertEqual(parse_num("2b"), 1024)
+        self.assertEqual(parse_num("1M"), 1048576)
+        self.assertEqual(parse_num("8w"), 16)
+
+    def test_sum_bsd_and_sysv(self):
+        def bsd_checksum(data: bytes) -> int:
+            ck = 0
+            for b in data:
+                ck = (ck >> 1) + ((ck & 1) << 15)
+                ck = (ck + b) & 0xFFFF
+            return ck
+
+        def sysv_checksum(data: bytes) -> int:
+            s = sum(data)
+            r = (s & 0xFFFF) + ((s >> 16) & 0xFFFF)
+            c = (r & 0xFFFF) + (r >> 16)
+            return c & 0xFFFF
+
+        test_bytes = b"Hello, EspressoOS World!\n"
+        bsd_val = bsd_checksum(test_bytes)
+        sysv_val = sysv_checksum(test_bytes)
+
+        self.assertIsInstance(bsd_val, int)
+        self.assertIsInstance(sysv_val, int)
+        self.assertGreater(bsd_val, 0)
+        self.assertGreater(sysv_val, 0)
+        # Verify 16-bit boundaries
+        self.assertLessEqual(bsd_val, 0xFFFF)
+        self.assertLessEqual(sysv_val, 0xFFFF)
+
+    def test_size_elf_computation(self):
+        # Emulate ELF program headers
+        phdrs = [
+            {"type": 1, "flags": 5, "filesz": 8192, "memsz": 8192},   # PT_LOAD, PF_R | PF_X (.text)
+            {"type": 1, "flags": 6, "filesz": 512, "memsz": 1536},    # PT_LOAD, PF_R | PF_W (.data + .bss)
+            {"type": 2, "flags": 6, "filesz": 128, "memsz": 128},     # PT_DYNAMIC (non PT_LOAD)
+        ]
+        text = sum(p["filesz"] for p in phdrs if p["type"] == 1 and not (p["flags"] & 2))
+        data = sum(p["filesz"] for p in phdrs if p["type"] == 1 and (p["flags"] & 2))
+        bss = sum(p["memsz"] - p["filesz"] for p in phdrs if p["type"] == 1 and (p["flags"] & 2))
+
+        self.assertEqual(text, 8192)
+        self.assertEqual(data, 512)
+        self.assertEqual(bss, 1024)
+        total = text + data + bss
+        self.assertEqual(total, 9728)
+        self.assertEqual(hex(total), "0x2600")
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -201,6 +201,7 @@ const fn kind_to_u8(kind: InodeKind) -> u8 {
         InodeKind::Dir => 2,
         InodeKind::Device => 3,
         InodeKind::Symlink => 4,
+        InodeKind::Fifo => 5,
     }
 }
 
@@ -478,7 +479,12 @@ fn sys_mkdir(args: &[usize]) -> isize {
         Ok(s) => s,
         Err(e) => return e.as_errno(),
     };
-    ret_unit(crate::vfs::mkdir(path))
+    let mode = arg(args, 2);
+    if mode == 0x1000 {
+        ret_unit(crate::vfs::mkfifo(path))
+    } else {
+        ret_unit(crate::vfs::mkdir(path))
+    }
 }
 
 fn sys_unlink(args: &[usize]) -> isize {

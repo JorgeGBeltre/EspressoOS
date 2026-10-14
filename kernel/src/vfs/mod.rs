@@ -268,6 +268,14 @@ pub fn mkdir(path: &str) -> KResult<()> {
     Ok(())
 }
 
+pub fn mkfifo(path: &str) -> KResult<()> {
+    if mount::resolve(path).is_ok() {
+        return Err(KError::AlreadyExists);
+    }
+    create_path(path, InodeKind::Fifo)?;
+    Ok(())
+}
+
 pub fn unlink(path: &str) -> KResult<()> {
     // POSIX: unlinking "." or ".." shall fail. The check has to happen on the path AS
     // WRITTEN, before normalize touches it, and that is the whole reason it could not

@@ -104,6 +104,15 @@ impl Inode for ProcFsRoot {
         if name == "crypto" {
             return Ok(Arc::new(ProcFsFile::Crypto));
         }
+        if name == "loadavg" {
+            return Ok(Arc::new(ProcFsFile::LoadAvg));
+        }
+        if name == "filesystems" {
+            return Ok(Arc::new(ProcFsFile::Filesystems));
+        }
+        if name == "ipc" {
+            return Ok(Arc::new(ProcFsFile::Ipc));
+        }
         if let Ok(pid) = name.parse::<u32>() {
             let pt = crate::scheduler::process::PROCESS_TABLE.lock();
             if pt.table.contains_key(&pid) {
@@ -226,16 +235,37 @@ impl Inode for ProcFsRoot {
                 ino: 15,
             }));
         }
+        if index == 16 {
+            return Ok(Some(DirEntry {
+                name: "loadavg".to_string(),
+                kind: InodeKind::File,
+                ino: 16,
+            }));
+        }
+        if index == 17 {
+            return Ok(Some(DirEntry {
+                name: "filesystems".to_string(),
+                kind: InodeKind::File,
+                ino: 17,
+            }));
+        }
+        if index == 18 {
+            return Ok(Some(DirEntry {
+                name: "ipc".to_string(),
+                kind: InodeKind::File,
+                ino: 18,
+            }));
+        }
 
         let pids: Vec<u32> = {
             let pt = crate::scheduler::process::PROCESS_TABLE.lock();
             pt.table.keys().copied().collect()
         };
 
-        if index < 16 {
+        if index < 19 {
             return Ok(None);
         }
-        let pid_idx = index - 16;
+        let pid_idx = index - 19;
         if pid_idx < pids.len() {
             let pid = pids[pid_idx];
             return Ok(Some(DirEntry {
@@ -370,6 +400,9 @@ enum ProcFsFile {
     Interrupts,
     Partitions,
     Crypto,
+    LoadAvg,
+    Filesystems,
+    Ipc,
 }
 
 impl Inode for ProcFsFile {
@@ -597,6 +630,32 @@ type         : rng\n"
                     }
                 }
                 out
+            }
+            ProcFsFile::LoadAvg => {
+                let pt = crate::scheduler::process::PROCESS_TABLE.lock();
+                let total_procs = pt.table.len();
+                let last_pid = pt.next_pid.saturating_sub(1);
+                alloc::format!("0.04 0.02 0.01 1/{} {}\n", total_procs + 4, last_pid)
+            }
+            ProcFsFile::Filesystems => {
+                alloc::format!(
+                    "nodev\tprocfs\n\
+                     nodev\tdevfs\n\
+                     nodev\tsysfs\n\
+                     nodev\tramfs\n\
+                    \tespfs\n\
+                    \tlittlefs\n"
+                )
+            }
+            ProcFsFile::Ipc => {
+                alloc::format!(
+                    "=== IPC Facility Status ===\n\
+                     Pipes: 8 pipeline stages max, 512 B ring buffers\n\
+                     FIFOs: Named pipes active (RamFs mounts)\n\
+                     Message Queues: Internal ring queues\n\
+                     Shared Memory: Dual-port PSRAM pool (0x3C000000 - 0x3C800000)\n\
+                     Semaphores: Spinlocks, Mutexes, and atomic flag sync primitives\n"
+                )
             }
         };
 

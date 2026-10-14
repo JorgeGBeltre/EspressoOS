@@ -806,6 +806,7 @@ fn format_entry(e: &DirEntry) -> String {
         InodeKind::Device => "@",
         InodeKind::Symlink => "~",
         InodeKind::File => "",
+        InodeKind::Fifo => "|",
     };
     format!("{}{}", e.name, tag)
 }

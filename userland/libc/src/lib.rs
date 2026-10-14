@@ -102,6 +102,13 @@ pub fn write(fd: i32, buf: &[u8]) -> isize {
     unsafe { syscall(1, fd as usize, buf.as_ptr() as usize, buf.len(), 0, 0, 0) }
 }
 
+pub const O_RDONLY: u32 = 0x0001;
+pub const O_WRONLY: u32 = 0x0002;
+pub const O_RDWR: u32 = 0x0003;
+pub const O_CREATE: u32 = 0x0100;
+pub const O_APPEND: u32 = 0x0200;
+pub const O_TRUNC: u32 = 0x0400;
+
 pub fn open(path: &str, flags: u32) -> isize {
     unsafe { syscall(2, path.as_ptr() as usize, path.len(), flags as usize, 0, 0, 0) }
 }
@@ -189,6 +196,10 @@ pub fn mkdir(path: &str) -> isize {
     unsafe { syscall(9, path.as_ptr() as usize, path.len(), 0, 0, 0, 0) }
 }
 
+pub fn mkfifo(path: &str) -> isize {
+    unsafe { syscall(9, path.as_ptr() as usize, path.len(), 0x1000, 0, 0, 0) }
+}
+
 pub fn unlink(path: &str) -> isize {
     unsafe { syscall(10, path.as_ptr() as usize, path.len(), 0, 0, 0, 0) }
 }
@@ -216,6 +227,13 @@ pub fn sbrk(size: usize) -> isize {
 
 pub fn yield_now() {
     unsafe { syscall(14, 0, 0, 0, 0, 0, 0); }
+}
+
+pub fn sleep_ms(ms: usize) {
+    let start = uptime_ms();
+    while uptime_ms().wrapping_sub(start) < ms {
+        yield_now();
+    }
 }
 
 #[repr(C)]

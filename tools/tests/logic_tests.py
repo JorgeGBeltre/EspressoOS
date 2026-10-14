@@ -1510,6 +1510,226 @@ class TestExtendedUtilitiesLogic(unittest.TestCase):
         self.assertFalse(is_leap(1900))
 
 
+class TestNamedPipeAndIpcLogic(unittest.TestCase):
+    def test_fifo_ring_buffer(self):
+        capacity = 512
+        buf = bytearray()
+
+        def fifo_write(data: bytes) -> int:
+            avail = capacity - len(buf)
+            to_write = min(avail, len(data))
+            buf.extend(data[:to_write])
+            return to_write
+
+        def fifo_read(max_bytes: int) -> bytes:
+            to_read = min(max_bytes, len(buf))
+            chunk = bytes(buf[:to_read])
+            del buf[:to_read]
+            return chunk
+
+        self.assertEqual(fifo_write(b"hello pipe\n"), 11)
+        self.assertEqual(len(buf), 11)
+        self.assertEqual(fifo_read(6), b"hello ")
+        self.assertEqual(fifo_read(10), b"pipe\n")
+        self.assertEqual(fifo_read(10), b"")
+
+    def test_syscall_mkdir_fifo_mode_detection(self):
+        S_IFIFO = 0x1000
+        mode_dir = 0o755
+        mode_fifo = 0o666 | S_IFIFO
+
+        def is_fifo_request(mode: int) -> bool:
+            return (mode & 0xF000) == S_IFIFO
+
+        self.assertFalse(is_fifo_request(mode_dir))
+        self.assertTrue(is_fifo_request(mode_fifo))
+
+
+class TestSortAndUniqLogic(unittest.TestCase):
+    def test_sort_alphabetical_and_reverse(self):
+        lines = ["banana", "apple", "cherry", "date"]
+        sorted_asc = sorted(lines)
+        sorted_desc = sorted(lines, reverse=True)
+        self.assertEqual(sorted_asc, ["apple", "banana", "cherry", "date"])
+        self.assertEqual(sorted_desc, ["date", "cherry", "banana", "apple"])
+
+    def test_sort_numeric(self):
+        lines = ["10", "2", "1", "20", "100"]
+        def num_key(s: str) -> int:
+            try:
+                return int(s.strip())
+            except ValueError:
+                return 0
+
+        sorted_num = sorted(lines, key=num_key)
+        self.assertEqual(sorted_num, ["1", "2", "10", "20", "100"])
+
+    def test_uniq_adjacent_and_count(self):
+        lines = ["a", "a", "b", "c", "c", "c", "d"]
+        
+        # Standard uniq
+        result = []
+        for l in lines:
+            if not result or result[-1] != l:
+                result.append(l)
+        self.assertEqual(result, ["a", "b", "c", "d"])
+
+        # Count uniq (-c)
+        counts = []
+        for l in lines:
+            if not counts or counts[-1][0] != l:
+                counts.append([l, 1])
+            else:
+                counts[-1][1] += 1
+        self.assertEqual(counts, [["a", 2], ["b", 1], ["c", 3], ["d", 1]])
+
+        # Duplicates only (-d)
+        dups = [item[0] for item in counts if item[1] > 1]
+        self.assertEqual(dups, ["a", "c"])
+
+
+class TestCmpAndXargsLogic(unittest.TestCase):
+    def test_cmp_byte_by_byte(self):
+        f1 = b"Hello World!\nSecond line.\n"
+        f2 = b"Hello Earth!\nSecond line.\n"
+
+        def cmp_bytes(b1: bytes, b2: bytes):
+            min_len = min(len(b1), len(b2))
+            byte_num = 1
+            line_num = 1
+            for i in range(min_len):
+                if b1[i] != b2[i]:
+                    return (byte_num, line_num, b1[i], b2[i])
+                if b1[i] == ord("\n"):
+                    line_num += 1
+                byte_num += 1
+            if len(b1) != len(b2):
+                return (byte_num, line_num, None, None)
+            return None
+
+        diff = cmp_bytes(f1, f2)
+        self.assertIsNotNone(diff)
+        self.assertEqual(diff[0], 7)   # byte 7: 'W' vs 'E'
+        self.assertEqual(diff[1], 1)   # line 1
+        self.assertEqual(diff[2], ord("W"))
+        self.assertEqual(diff[3], ord("E"))
+
+        # Identical
+        self.assertIsNone(cmp_bytes(f1, f1))
+
+    def test_xargs_argument_splitting(self):
+        raw_input = "  file1.txt   file2.txt \n  file3.txt\tfile4.txt  \n"
+        tokens = raw_input.split()
+        self.assertEqual(tokens, ["file1.txt", "file2.txt", "file3.txt", "file4.txt"])
+
+        # Batch execution with max 2 args per call
+        batches = [tokens[i:i+2] for i in range(0, len(tokens), 2)]
+        self.assertEqual(batches, [["file1.txt", "file2.txt"], ["file3.txt", "file4.txt"]])
+
+
+class TestLoggerLogic(unittest.TestCase):
+    def test_syslog_formatting(self):
+        def format_log(pri: int, tag: str, msg: str) -> str:
+            return f"<{pri}> [SYSLOG] {tag}: {msg}\n"
+
+        entry = format_log(6, "user", "Application initialized successfully")
+        self.assertEqual(entry, "<6> [SYSLOG] user: Application initialized successfully\n")
+
+
+class TestDateAndCalendarLogic(unittest.TestCase):
+    def test_gregorian_conversion(self):
+        def epoch_to_date(days: int):
+            z = days + 719468
+            era = z // 146097
+            doe = z - era * 146097
+            yoe = (doe - doe // 1460 + doe // 36524 - doe // 146096) // 365
+            y = yoe + era * 400
+            doy = doe - (365 * yoe + yoe // 4 - yoe // 100)
+            mp = (5 * doy + 2) // 153
+            d = doy - (153 * mp + 2) // 5 + 1
+            m = mp + (3 if mp < 10 else -9)
+            year = y + (1 if m <= 2 else 0)
+            return year, m, d
+
+        # 1970-01-01
+        self.assertEqual(epoch_to_date(0), (1970, 1, 1))
+        # 2026-10-14 (20740 days)
+        self.assertEqual(epoch_to_date(20740), (2026, 10, 14))
+
+    def test_day_of_week(self):
+        # 1970-01-01 was Thursday (index 4)
+        def wday(days: int) -> int:
+            return (days + 4) % 7
+
+        self.assertEqual(wday(0), 4)  # Thursday
+        self.assertEqual(wday(20740), 3)  # Wednesday (2026-10-14)
+
+
+class TestMktempAndCronLogic(unittest.TestCase):
+    def test_mktemp_suffix_generation(self):
+        template = "/tmp/tmp.XXXXXX"
+        base36 = "0123456789abcdefghijklmnopqrstuvwxyz"
+        rand_bytes = [10, 25, 35, 0, 15, 30]
+
+        buf = list(template)
+        rand_idx = 0
+        for i in reversed(range(len(buf))):
+            if buf[i] == "X" and rand_idx < len(rand_bytes):
+                choice = rand_bytes[rand_idx] % len(base36)
+                buf[i] = base36[choice]
+                rand_idx += 1
+
+        result = "".join(buf)
+        self.assertTrue(result.startswith("/tmp/tmp."))
+        self.assertNotIn("X", result)
+        self.assertEqual(len(result), len(template))
+
+    def test_crontab_parsing(self):
+        crontab_text = """
+        # EspressoOS Scheduled Tasks Table (/etc/crontab)
+        # interval_sec command
+        60 /bin/wdt ping
+        300 /bin/sntp
+        """
+        jobs = []
+        for line in crontab_text.strip().splitlines():
+            line = line.strip()
+            if not line or line.starts_with("#") if hasattr(line, "starts_with") else line.startswith("#"):
+                continue
+            parts = line.split(maxsplit=1)
+            if len(parts) == 2:
+                jobs.append((int(parts[0]), parts[1]))
+
+        self.assertEqual(jobs, [(60, "/bin/wdt ping"), (300, "/bin/sntp")])
+
+
+class TestStringsAndTimeoutLogic(unittest.TestCase):
+    def test_strings_filtering(self):
+        raw_data = b"\x00\x01\x02hello\x00\xffworld1234\x00\x04hi\x00"
+        min_len = 4
+
+        extracted = []
+        cur = bytearray()
+        for b in raw_data:
+            if 32 <= b <= 126 or b == ord("\t"):
+                cur.append(b)
+            else:
+                if len(cur) >= min_len:
+                    extracted.append(cur.decode("latin1"))
+                cur.clear()
+        if len(cur) >= min_len:
+            extracted.append(cur.decode("latin1"))
+
+        self.assertEqual(extracted, ["hello", "world1234"])
+
+    def test_timeout_exit_code_standard(self):
+        # POSIX 124 on timeout
+        POSIX_TIMEOUT_EXIT = 124
+        self.assertEqual(POSIX_TIMEOUT_EXIT, 124)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
 

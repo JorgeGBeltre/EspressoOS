@@ -113,6 +113,9 @@ impl Inode for ProcFsRoot {
         if name == "ipc" {
             return Ok(Arc::new(ProcFsFile::Ipc));
         }
+        if name == "cmdline" {
+            return Ok(Arc::new(ProcFsFile::Cmdline));
+        }
         if let Ok(pid) = name.parse::<u32>() {
             let pt = crate::scheduler::process::PROCESS_TABLE.lock();
             if pt.table.contains_key(&pid) {
@@ -256,16 +259,23 @@ impl Inode for ProcFsRoot {
                 ino: 18,
             }));
         }
+        if index == 19 {
+            return Ok(Some(DirEntry {
+                name: "cmdline".to_string(),
+                kind: InodeKind::File,
+                ino: 19,
+            }));
+        }
 
         let pids: Vec<u32> = {
             let pt = crate::scheduler::process::PROCESS_TABLE.lock();
             pt.table.keys().copied().collect()
         };
 
-        if index < 19 {
+        if index < 20 {
             return Ok(None);
         }
-        let pid_idx = index - 19;
+        let pid_idx = index - 20;
         if pid_idx < pids.len() {
             let pid = pids[pid_idx];
             return Ok(Some(DirEntry {
@@ -436,6 +446,7 @@ enum ProcFsFile {
     LoadAvg,
     Filesystems,
     Ipc,
+    Cmdline,
 }
 
 impl Inode for ProcFsFile {
@@ -711,6 +722,9 @@ wlan0\t00000000\t0101A8C0\t0003\t0\t0\t0\t00000000\t0\t0\t0\n"
                      Shared Memory: Dual-port PSRAM pool (0x3C000000 - 0x3C800000)\n\
                      Semaphores: Spinlocks, Mutexes, and atomic flag sync primitives\n"
                 )
+            }
+            ProcFsFile::Cmdline => {
+                alloc::format!("console=ttyS0,115200 root=/dev/flash0 rw init=/bin/init quiet\n")
             }
         };
 

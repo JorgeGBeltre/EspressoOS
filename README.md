@@ -68,7 +68,7 @@ EspressoOS boots and executes on physical ESP32-S3 hardware. The system acquires
 - **Kernel Boot**: HAL initialization, 128 KB SRAM internal heap, VFS mounts (`/` EspFs on flash, `/tmp` ramfs in RAM, `/dev` devfs, `/proc` procfs, `/sys` sysfs).
 - **PSRAM Execution (PSRAM-Exec)**: 8 MB PSRAM carve-up with 1 MB reserved for code execution on the instruction bus (`0x42800000`). Boot selftest verifies instruction execution in PSRAM returning code 42.
 - **Preemptive Multitasking & Process Management**: Scheduler driven by SYSTIMER at 100 Hz, 50 ms quantum, and Model B in-ISR context switching. Automatic reparenting of orphan processes to PID 1 (`init-sup`) and non-blocking zombie reaping with `waitpid` (`WNOHANG`), preventing PSRAM-Exec slot leaks.
-- **Dynamic Userland ELFs**: Suite of **110 ELF binaries** executing from PSRAM with `argv` support, 32-slot pool, and load-time relocation without requiring Position Independent Code (PIC).
+- **Dynamic Userland ELFs**: Suite of **116 ELF binaries** executing from PSRAM with `argv` support, 32-slot pool, and load-time relocation without requiring Position Independent Code (PIC).
 - **Wi-Fi + TCP/IP Stack**: Station (STA) mode, DHCP client, and active TCP/IP stack (`smoltcp`). Runtime Wi-Fi scan, connect, and disconnect. Credential persistence in flash NVS sector 0 (`0x0000_9000`).
 - **Hardened SSH-2.0 Server**: Server supporting curve25519-sha256, ssh-ed25519, and chacha20-poly1305@openssh.com.
   - **Persistent Host Key**: Unique Ed25519 host key generated via hardware TRNG on first boot and persisted to NVS flash sector 1 (`0x0000_A000`, `ESHK` format).
@@ -522,6 +522,12 @@ The system includes **98 userland binaries** in `/bin` alongside shell built-in 
 108. **`nl`**: Number lines of files with right-aligned formatting (`nl [-ba] [-bt] [-w width] [file]`).
 109. **`fold`**: Wrap input lines to fit in a specified column width (`fold [-w width] [-s] [file]`).
 110. **`split`**: Split a file into fixed-size byte or line pieces (`split [-b bytes] [-l lines] [file [prefix]]`).
+111. **`yes`**: Repeatedly output a line with all specified strings, or 'y' (`yes [-n count] [string]`).
+112. **`rev`**: Reverse lines character-wise (`rev [file]`).
+113. **`paste`**: Merge lines of files side-by-side (`paste [-d delim] <file1> <file2>`).
+114. **`expand`**: Convert tabs to spaces (`expand [-t tabstop] [file]`).
+115. **`unexpand`**: Convert spaces to tabs (`unexpand [-t tabstop] [file]`).
+116. **`factor`**: Print prime factors of numbers (`factor [number...]`).
 
 ---
 
@@ -554,7 +560,7 @@ Each serial or SSH connection runs an isolated session (`SessionChannel`) with d
 
 ### Userland programs (`/bin`)
 
-See the full 110-binary list in §5. Selected usage:
+See the full 116-binary list in §5. Selected usage:
 
 ```text
 EspressoOS:~$ /bin/echo hola mundo | /bin/cat
@@ -578,7 +584,7 @@ EspressoOS/
 │   └── config.toml          # Xtensa target config and espflash runner setup
 ├── bootloader/              # Second-stage bootloader skeleton (future phase)
 ├── kernel/                  # EspressoOS Kernel crate
-│   ├── build.rs             # Build script: compiles 110 userland ELFs and generates fixup tables
+│   ├── build.rs             # Build script: compiles 116 userland ELFs and generates fixup tables
 │   ├── src/
 │   │   ├── arch/xtensa/     # Context switch, ISR vectors, and SYSTIMER driver
 │   │   ├── drivers/         # Drivers: gpio, uart, i2c, spi, crypto, flash, power, ble, wifi, ssh
@@ -801,6 +807,16 @@ Flash layout defined in `kernel/src/prelude.rs` and `partitions.csv`:
   - Implemented file splitting utility (`split`) dividing large files into byte-size or line-count segments with alphabetic suffixes.
   - Expanded userland application suite to **110 dynamic ELF binaries**, all linking within their 16 KB PSRAM execution slot budgets.
   - Expanded automated test suite to **189 tests passing with 100% success rate** covering sorted file column generation, line numbering padding, text folding, chunk suffix calculation, environment lookups, and network device metrics.
+- **Phase 16: Kernel Boot Argument Introspection & Classic Unix Processing Tools (P1/P2/P3)**:
+  - Added kernel command-line and boot argument introspection (`/proc/cmdline`) to the virtual process filesystem.
+  - Implemented continuous string generation utility (`yes`) supporting bounded repetitions and default affirmation streaming.
+  - Implemented character-wise line reversal utility (`rev`) processing file inputs and standard streams.
+  - Implemented multi-file line merging tool (`paste`) supporting custom column delimiters and parallel line interleaving.
+  - Implemented tab-to-space expansion utility (`expand`) replacing horizontal tab characters with column-aligned spaces.
+  - Implemented space-to-tab compression utility (`unexpand`) reducing consecutive column spaces into tab stops.
+  - Implemented prime factorization utility (`factor`) decomposing large integer inputs into prime factors using trial division and 6k±1 optimization.
+  - Expanded userland application suite to **116 dynamic ELF binaries**, all linking within their 16 KB PSRAM execution slot budgets.
+  - Expanded automated test suite to **194 tests passing with 100% success rate** covering prime factor decomposition, string reversal, multi-file line merging, tab expansion, and boot command-line introspection.
 
 ### [0.1.0] - 2026-08-06
 

@@ -60,12 +60,30 @@ fn hex_decode(s: &str) -> Option<Vec<u8>> {
     Some(out)
 }
 
-/// Checks `password` against a stored `/etc/passwd` field. Understands two shapes:
-/// `$s5$<salt-hex>$<hash-hex>` (SHA-256(salt||password), written by `passwd(1)` via
-/// `drivers::passwd` since SP2-R6) and bare plaintext (whatever `/etc/passwd` held
-/// before that -- kept working on READ so an existing file is not silently locked out;
-/// running `passwd` again replaces it with the salted form).
+/// Checks `password` against a stored `/etc/passwd` field. Understands:
+/// - `$pbkdf2-sha256$i=<iter>$<salt-hex>$<hash-hex>` (PBKDF2-HMAC-SHA256, RFC 8018)
+/// - `$s5$<salt-hex>$<hash-hex>` (legacy salted SHA-256)
+/// - bare plaintext (legacy fallback)
 fn verify_stored(field: &str, password: &[u8]) -> bool {
+    if let Some(rest) = field.strip_prefix("$pbkdf2-sha256$i=") {
+        let mut parts = rest.splitn(3, '$');
+        let (iter_str, salt_hex, hash_hex) = match (parts.next(), parts.next(), parts.next()) {
+            (Some(i), Some(s), Some(h)) => (i, s, h),
+            _ => return false,
+        };
+        let iterations: u32 = match iter_str.parse() {
+            Ok(n) if n > 0 && n <= 100_000 => n,
+            _ => return false,
+        };
+        let (salt, expected) = match (hex_decode(salt_hex), hex_decode(hash_hex)) {
+            (Some(s), Some(h)) if h.len() == 32 => (s, h),
+            _ => return false,
+        };
+
+        let got = crate::drivers::passwd::pbkdf2_hmac_sha256(password, &salt, iterations);
+        return ct_eq(&got, &expected);
+    }
+
     if let Some(rest) = field.strip_prefix("$s5$") {
         let mut parts = rest.splitn(2, '$');
         let (salt_hex, hash_hex) = match (parts.next(), parts.next()) {

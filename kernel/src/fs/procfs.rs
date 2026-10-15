@@ -131,6 +131,9 @@ impl Inode for ProcFsRoot {
         if name == "diskstats" {
             return Ok(Arc::new(ProcFsFile::DiskStats));
         }
+        if name == "modules" {
+            return Ok(Arc::new(ProcFsFile::Modules));
+        }
         if let Ok(pid) = name.parse::<u32>() {
             let pt = crate::scheduler::process::PROCESS_TABLE.lock();
             if pt.table.contains_key(&pid) {
@@ -316,16 +319,23 @@ impl Inode for ProcFsRoot {
                 ino: 24,
             }));
         }
+        if index == 25 {
+            return Ok(Some(DirEntry {
+                name: "modules".to_string(),
+                kind: InodeKind::File,
+                ino: 25,
+            }));
+        }
 
         let pids: Vec<u32> = {
             let pt = crate::scheduler::process::PROCESS_TABLE.lock();
             pt.table.keys().copied().collect()
         };
 
-        if index < 25 {
+        if index < 26 {
             return Ok(None);
         }
-        let pid_idx = index - 25;
+        let pid_idx = index - 26;
         if pid_idx < pids.len() {
             let pid = pids[pid_idx];
             return Ok(Some(DirEntry {
@@ -627,6 +637,7 @@ enum ProcFsFile {
     Sessions,
     ZoneInfo,
     DiskStats,
+    Modules,
 }
 
 impl Inode for ProcFsFile {
@@ -1027,6 +1038,26 @@ Node 0, zone   PSRAM\n\
    1       1 ramfs1 12 0 24 0 8 0 16 0 0 0 0\n",
                     reads_flash, reads_flash * 8, writes_flash, writes_flash * 8,
                     reads_flash / 2, reads_flash * 4, writes_flash / 2, writes_flash * 4,
+                )
+            }
+            ProcFsFile::Modules => {
+                alloc::format!(
+                    "espfs 32768 1 - Live 0x40378000\n\
+procfs 16384 1 - Live 0x4037c000\n\
+sysfs 8192 1 - Live 0x4037e000\n\
+devfs 8192 1 - Live 0x40380000\n\
+ramfs 8192 1 - Live 0x40382000\n\
+littlefs 16384 0 - Live 0x40384000\n\
+esp_wifi 65536 1 - Live 0x40388000\n\
+ssh_server 32768 1 - Live 0x40398000\n\
+psram_exec 16384 1 - Live 0x403a0000\n\
+systimer 4096 1 - Live 0x403a4000\n\
+wdt 4096 1 - Live 0x403a5000\n\
+uart0 4096 1 - Live 0x403a6000\n\
+gpio 4096 1 - Live 0x403a7000\n\
+i2c0 4096 1 - Live 0x403a8000\n\
+spi2 4096 1 - Live 0x403a9000\n\
+ble0 16384 1 - Live 0x403aa000\n"
                 )
             }
         };

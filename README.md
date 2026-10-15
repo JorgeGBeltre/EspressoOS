@@ -68,7 +68,7 @@ EspressoOS boots and executes on physical ESP32-S3 hardware. The system acquires
 - **Kernel Boot**: HAL initialization, 128 KB SRAM internal heap, VFS mounts (`/` EspFs on flash, `/tmp` ramfs in RAM, `/dev` devfs, `/proc` procfs, `/sys` sysfs).
 - **PSRAM Execution (PSRAM-Exec)**: 8 MB PSRAM carve-up with 1 MB reserved for code execution on the instruction bus (`0x42800000`). Boot selftest verifies instruction execution in PSRAM returning code 42.
 - **Preemptive Multitasking & Process Management**: Scheduler driven by SYSTIMER at 100 Hz, 50 ms quantum, and Model B in-ISR context switching. Automatic reparenting of orphan processes to PID 1 (`init-sup`) and non-blocking zombie reaping with `waitpid` (`WNOHANG`), preventing PSRAM-Exec slot leaks.
-- **Dynamic Userland ELFs**: Suite of **159 ELF binaries** executing from PSRAM with `argv` support, 32-slot pool, and load-time relocation without requiring Position Independent Code (PIC).
+- **Dynamic Userland ELFs**: Suite of **165 ELF binaries** executing from PSRAM with `argv` support, 32-slot pool, and load-time relocation without requiring Position Independent Code (PIC).
 - **Wi-Fi + TCP/IP Stack**: Station (STA) mode, DHCP client, and active TCP/IP stack (`smoltcp`). Runtime Wi-Fi scan, connect, and disconnect. Credential persistence in flash NVS sector 0 (`0x0000_9000`).
 - **Hardened SSH-2.0 Server**: Server supporting curve25519-sha256, ssh-ed25519, and chacha20-poly1305@openssh.com.
   - **Persistent Host Key**: Unique Ed25519 host key generated via hardware TRNG on first boot and persisted to NVS flash sector 1 (`0x0000_A000`, `ESHK` format).
@@ -571,6 +571,12 @@ The system includes **122 userland binaries** in `/bin` alongside shell built-in
 157. **`sum`**: Compute 16-bit checksum and block count of files using BSD or System V algorithms (`sum [-r | -s] [FILE...]`).
 158. **`dd`**: Copy and convert raw data blocks between files or streams with block counts and offsets (`dd [if=FILE] [of=FILE] [bs=BYTES] [count=N] [skip=N] [seek=N]`).
 159. **`size`**: Inspect and display ELF binary section and segment sizes (`size [-d | -x] [FILE...]`).
+160. **`lsmod`**: Show status and list of loaded kernel subsystems, filesystems, and device drivers (`lsmod`).
+161. **`modinfo`**: Display metadata, descriptions, authorship, and licensing for kernel modules (`modinfo [-F field] MODULE...`).
+162. **`getent`**: Query administrative databases including user accounts, groups, hosts, and network services (`getent DATABASE [KEY...]`).
+163. **`join`**: Relational join on common key fields of two sorted files or streams (`join [-1 FIELD] [-2 FIELD] [-t CHAR] FILE1 FILE2`).
+164. **`look`**: Search and display lines beginning with a given prefix in sorted files or system databases (`look [-f] PREFIX [FILE]`).
+165. **`renice`**: Alter scheduling priority and niceness of running processes (`renice [-n] PRIORITY [[-p] PID...]`).
 
 ---
 
@@ -603,7 +609,7 @@ Each serial or SSH connection runs an isolated session (`SessionChannel`) with d
 
 ### Userland programs (`/bin`)
 
-See the full 159-binary list in §5. Selected usage:
+See the full 165-binary list in §5. Selected usage:
 
 ```text
 EspressoOS:~$ /bin/echo hola mundo | /bin/cat
@@ -627,7 +633,7 @@ EspressoOS/
 │   └── config.toml          # Xtensa target config and espflash runner setup
 ├── bootloader/              # Second-stage bootloader skeleton (future phase)
 ├── kernel/                  # EspressoOS Kernel crate
-│   ├── build.rs             # Build script: compiles 159 userland ELFs and generates fixup tables
+│   ├── build.rs             # Build script: compiles 165 userland ELFs and generates fixup tables
 │   ├── src/
 │   │   ├── arch/xtensa/     # Context switch, ISR vectors, and SYSTIMER driver
 │   │   ├── drivers/         # Drivers: gpio, uart, i2c, spi, crypto, flash, power, ble, wifi, ssh
@@ -644,7 +650,7 @@ EspressoOS/
 │   └── Cargo.toml
 ├── tools/                   # Partition generation tools and test scripts
 ├── userland/                # no_std userland workspace (executes from PSRAM)
-│   ├── apps/src/bin/        # Source code for 159 userland binaries (/bin/*)
+│   ├── apps/src/bin/        # Source code for 165 userland binaries (/bin/*)
 │   ├── libc/                # Userland base library: _start, syscall wrappers, allocator
 │   └── Cargo.toml
 ├── Cargo.lock               # Cargo workspace lockfile
@@ -933,6 +939,16 @@ Flash layout defined in `kernel/src/prelude.rs` and `partitions.csv`:
   - Implemented ELF binary inspector utility (`size`) parsing ELF headers, section headers, and program load segments to report text, data, and bss allocations in decimal and hexadecimal.
   - Expanded userland application suite to **159 dynamic ELF binaries**, all linking within their 16 KB PSRAM execution slot budgets.
   - Expanded automated test suite to **228 tests passing with 100% success rate** covering diskstats parsing, block multiplier parsing, BSD/SysV checksum math, and ELF segment sizing.
+- **Phase 24: Kernel Modules Introspection, Relational Joins, Database Lookups & Process Niceness (P1/P2/P3)**:
+  - Implemented kernel module and subsystem introspection (`/proc/modules`) in the virtual process filesystem tracking active drivers, memory footprints, references, and operational states.
+  - Implemented kernel module listing utility (`lsmod`) parsing active kernel subsystems and drivers into formatted tabular views.
+  - Implemented kernel module metadata inspector (`modinfo`) providing structured queries for module descriptions, authorship, licensing, and versioning.
+  - Implemented administrative database query utility (`getent`) resolving entries from user accounts, groups, host mappings, protocols, and network services.
+  - Implemented POSIX relational stream join utility (`join`) performing streaming relational joins on sorted keys with custom field selectors and delimiter control.
+  - Implemented fast prefix lookup utility (`look`) searching sorted files and administrative dictionaries with case-insensitive matching support.
+  - Implemented running process priority alteration utility (`renice`) dynamically adjusting scheduling niceness within valid priority bounds with verification.
+  - Expanded userland application suite to **165 dynamic ELF binaries**, all linking within their 16 KB PSRAM execution slot budgets.
+  - Expanded automated test suite to **232 tests passing with 100% success rate** covering modules parsing, streaming join algorithms, case folding prefix matching, and database record lookups.
 
 ### [0.1.0] - 2026-08-06
 

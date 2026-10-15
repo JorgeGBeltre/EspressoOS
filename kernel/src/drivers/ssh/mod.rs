@@ -25,7 +25,11 @@ pub use crypto_rng::HwRng;
 use ed25519_dalek::SigningKey;
 use proto::{frame_packet, Reader, Writer};
 
+use zeroize::Zeroize;
+
 pub const SSH_PORT: u16 = 22;
+
+const MAX_RX_BUFFER_SIZE: usize = 8192;
 
 const SSH_MSG_USERAUTH_PK_OK: u8 = 60;
 
@@ -273,12 +277,16 @@ impl Connection {
     fn read_all<T: Transport>(&mut self, t: &mut T) -> KResult<()> {
         let mut tmp = [0u8; 1024];
         loop {
-            match t.read(&mut tmp) {
+            if self.rx.len() >= MAX_RX_BUFFER_SIZE {
+                break;
+            }
+            let max_to_read = tmp.len().min(MAX_RX_BUFFER_SIZE - self.rx.len());
+            match t.read(&mut tmp[..max_to_read]) {
                 Ok(0) => break,
                 Ok(n) => {
                     self.rx.extend_from_slice(&tmp[..n]);
                     self.last_activity_ms = crate::arch::xtensa::timer::uptime_ms();
-                    if n < tmp.len() {
+                    if n < max_to_read {
                         break;
                     }
                 }
@@ -553,6 +561,8 @@ impl Connection {
         kex::derive_key(&kx.k_mpint, &kx.h, b'D', &session_id, &mut d_key);
         self.enc_in = Some(Aead::new(&c_key));
         self.enc_out = Some(Aead::new(&d_key));
+        c_key.zeroize();
+        d_key.zeroize();
 
         self.out_encrypted = true;
 
@@ -739,11 +749,17 @@ impl Connection {
         let req_type = r.get_string()?.to_vec();
         let want_reply = r.get_bool()?;
 
+        let mut exec_cmd = None;
         let (cols, rows) = if req_type == b"pty-req" {
             let _term = r.get_string()?;
             let cols = r.get_u32()?;
             let rows = r.get_u32()?;
             (cols, rows)
+        } else if req_type == b"exec" {
+            if let Ok(cmd) = r.get_string() {
+                exec_cmd = Some(cmd.to_vec());
+            }
+            (0, 0)
         } else {
             (0, 0)
         };
@@ -753,7 +769,10 @@ impl Connection {
         // two are not the same thing.
         let user = self.auth_user.clone();
         let (remote_id, success) = match self.channel.as_mut() {
-            Some(ch) => (ch.remote_id, ch.on_request(&req_type, cols, rows, &user)),
+            Some(ch) => (
+                ch.remote_id,
+                ch.on_request(&req_type, cols, rows, &user, exec_cmd.as_deref()),
+            ),
             None => return Ok(()),
         };
 

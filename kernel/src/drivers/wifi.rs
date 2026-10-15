@@ -519,6 +519,7 @@ pub fn net_task(_arg: usize) {
     }
     set_status(WifiStatus::Connecting);
     *CURRENT_SSID.lock() = Some(boot_ssid.clone());
+    println!("[net] connecting to SSID '{}'...", boot_ssid);
     let _ = controller.connect();
 
     // Esperar la asociación con las credenciales de arranque ANTES de montar la
@@ -685,6 +686,8 @@ pub fn net_task(_arg: usize) {
                         if let Some(ip) = iface.ipv4_addr() {
                             *CURRENT_IP.lock() = Some(ip.octets());
                             set_status(WifiStatus::Connected);
+                            let oct = ip.octets();
+                            println!("[net] DHCP IP acquired: {}.{}.{}.{}", oct[0], oct[1], oct[2], oct[3]);
                         }
                         have_ip = true;
                     }

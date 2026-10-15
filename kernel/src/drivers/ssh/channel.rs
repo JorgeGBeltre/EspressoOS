@@ -14,7 +14,7 @@ pub const WINDOW_ADJUST_THRESHOLD: u32 = INITIAL_WINDOW / 2;
 
 const SSH_SHELL_STACK: usize = 8 * 1024;
 
-const SSH_SHELL_PRIO: u8 = 1;
+const SSH_SHELL_PRIO: u8 = 10;
 
 /// The shell behind one SSH channel.
 ///
@@ -128,7 +128,14 @@ impl Channel {
         }
     }
 
-    pub fn on_request(&mut self, req_type: &[u8], cols: u32, rows: u32, user: &str) -> bool {
+    pub fn on_request(
+        &mut self,
+        req_type: &[u8],
+        cols: u32,
+        rows: u32,
+        user: &str,
+        cmd: Option<&[u8]>,
+    ) -> bool {
         match req_type {
             b"pty-req" => {
                 self.pty_cols = cols;
@@ -143,7 +150,18 @@ impl Channel {
                 }
                 Err(_) => false,
             },
-
+            b"exec" => match SessionShell::start(self.local_id, user) {
+                Ok(s) => {
+                    if let Some(c) = cmd {
+                        s.chan.push_input(c);
+                        s.chan.push_input(b"\nexit\n");
+                    }
+                    self.shell = Some(s);
+                    self.shell_started = true;
+                    true
+                }
+                Err(_) => false,
+            },
             _ => false,
         }
     }

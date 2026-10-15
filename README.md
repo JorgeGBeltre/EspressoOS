@@ -142,13 +142,14 @@ Memory layout defined in `kernel/src/prelude.rs` (`layout`).
   - 512 KB data region (addressed at `0x3c170000`).
   - Assigned as 32 independent slots of 16 KB each. Managed via lock-free atomic bitmasks (`AtomicU32`).
   - Code is written through data alias and executed through instruction bus alias, maintaining cache coherence via `Cache_WriteBack_All` and `Cache_Invalidate_ICache_All`.
-- **Baseline Memory Protection (Active by Default)**:
+- **Memory Model & Architecture (NOMMU)**:
+  - Operates on a single flat physical address space without MMU virtual paging.
+  - Task stacks are dynamically allocated from the kernel heap and monitored for stack overflow via the hardware `ASSIST_DEBUG` peripheral (`core_0_sp_min` and `core_0_sp_max` registers).
   - Task stacks are painted with `0xDEADBEEF` at creation; `stack_high_water()` monitors peak stack usage, requiring at least a 25% free margin.
-  - 32-slot PSRAM-Exec execution pools enforce strict slot boundary isolation for userland ELF binaries.
-  - Syscall argument sanitization inspects buffer pointers and prevents out-of-bounds reads/writes into kernel data structures.
-- **Hardware PMS (MPU / World Controller)** (`kernel/src/mm/mpu.rs`):
-  - Enabled via `--features pms` (disabled by default to maintain zero-copy unbuffered DMA transfers for peripheral controllers).
-  - Configures the ESP32-S3 hardware Peripheral & Memory Protection Unit registers for DRAM0/IRAM0 violation detection and enables `pms world1` in the kernel shell to enforce strict `W^X` userland sandboxing.
+  - **PSRAM-Exec Slot Isolation**: 32 independent slots of 16 KB in PSRAM enforce execution boundaries for userland ELF binaries.
+  - **Syscall Pointer Validation**: The `validate_user(ptr, len)` routine validates every pointer crossing the syscall boundary, guaranteeing user processes can only read and write within their designated stack range or their process PSRAM data slot.
+- **Hardware PMS (Experimental)** (`kernel/src/mm/mpu.rs`):
+  - Optional feature gated under `--features pms` for experimenting with Permission Management System / World Controller privilege separation.
 - **Stack Configurations**:
   - General task stack size: 16 KB.
   - Network task (`net`) stack size: 24 KB.
@@ -158,7 +159,7 @@ Memory layout defined in `kernel/src/prelude.rs` (`layout`).
 ### 3.3 Scheduler, Processes & Signals
 
 - **Multitasking Scheduler** (`kernel/src/scheduler/mod.rs`):
-  - Strategy: Round-Robin selection among `Ready` tasks.
+  - Strategy: Priority-aware selection where the ready task with the highest priority is dispatched first, with Round-Robin fairness among tasks of identical priority.
   - Core Execution Model:
     - **Default (Single-Core ProCpu)**: The scheduler binds tasks to `Core 0` (ProCpu), ensuring deterministic, jitter-free timing for `esp-wifi` MAC/PHY interrupts and avoiding spinlock contention on memory-mapped peripheral registers.
     - **Dual-Core SMP (`--features smp`)**: Boots both ProCpu and AppCpu, assigning per-core idle loops and distributing ready userland processes across both cores.
@@ -303,8 +304,11 @@ The system integrates identity management and user authentication for the SSH se
 - **Password Authentication (`/etc/passwd`)**:
   - On SSH password login request, the server attempts to resolve `/etc/passwd` via VFS (`vfs::mount::resolve("/etc/passwd")`).
   - Matches the user in constant time (`ct_eq`). If the stored field starts with `$pbkdf2-sha256$i=`, it parses iterations and salt, recomputes the PBKDF2-HMAC-SHA256 digest, and verifies in constant time. If it starts with legacy `$s5$`, it falls back to verify `SHA-256(salt || password)`. If un-prefixed, it compares against plaintext in constant time.
-  - If `/etc/passwd` does not exist, it falls back to compiled developer credentials (`DEV_USER` / `DEV_PASSWORD`).
-- **Connection Timeouts & Socket Teardown**:
+  - When `/etc/passwd` contains configured accounts, it strictly governs authentication; compiled bootstrap credentials are completely disabled. On unconfigured systems without `/etc/passwd`, bootstrap credentials (`youareme` / `851963Y@#`) allow initial provisioning.
+- **Cryptographic Key Hygiene & Zeroize**:
+  - Symmetric session ciphers (`Aead` in `drivers/ssh/crypt.rs`) implement `zeroize::Zeroize` and wipe key material (`k1`, `k2`) upon drop. Intermediate key derivation arrays (`c_key`, `d_key`) are wiped immediately after handshake completion.
+- **Connection Security & Resource Bounds**:
+  - **Bounded RX Buffer**: Socket ingress is strictly bounded (`MAX_RX_BUFFER_SIZE = 8192`), preventing memory exhaustion and denial-of-service (OOM) attacks against the kernel heap.
   - **Auth Timeout**: Non-authenticated sessions terminate after 60 seconds of inactivity.
   - **Idle Timeout**: Interactive sessions terminate after 300 seconds (5 minutes) of silence.
   - **TCP FIN/RST Teardown**: Sockets in `CloseWait` or abruptly closed by the client are immediately torn down, freeing the session shell and channel.

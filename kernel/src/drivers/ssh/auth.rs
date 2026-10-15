@@ -106,6 +106,7 @@ fn verify_stored(field: &str, password: &[u8]) -> bool {
 }
 
 pub fn check_password(user: &str, password: &[u8]) -> AuthResult {
+    let mut passwd_has_entries = false;
     if let Ok(inode) = crate::vfs::mount::resolve("/etc/passwd") {
         let mut buf = [0u8; 512];
         if let Ok(n) = inode.read_at(0, &mut buf) {
@@ -117,6 +118,7 @@ pub fn check_password(user: &str, password: &[u8]) -> AuthResult {
                     }
                     let mut parts = line.split(':');
                     if let (Some(u), Some(field)) = (parts.next(), parts.next()) {
+                        passwd_has_entries = true;
                         let u_trimmed = u.trim();
                         let f_trimmed = field.trim();
                         if ct_eq(user.as_bytes(), u_trimmed.as_bytes()) {
@@ -130,6 +132,10 @@ pub fn check_password(user: &str, password: &[u8]) -> AuthResult {
                 }
             }
         }
+    }
+
+    if passwd_has_entries {
+        return AuthResult::Failure;
     }
 
     let user_ok = ct_eq(user.as_bytes(), config::DEV_USER.as_bytes());

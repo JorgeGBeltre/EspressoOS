@@ -134,6 +134,12 @@ impl Inode for ProcFsRoot {
         if name == "modules" {
             return Ok(Arc::new(ProcFsFile::Modules));
         }
+        if name == "swaps" {
+            return Ok(Arc::new(ProcFsFile::Swaps));
+        }
+        if name == "misc" {
+            return Ok(Arc::new(ProcFsFile::Misc));
+        }
         if let Ok(pid) = name.parse::<u32>() {
             let pt = crate::scheduler::process::PROCESS_TABLE.lock();
             if pt.table.contains_key(&pid) {
@@ -326,16 +332,30 @@ impl Inode for ProcFsRoot {
                 ino: 25,
             }));
         }
+        if index == 26 {
+            return Ok(Some(DirEntry {
+                name: "swaps".to_string(),
+                kind: InodeKind::File,
+                ino: 26,
+            }));
+        }
+        if index == 27 {
+            return Ok(Some(DirEntry {
+                name: "misc".to_string(),
+                kind: InodeKind::File,
+                ino: 27,
+            }));
+        }
 
         let pids: Vec<u32> = {
             let pt = crate::scheduler::process::PROCESS_TABLE.lock();
             pt.table.keys().copied().collect()
         };
 
-        if index < 26 {
+        if index < 28 {
             return Ok(None);
         }
-        let pid_idx = index - 26;
+        let pid_idx = index - 28;
         if pid_idx < pids.len() {
             let pid = pids[pid_idx];
             return Ok(Some(DirEntry {
@@ -638,6 +658,8 @@ enum ProcFsFile {
     ZoneInfo,
     DiskStats,
     Modules,
+    Swaps,
+    Misc,
 }
 
 impl Inode for ProcFsFile {
@@ -1058,6 +1080,20 @@ gpio 4096 1 - Live 0x403a7000\n\
 i2c0 4096 1 - Live 0x403a8000\n\
 spi2 4096 1 - Live 0x403a9000\n\
 ble0 16384 1 - Live 0x403aa000\n"
+                )
+            }
+            ProcFsFile::Swaps => {
+                alloc::format!("Filename\t\t\t\tType\t\tSize\t\tUsed\t\tPriority\n")
+            }
+            ProcFsFile::Misc => {
+                alloc::format!(
+                    " 10 psram_exec\n\
+                     20 power\n\
+                     30 watchdog\n\
+                     40 sha0\n\
+                     50 passwd\n\
+                     60 random\n\
+                     61 urandom\n"
                 )
             }
         };

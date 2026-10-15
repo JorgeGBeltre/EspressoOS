@@ -68,7 +68,7 @@ EspressoOS boots and executes on physical ESP32-S3 hardware. The system acquires
 - **Kernel Boot**: HAL initialization, 128 KB SRAM internal heap, VFS mounts (`/` EspFs on flash, `/tmp` ramfs in RAM, `/dev` devfs, `/proc` procfs, `/sys` sysfs).
 - **PSRAM Execution (PSRAM-Exec)**: 8 MB PSRAM carve-up with 1 MB reserved for code execution on the instruction bus (`0x42800000`). Boot selftest verifies instruction execution in PSRAM returning code 42.
 - **Preemptive Multitasking & Deterministic Scheduling**: Scheduler driven by SYSTIMER at 100 Hz, 50 ms quantum, and Model B in-ISR context switching. By default, the scheduler operates on Core 0 (ProCpu), ensuring deterministic, jitter-free timing for `esp-wifi` MAC/PHY interrupts and avoiding cross-core bus contention. Opt-in dual-core SMP dispatching is available via `--features smp`. Automatic reparenting of orphan processes to PID 1 (`init-sup`) and non-blocking zombie reaping with `waitpid` (`WNOHANG`), preventing PSRAM-Exec slot leaks.
-- **Dynamic Userland ELFs**: Suite of **165 ELF binaries** executing from PSRAM with `argv` support, 32-slot pool, and load-time relocation without requiring Position Independent Code (PIC).
+- **Dynamic Userland ELFs**: Suite of **171 ELF binaries** executing from PSRAM with `argv` support, 32-slot pool, and load-time relocation without requiring Position Independent Code (PIC).
 - **Wi-Fi + TCP/IP Stack**: Station (STA) mode, DHCP client, and active TCP/IP stack (`smoltcp`). Runtime Wi-Fi scan, connect, and disconnect. Credential persistence in flash NVS sector 0 (`0x0000_9000`).
 - **Hardened SSH-2.0 Server**: Server supporting curve25519-sha256, ssh-ed25519, and chacha20-poly1305@openssh.com.
   - **Persistent Host Key**: Unique Ed25519 host key generated via hardware TRNG on first boot and persisted to NVS flash sector 1 (`0x0000_A000`, `ESHK` format).
@@ -120,7 +120,7 @@ Entry point located in `kernel/src/main.rs` (`#[esp_hal::main] fn main() -> !`):
    - Mount root `/` from NOR flash (`EspFs::mount()`). Falls back to `ramfs` if EspFs is unformatted or corrupt.
    - Mount `/tmp` (ramfs), `/proc` (procfs), `/sys` (sysfs), `/mnt` (ramfs).
 6. **PID 0 File Descriptor Table**: Seed `/dev/console` for standard streams (fd 0, 1, 2).
-7. **Userland Deployment**: `install_userland()` inspects all 165 embedded binaries and deploys or updates `/bin/*` on EspFs.
+7. **Userland Deployment**: `install_userland()` inspects all 171 embedded binaries and deploys or updates `/bin/*` on EspFs.
 8. **System Files Setup**: `init_etc_files()` writes `/etc/rc`. If `/etc/passwd` exists, the kernel logs a warning noting custom SSH credentials are active.
 9. **I2C and SPI Init**: Initialize `I2C0` and `SPI2`.
 10. **Scheduler & Supervisor Bring-up**: Task creation:
@@ -231,6 +231,8 @@ The system call ABI is frozen across syscall numbers 0 to 29 (`kernel/src/syscal
 - **ProcFs Synthesized Files (`/proc`)**:
   - `/proc/uptime`: Uptime in milliseconds.
   - `/proc/meminfo`: Memory usage breakdown (SRAM heap, PSRAM heap, PSRAM exec slots).
+  - `/proc/swaps`: System swap partition configuration, allocation metrics, and zero-swap usage reporting.
+  - `/proc/misc`: Miscellaneous system drivers, watchdog hooks, and hardware auxiliary interfaces.
   - `/proc/stacks`, `/proc/tasks`: Complete kernel task listing, states, and stack watermarks.
   - `/proc/net/sockets`: Active network socket table.
   - `/proc/watchdog`: Watchdog enabled status, timeout, feed count, and boot reset reason.
@@ -377,7 +379,7 @@ cargo build --release
 cargo run --release
 ```
 
-`kernel/build.rs` automatically compiles all 165 userland binaries, generates relocation fixup tables, and embeds them into the kernel image.
+`kernel/build.rs` automatically compiles all 171 userland binaries, generates relocation fixup tables, and embeds them into the kernel image.
 
 ### 4.4 Feature Gates & Build Configurations
 
@@ -394,7 +396,7 @@ The following feature flags are available in `kernel/Cargo.toml`:
 #### Compiling with Custom Profiles:
 
 ```bash
-# Standard Production Build (Single-core ProCpu determinism, baseline memory protection, 165 ELFs):
+# Standard Production Build (Single-core ProCpu determinism, baseline memory protection, 171 ELFs):
 cargo run --release
 
 # Dual-Core SMP Multiprocessing:
@@ -420,7 +422,7 @@ cargo run --release --features "smp pms"
 ========================================
 [kernel] flash: 16 MB usable
 [kernel] / mounted on flash (espfs)
-[kernel] userland: 165 binaries installed/updated in EspFs
+[kernel] userland: 171 binaries installed/updated in EspFs
 [net] connecting to SSID '...'
 [net] associated with AP; negotiating DHCP...
 [net] IP = 192.168.2.146
@@ -434,7 +436,7 @@ EspressoOS:~$
 
 ## 5. Complete Command Reference
 
-The system includes **165 userland binaries** in `/bin` alongside shell built-in commands.
+The system includes **171 userland binaries** in `/bin` alongside shell built-in commands.
 
 ### Userland Binaries (`/bin/*`)
 
@@ -603,6 +605,12 @@ The system includes **165 userland binaries** in `/bin` alongside shell built-in
 163. **`join`**: Relational join on common key fields of two sorted files or streams (`join [-1 FIELD] [-2 FIELD] [-t CHAR] FILE1 FILE2`).
 164. **`look`**: Search and display lines beginning with a given prefix in sorted files or system databases (`look [-f] PREFIX [FILE]`).
 165. **`renice`**: Alter scheduling priority and niceness of running processes (`renice [-n] PRIORITY [[-p] PID...]`).
+166. **`file`**: Determine file type and format via magic bytes and header inspection (`file [-b] [FILE...]`).
+167. **`readelf`**: Display detailed internal structure and headers of ELF binaries (`readelf [-h] [-l] [-S] [-a] FILE`).
+168. **`tac`**: Concatenate and output lines of files or standard input in reverse order (`tac [FILE...]`).
+169. **`pgrep`**: Search for active processes matching name patterns or exact command strings (`pgrep [-l] [-x] PATTERN`).
+170. **`pkill`**: Signal processes matching specified process names or patterns (`pkill [-SIGNAL] [-e] PATTERN`).
+171. **`shred`**: Securely overwrite and destroy files to prevent recovery (`shred [-u] [-z] [-n N] FILE...`).
 
 ---
 
@@ -635,7 +643,7 @@ Each serial or SSH connection runs an isolated session (`SessionChannel`) with d
 
 ### Userland programs (`/bin`)
 
-See the full 165-binary list in §5. Selected usage:
+See the full 171-binary list in §5. Selected usage:
 
 ```text
 EspressoOS:~$ /bin/echo hola mundo | /bin/cat
@@ -659,7 +667,7 @@ EspressoOS/
 │   └── config.toml          # Xtensa target config and espflash runner setup
 ├── bootloader/              # Second-stage bootloader skeleton (future phase)
 ├── kernel/                  # EspressoOS Kernel crate
-│   ├── build.rs             # Build script: compiles 165 userland ELFs and generates fixup tables
+│   ├── build.rs             # Build script: compiles 171 userland ELFs and generates fixup tables
 │   ├── src/
 │   │   ├── arch/xtensa/     # Context switch, ISR vectors, and SYSTIMER driver
 │   │   ├── drivers/         # Drivers: gpio, uart, i2c, spi, crypto, flash, power, ble, wifi, ssh
@@ -676,7 +684,7 @@ EspressoOS/
 │   └── Cargo.toml
 ├── tools/                   # Partition generation tools and test scripts
 ├── userland/                # no_std userland workspace (executes from PSRAM)
-│   ├── apps/src/bin/        # Source code for 165 userland binaries (/bin/*)
+│   ├── apps/src/bin/        # Source code for 171 userland binaries (/bin/*)
 │   ├── libc/                # Userland base library: _start, syscall wrappers, allocator
 │   └── Cargo.toml
 ├── Cargo.lock               # Cargo workspace lockfile
@@ -980,6 +988,16 @@ Flash layout defined in `kernel/src/prelude.rs` and `partitions.csv`:
   - Implemented constant-time verification for PBKDF2-derived passwords, legacy salted hashes, and plaintext in the SSH daemon.
   - Aligned userland application metrics consistently across all documentation sections to reflect all 165 dynamic ELF binaries.
   - Clarified runtime architecture distinguishing default uniprocessor execution for real-time Wi-Fi responsiveness from opt-in dual-core multiprocessing, and baseline slot memory safety from opt-in hardware memory protection.
+- **Phase 25 — Advanced Inspection, Process Signaling & Secure Destruction**:
+  - Implemented file format inspector (`file`) recognizing Xtensa ELF executables, shebang scripts, TAR archives, JSON, markup, and ASCII text with CRLF detection.
+  - Implemented ELF structural inspector (`readelf`) decoding 32-bit ELF headers, segment program tables, and section headers.
+  - Implemented reverse stream concatenator (`tac`) streaming file lines in reverse order for tail-first log analysis.
+  - Implemented process lookup utility (`pgrep`) scanning process commandlines with name filtering and exact matching.
+  - Implemented process signaling utility (`pkill`) dispatching signals to active processes matched by executable name.
+  - Implemented multi-pass secure file destruction utility (`shred`) overwriting files with cryptographic pseudo-random data, optional zero-pass wiping, and file truncation/removal.
+  - Added synthetic swap and miscellaneous device nodes to the virtual process filesystem (`/proc/swaps` and `/proc/misc`).
+  - Expanded userland application suite to **171 dynamic ELF binaries**, all linking within their 16 KB PSRAM execution slot budgets.
+  - Expanded automated test suite to **238 tests passing with 100% success rate** covering file classification, readelf parsing, tac line reversal, pgrep/pkill matching, shred entropy overwrite, and procfs nodes.
 
 ### [0.1.0] - 2026-08-06
 

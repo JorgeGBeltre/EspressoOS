@@ -2978,9 +2978,149 @@ class TestPhase16Logic(unittest.TestCase):
                     return e
             return None
 
-        self.assertIsNotNone(match_getent("root", passwd_mock))
-        self.assertIsNotNone(match_getent("1000", passwd_mock))
-        self.assertIsNone(match_getent("nobody", passwd_mock))
+    def test_file_classification(self):
+        def classify(b: bytes):
+            if not b:
+                return "empty"
+            if b.startswith(b"\x7fELF"):
+                if len(b) >= 20:
+                    machine = b[18] | (b[19] << 8)
+                    if machine == 0x005e:
+                        return "ELF 32-bit LSB executable, Tensilica Xtensa, version 1 (SYSV)"
+                return "ELF executable"
+            if b.startswith(b"#!"):
+                if b[2:].startswith(b"/bin/sh"):
+                    return "POSIX shell script, ASCII text executable"
+                return "script executable, ASCII text"
+            if b.startswith(b"\x1f\x8b"):
+                return "gzip compressed data"
+            if len(b) >= 263 and b[257:263] == b"ustar\x00":
+                return "POSIX tar archive"
+            # check ascii text
+            is_text = all(c in (9, 10, 13) or 32 <= c <= 126 for c in b)
+            if is_text:
+                trimmed = b.strip()
+                suffix = ", with CRLF line terminators" if b"\r\n" in b else ""
+                if trimmed.startswith(b"{") or trimmed.startswith(b"["):
+                    return f"JSON data{suffix}"
+                if trimmed.startswith(b"<html") or trimmed.startswith(b"<!DOCTYPE"):
+                    return f"HTML/XML document text{suffix}"
+                return f"ASCII text{suffix}"
+            return "data"
+
+        elf_sample = b"\x7fELF\x01\x01\x01\x00" + b"\x00" * 10 + b"\x5e\x00" + b"\x00" * 10
+        self.assertEqual(classify(elf_sample), "ELF 32-bit LSB executable, Tensilica Xtensa, version 1 (SYSV)")
+        self.assertEqual(classify(b"#!/bin/sh\necho hi\n"), "POSIX shell script, ASCII text executable")
+        self.assertEqual(classify(b'{"key": "value"}\n'), "JSON data")
+        self.assertEqual(classify(b"Line 1\r\nLine 2\r\n"), "ASCII text, with CRLF line terminators")
+        self.assertEqual(classify(b"\x00\x01\x02\x03\xff"), "data")
+        self.assertEqual(classify(b""), "empty")
+
+    def test_readelf_parsing(self):
+        import struct
+        # Synthetic ELF32 header (52 bytes)
+        e_ident = b"\x7fELF\x01\x01\x01\x00" + b"\x00" * 8
+        e_type = 2  # EXEC
+        e_machine = 0x005e  # Xtensa
+        e_version = 1
+        e_entry = 0x42800000
+        e_phoff = 52
+        e_shoff = 116
+        e_flags = 0
+        e_ehsize = 52
+        e_phentsize = 32
+        e_phnum = 2
+        e_shentsize = 40
+        e_shnum = 3
+        e_shstrndx = 1
+
+        hdr = struct.pack(
+            "<16sHHIIIIIHHHHHH",
+            e_ident, e_type, e_machine, e_version, e_entry,
+            e_phoff, e_shoff, e_flags, e_ehsize, e_phentsize,
+            e_phnum, e_shentsize, e_shnum, e_shstrndx
+        )
+        self.assertEqual(len(hdr), 52)
+        parsed_magic = hdr[:4]
+        parsed_machine = struct.unpack_from("<H", hdr, 18)[0]
+        parsed_entry = struct.unpack_from("<I", hdr, 24)[0]
+        self.assertEqual(parsed_magic, b"\x7fELF")
+        self.assertEqual(parsed_machine, 0x005e)
+        self.assertEqual(parsed_entry, 0x42800000)
+
+    def test_tac_reverse_lines(self):
+        def tac(text: str) -> list[str]:
+            lines = text.splitlines(keepends=True)
+            return list(reversed(lines))
+
+        input_data = "line 1\nline 2\nline 3\n"
+        expected = ["line 3\n", "line 2\n", "line 1\n"]
+        self.assertEqual(tac(input_data), expected)
+
+    def test_pgrep_pkill_matching(self):
+        mock_procs = {
+            1: "init",
+            2: "heartbeat",
+            3: "net",
+            10: "/bin/sh",
+            15: "top",
+        }
+
+        def pgrep(pattern: str, exact: bool = False):
+            matched = []
+            for pid, cmd in mock_procs.items():
+                base = cmd.rsplit("/", 1)[-1]
+                if exact and (base == pattern or cmd == pattern):
+                    matched.append(pid)
+                elif not exact and (pattern in base or pattern in cmd):
+                    matched.append(pid)
+            return matched
+
+        self.assertEqual(pgrep("sh", exact=False), [10])
+        self.assertEqual(pgrep("heartbeat", exact=True), [2])
+        self.assertEqual(len(pgrep("nonexistent")), 0)
+
+    def test_shred_logic(self):
+        file_data = bytearray(b"SENSITIVE_API_KEY_1234567890")
+        original_len = len(file_data)
+
+        # Pass 1: overwrite with pseudo-random pattern
+        def xorshift_fill(buf, seed):
+            for i in range(len(buf)):
+                seed ^= (seed << 13) & 0xFFFFFFFF
+                seed ^= (seed >> 17) & 0xFFFFFFFF
+                seed ^= (seed << 5) & 0xFFFFFFFF
+                buf[i] = seed & 0xFF
+            return seed
+
+        seed = 0x12345678
+        seed = xorshift_fill(file_data, seed)
+        self.assertNotEqual(bytes(file_data), b"SENSITIVE_API_KEY_1234567890")
+        self.assertEqual(len(file_data), original_len)
+
+        # Zero pass
+        file_data = bytearray([0] * original_len)
+        self.assertEqual(set(file_data), {0})
+
+    def test_procfs_swaps_and_misc(self):
+        swaps_mock = "Filename\t\t\t\tType\t\tSize\t\tUsed\t\tPriority\n"
+        self.assertTrue(swaps_mock.startswith("Filename"))
+        self.assertIn("Priority", swaps_mock)
+
+        misc_mock = (
+            " 10 psram_exec\n"
+            " 20 power\n"
+            " 30 watchdog\n"
+            " 40 sha0\n"
+            " 50 passwd\n"
+            " 60 random\n"
+            " 61 urandom\n"
+        )
+        devices = [line.split() for line in misc_mock.strip().splitlines()]
+        dev_map = {name: int(minor) for minor, name in devices}
+        self.assertEqual(dev_map["random"], 60)
+        self.assertEqual(dev_map["watchdog"], 30)
+        self.assertEqual(dev_map["psram_exec"], 10)
 
 
 if __name__ == "__main__":

@@ -2900,6 +2900,88 @@ class TestPhase16Logic(unittest.TestCase):
         self.assertEqual(total, 9728)
         self.assertEqual(hex(total), "0x2600")
 
+    def test_proc_modules_parsing(self):
+        modules_mock = (
+            "espfs 32768 1 - Live 0x40378000\n"
+            "procfs 16384 1 - Live 0x4037c000\n"
+            "esp_wifi 65536 1 - Live 0x40388000\n"
+            "ssh_server 32768 1 - Live 0x40398000\n"
+            "psram_exec 16384 1 - Live 0x403a0000\n"
+        )
+        mods = {}
+        for line in modules_mock.splitlines():
+            parts = line.split()
+            if len(parts) >= 6:
+                mods[parts[0]] = {
+                    "size": int(parts[1]),
+                    "used": int(parts[2]),
+                    "state": parts[4],
+                    "addr": parts[5],
+                }
+        self.assertIn("espfs", mods)
+        self.assertIn("esp_wifi", mods)
+        self.assertEqual(mods["espfs"]["size"], 32768)
+        self.assertEqual(mods["espfs"]["state"], "Live")
+        self.assertEqual(mods["esp_wifi"]["size"], 65536)
+
+    def test_join_algorithm(self):
+        def join_lines(lines1, lines2):
+            joined = []
+            i, j = 0, 0
+            while i < len(lines1) and j < len(lines2):
+                f1 = lines1[i].split(maxsplit=1)
+                f2 = lines2[j].split(maxsplit=1)
+                k1, k2 = f1[0], f2[0]
+                if k1 == k2:
+                    joined.append(f"{k1} {f1[1]} {f2[1]}")
+                    i += 1
+                    j += 1
+                elif k1 < k2:
+                    i += 1
+                else:
+                    j += 1
+            return joined
+
+        l1 = ["100 Alice Dev", "200 Bob QA", "300 Charlie Ops"]
+        l2 = ["100 Engineering", "200 Product", "400 Sales"]
+        res = join_lines(l1, l2)
+        self.assertEqual(len(res), 2)
+        self.assertEqual(res[0], "100 Alice Dev Engineering")
+        self.assertEqual(res[1], "200 Bob QA Product")
+
+    def test_look_prefix_matching(self):
+        def look(prefix, lines, ignore_case=False):
+            matched = []
+            for line in lines:
+                if ignore_case:
+                    if line.lower().startswith(prefix.lower()):
+                        matched.append(line)
+                else:
+                    if line.startswith(prefix):
+                        matched.append(line)
+            return matched
+
+        lines = ["apple", "Application", "Banana", "approach", "Cat"]
+        sens = look("app", lines, False)
+        insens = look("app", lines, True)
+        self.assertEqual(sens, ["apple", "approach"])
+        self.assertEqual(insens, ["apple", "Application", "approach"])
+
+    def test_getent_matching(self):
+        passwd_mock = [
+            "root:x:0:0:root:/home/root:/bin/sh",
+            "admin:x:1000:1000:admin:/home/admin:/bin/sh",
+        ]
+        def match_getent(key, entries):
+            for e in entries:
+                if any(f == key for f in e.split(":")):
+                    return e
+            return None
+
+        self.assertIsNotNone(match_getent("root", passwd_mock))
+        self.assertIsNotNone(match_getent("1000", passwd_mock))
+        self.assertIsNone(match_getent("nobody", passwd_mock))
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

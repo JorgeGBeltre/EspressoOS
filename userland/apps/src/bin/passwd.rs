@@ -18,12 +18,12 @@ struct PasswdReq {
     pass_len: usize,
 }
 
-/// passwd(1). Fija la credencial SSH vía `/dev/passwd` + ioctl. El kernel sala y hashea
-/// (SHA-256+salt, `$s5$...`) ANTES de escribir `/etc/passwd` -- el password nunca llega a
-/// flash en texto plano (SP2 R6). `drivers/ssh/auth.rs` consulta `/etc/passwd` ANTES que el
-/// DEV_USER/DEV_PASSWORD compilado, así que esto cambia el login SIN recompilar y PERSISTE
-/// en EspFs (sobrevive reinicios y reflasheo). `rm /etc/passwd` revierte a la credencial
-/// compilada.
+/// passwd(1). Fija la credencial SSH vía `/dev/passwd` + ioctl. El kernel deriva la clave
+/// usando PBKDF2-HMAC-SHA256 (RFC 8018, 1000 iteraciones, sal TRNG de 16 bytes, `$pbkdf2-sha256$...`)
+/// ANTES de escribir `/etc/passwd` -- el password nunca llega a flash en texto plano (SP2 R6).
+/// `drivers/ssh/auth.rs` consulta `/etc/passwd` ANTES que el DEV_USER/DEV_PASSWORD compilado, así que
+/// esto cambia el login SIN recompilar y PERSISTE en EspFs (sobrevive reinicios y reflasheo).
+/// `rm /etc/passwd` revierte a la credencial compilada.
 ///
 ///   passwd NEWPASS         -> user "youareme"
 ///   passwd USER NEWPASS

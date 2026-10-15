@@ -40,11 +40,55 @@ fn hex_push(byte: u8, out: &mut String) {
     out.push(HEX[(byte & 0xf) as usize] as char);
 }
 
-/// Builds the `/etc/passwd` line for `user:pass` in the `$s5$<salt-hex>$<hash-hex>`
-/// format (`s5` = "salted SHA-256", scheme tag so a future migration can recognize and
-/// upgrade it). Rejects the same `:`/`\n` shapes `passwd(1)` already rejected client-side
-/// -- re-checked here because the ioctl boundary is the actual trust boundary, not the
-/// userland binary that happens to be the only caller today.
+pub fn hmac_sha256(key: &[u8], msg: &[u8]) -> [u8; 32] {
+    let mut k = [0u8; 64];
+    if key.len() > 64 {
+        let kh = Sha256::digest(key);
+        k[..32].copy_from_slice(&kh);
+    } else {
+        k[..key.len()].copy_from_slice(key);
+    }
+    let mut ipad = [0x36u8; 64];
+    let mut opad = [0x5cu8; 64];
+    for i in 0..64 {
+        ipad[i] ^= k[i];
+        opad[i] ^= k[i];
+    }
+    let mut inner = Sha256::new();
+    inner.update(&ipad);
+    inner.update(msg);
+    let inner_hash = inner.finalize();
+
+    let mut outer = Sha256::new();
+    outer.update(&opad);
+    outer.update(&inner_hash);
+    let out = outer.finalize();
+    let mut res = [0u8; 32];
+    res.copy_from_slice(&out);
+    res
+}
+
+pub fn pbkdf2_hmac_sha256(password: &[u8], salt: &[u8], iterations: u32) -> [u8; 32] {
+    let mut salt_and_int = Vec::with_capacity(salt.len() + 4);
+    salt_and_int.extend_from_slice(salt);
+    salt_and_int.extend_from_slice(&1u32.to_be_bytes());
+
+    let mut u = hmac_sha256(password, &salt_and_int);
+    let mut out = u;
+
+    for _ in 1..iterations {
+        u = hmac_sha256(password, &u);
+        for i in 0..32 {
+            out[i] ^= u[i];
+        }
+    }
+    out
+}
+
+pub const PBKDF2_ROUNDS: u32 = 1000;
+
+/// Builds the `/etc/passwd` line for `user:pass` using PBKDF2-HMAC-SHA256 (RFC 8018)
+/// in `$pbkdf2-sha256$i=1000$<salt-hex>$<hash-hex>` format.
 fn hash_line(user: &str, password: &[u8]) -> KResult<String> {
     if user.is_empty() || user.contains(':') || user.contains('\n') {
         return Err(KError::InvalidArgument);
@@ -57,14 +101,11 @@ fn hash_line(user: &str, password: &[u8]) -> KResult<String> {
     let rng_periph = unsafe { esp_hal::peripherals::RNG::steal() };
     HwRng::new(Rng::new(rng_periph)).fill_bytes(&mut salt);
 
-    let mut hasher = Sha256::new();
-    hasher.update(salt);
-    hasher.update(password);
-    let hash = hasher.finalize();
+    let hash = pbkdf2_hmac_sha256(password, &salt, PBKDF2_ROUNDS);
 
     let mut line = String::from(user);
     line.push(':');
-    line.push_str("$s5$");
+    line.push_str("$pbkdf2-sha256$i=1000$");
     for b in salt {
         hex_push(b, &mut line);
     }

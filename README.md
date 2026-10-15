@@ -67,14 +67,14 @@ EspressoOS boots and executes on physical ESP32-S3 hardware. The system acquires
 - **Compilation & Linking**: Clean compilation in `--release` mode for `xtensa-esp32s3-none-elf`.
 - **Kernel Boot**: HAL initialization, 128 KB SRAM internal heap, VFS mounts (`/` EspFs on flash, `/tmp` ramfs in RAM, `/dev` devfs, `/proc` procfs, `/sys` sysfs).
 - **PSRAM Execution (PSRAM-Exec)**: 8 MB PSRAM carve-up with 1 MB reserved for code execution on the instruction bus (`0x42800000`). Boot selftest verifies instruction execution in PSRAM returning code 42.
-- **Preemptive Multitasking & Process Management**: Scheduler driven by SYSTIMER at 100 Hz, 50 ms quantum, and Model B in-ISR context switching. Automatic reparenting of orphan processes to PID 1 (`init-sup`) and non-blocking zombie reaping with `waitpid` (`WNOHANG`), preventing PSRAM-Exec slot leaks.
+- **Preemptive Multitasking & Deterministic Scheduling**: Scheduler driven by SYSTIMER at 100 Hz, 50 ms quantum, and Model B in-ISR context switching. By default, the scheduler operates on Core 0 (ProCpu), ensuring deterministic, jitter-free timing for `esp-wifi` MAC/PHY interrupts and avoiding cross-core bus contention. Opt-in dual-core SMP dispatching is available via `--features smp`. Automatic reparenting of orphan processes to PID 1 (`init-sup`) and non-blocking zombie reaping with `waitpid` (`WNOHANG`), preventing PSRAM-Exec slot leaks.
 - **Dynamic Userland ELFs**: Suite of **165 ELF binaries** executing from PSRAM with `argv` support, 32-slot pool, and load-time relocation without requiring Position Independent Code (PIC).
 - **Wi-Fi + TCP/IP Stack**: Station (STA) mode, DHCP client, and active TCP/IP stack (`smoltcp`). Runtime Wi-Fi scan, connect, and disconnect. Credential persistence in flash NVS sector 0 (`0x0000_9000`).
 - **Hardened SSH-2.0 Server**: Server supporting curve25519-sha256, ssh-ed25519, and chacha20-poly1305@openssh.com.
   - **Persistent Host Key**: Unique Ed25519 host key generated via hardware TRNG on first boot and persisted to NVS flash sector 1 (`0x0000_A000`, `ESHK` format).
   - **Public-Key Authentication**: Supports OpenSSH `ssh-ed25519` keys in `/etc/authorized_keys` with constant-time cryptographic verification (`ct_eq`).
   - **Connection Resilience**: 60s authentication deadline, 300s session idle timeout, and clean TCP socket teardown on remote FIN/RST (`CloseWait`).
-- **`passwd` Command & Credential Management**: Userland application `/bin/passwd` creates or updates `/etc/passwd` in persistent flash storage (EspFs) using salted SHA-256 (`$s5$<salt>$<hash>`).
+- **`passwd` Command & Dedicated KDF**: Userland application `/bin/passwd` creates or updates `/etc/passwd` in persistent flash storage (EspFs) using a formal Key Derivation Function: **PBKDF2-HMAC-SHA256 (RFC 8018)** with 1,000 iterations and a 16-byte hardware TRNG salt (`$pbkdf2-sha256$i=1000$<salt-hex>$<hash-hex>`), with constant-time verification (`ct_eq`) and backward compatibility for legacy hashes.
 - **Persistent EspFs Filesystem & VFS**: Log-structured filesystem on NOR flash surviving reboots and re-flashes, with dynamic mount table and ramfs scratch mount on `/mnt`.
 - **Hardware Cryptography & TRNG**: Drivers `/dev/sha0` exposing the hardware SHA-256 accelerator, and `/dev/random` + `/dev/urandom` streaming entropy from the on-chip True Random Number Generator.
 - **Power Management & Reboot**: Driver `/dev/power` with working software reboot.
@@ -97,7 +97,8 @@ EspressoOS boots and executes on physical ESP32-S3 hardware. The system acquires
 
 - **I2C (`/dev/i2c0`) & SPI (`/dev/spi0`)**: Master drivers and `ioctl` interface implemented and verified on open bus.
 - **Light Sleep**: Removed (`power sleep` no longer exists). esp-hal's `rtc.sleep_light()` hangs the CPU on this hardware/HAL generation; `power deep-sleep` and `power reboot` cover the same use cases without that risk.
-- **PMS Memory Protection / Dual-Core SMP**: Features `pms` and `smp` are fully implemented in code but disabled by default for simplicity and stability.
+- **Dual-Core Execution (SMP — `--features smp`)**: The physical ESP32-S3 SoC contains two Xtensa LX7 cores (ProCpu and AppCpu). By default, EspressoOS executes in uniprocessor mode on ProCpu to guarantee real-time Wi-Fi responsiveness and eliminate spinlock bus contention across shared peripherals. Dual-core execution is fully implemented and can be compiled in with `cargo run --release --features smp`.
+- **Hardware Memory Protection (PMS — `--features pms`)**: Baseline memory isolation (32-slot PSRAM-Exec execution pools, stack watermarking with canary bounds checking, and syscall argument validation) is active by default. The ESP32-S3 hardware Peripheral & Memory Protection Unit (PMS) is feature-gated to avoid cross-world permission traps during zero-copy DMA transfers; enabling `--features pms` activates DRAM0/IRAM0 violation monitors and enables `pms world1` W^X execution enforcement.
 - **littlefs**: Static stub in `kernel/src/fs/littlefs/mod.rs` returning an empty read-only root. Not mounted by default.
 
 ---
@@ -119,7 +120,7 @@ Entry point located in `kernel/src/main.rs` (`#[esp_hal::main] fn main() -> !`):
    - Mount root `/` from NOR flash (`EspFs::mount()`). Falls back to `ramfs` if EspFs is unformatted or corrupt.
    - Mount `/tmp` (ramfs), `/proc` (procfs), `/sys` (sysfs), `/mnt` (ramfs).
 6. **PID 0 File Descriptor Table**: Seed `/dev/console` for standard streams (fd 0, 1, 2).
-7. **Userland Deployment**: `install_userland()` inspects the 63 embedded binaries and deploys or updates `/bin/*` on EspFs.
+7. **Userland Deployment**: `install_userland()` inspects all 165 embedded binaries and deploys or updates `/bin/*` on EspFs.
 8. **System Files Setup**: `init_etc_files()` writes `/etc/rc`. If `/etc/passwd` exists, the kernel logs a warning noting custom SSH credentials are active.
 9. **I2C and SPI Init**: Initialize `I2C0` and `SPI2`.
 10. **Scheduler & Supervisor Bring-up**: Task creation:
@@ -131,7 +132,7 @@ Entry point located in `kernel/src/main.rs` (`#[esp_hal::main] fn main() -> !`):
 
 ---
 
-### 3.2 Memory Architecture (Heap, PSRAM Exec Pool, Stacks)
+### 3.2 Memory Architecture (Heap, PSRAM Exec Pool, Stacks & Protection)
 
 Memory layout defined in `kernel/src/prelude.rs` (`layout`).
 
@@ -139,19 +140,28 @@ Memory layout defined in `kernel/src/prelude.rs` (`layout`).
 - **PSRAM Executable Slot Pool** (`kernel/src/mm/psram_exec.rs`): Reserved 1 MB region split into:
   - 512 KB text region (mapped on instruction bus at `0x42800000`).
   - 512 KB data region (addressed at `0x3c170000`).
-  - Asigned as 32 independent slots of 16 KB each. Managed via lock-free atomic bitmasks (`AtomicU32`).
+  - Assigned as 32 independent slots of 16 KB each. Managed via lock-free atomic bitmasks (`AtomicU32`).
   - Code is written through data alias and executed through instruction bus alias, maintaining cache coherence via `Cache_WriteBack_All` and `Cache_Invalidate_ICache_All`.
-- **Stack Watermarking** (`kernel/src/scheduler/task.rs`): Task stacks are painted with `0xDEADBEEF` at creation. `stack_high_water()` monitors peak stack usage.
+- **Baseline Memory Protection (Active by Default)**:
+  - Task stacks are painted with `0xDEADBEEF` at creation; `stack_high_water()` monitors peak stack usage, requiring at least a 25% free margin.
+  - 32-slot PSRAM-Exec execution pools enforce strict slot boundary isolation for userland ELF binaries.
+  - Syscall argument sanitization inspects buffer pointers and prevents out-of-bounds reads/writes into kernel data structures.
+- **Hardware PMS (MPU / World Controller)** (`kernel/src/mm/mpu.rs`):
+  - Enabled via `--features pms` (disabled by default to maintain zero-copy unbuffered DMA transfers for peripheral controllers).
+  - Configures the ESP32-S3 hardware Peripheral & Memory Protection Unit registers for DRAM0/IRAM0 violation detection and enables `pms world1` in the kernel shell to enforce strict `W^X` userland sandboxing.
+- **Stack Configurations**:
   - General task stack size: 16 KB.
   - Network task (`net`) stack size: 24 KB.
-  - Standard safety rule requires at least a 25% free stack margin.
 
 ---
 
 ### 3.3 Scheduler, Processes & Signals
 
 - **Multitasking Scheduler** (`kernel/src/scheduler/mod.rs`):
-  - Strategy: Round-Robin selection among `Ready` tasks respecting core affinity.
+  - Strategy: Round-Robin selection among `Ready` tasks.
+  - Core Execution Model:
+    - **Default (Single-Core ProCpu)**: The scheduler binds tasks to `Core 0` (ProCpu), ensuring deterministic, jitter-free timing for `esp-wifi` MAC/PHY interrupts and avoiding spinlock contention on memory-mapped peripheral registers.
+    - **Dual-Core SMP (`--features smp`)**: Boots both ProCpu and AppCpu, assigning per-core idle loops and distributing ready userland processes across both cores.
   - Preemption: SYSTIMER generates 100 Hz ticks (10 ms). Quantum is set to 5 ticks (50 ms).
   - Context Switch (Model B): ISR frame dispatcher modifies the saved register frame (`save_frame`) in-place, swapping current and next task frame pointers.
 - **Process Management** (`kernel/src/scheduler/process.rs`):
@@ -253,7 +263,7 @@ Data-carrying drivers follow a unified architecture pattern: `open("/dev/<node>"
 | `spi0` | GPIO12 (MOSI), GPIO11 (MISO), GPIO13 (CLK) | `SPI_TRANSFER` (0). `SpiReq` struct (max 64 bytes buffer). | Functional |
 | `sha0` | Hardware SHA engine | `SHA256_CMD` (0). `ShaReq` struct (max 512 bytes input, 32 bytes output). | Hardware-Verified |
 | `power` | LPWR Controller | `POWER_DEEP_SLEEP` (1), `POWER_REBOOT` (2). ioctl 0 (former `POWER_SLEEP`) now returns `NotSupported` -- see Known Issues. | Reboot Functional |
-| `passwd` | — (crypto only) | `SET_PASSWORD_CMD` (0). `PasswdReq` struct (max 64 bytes user, 128 bytes password); salts+hashes (SHA-256) before writing `/etc/passwd`. | Functional |
+| `passwd` | — (crypto only) | `SET_PASSWORD_CMD` (0). `PasswdReq` struct (max 64 bytes user, 128 bytes password); derives key via PBKDF2-HMAC-SHA256 (RFC 8018, 1000 iterations, 16-byte TRNG salt) before writing `/etc/passwd`. | Functional |
 | `wlan0` | `esp-wifi` STA | `WLAN_NOP` (0), `WLAN_CONNECT` (1), `WLAN_DISCONNECT` (2), `WLAN_SCAN` (3). | Hardware-Verified |
 | `ble0` | `esp-wifi` BLE | `BLE_ADVERTISE` (0). Queues atomic advertising request. | Hardware-Verified |
 | `gpio` | GPIO Matrix (pins 0..48) | `GPIO_IOC_CONFIGURE` (0x4701), `GPIO_IOC_WRITE` (0x4702), `GPIO_IOC_READ` (0x4703), `GPIO_IOC_TOGGLE` (0x4704). Also accepts text commands on write. | Hardware-Verified |
@@ -270,14 +280,14 @@ Data-carrying drivers follow a unified architecture pattern: `open("/dev/<node>"
 The system integrates identity management and user authentication for the SSH server and user shell control:
 
 #### `passwd` Command Implementation
-- **Source Location**: `userland/apps/src/bin/passwd.rs` (client) + `kernel/src/drivers/passwd.rs` (`/dev/passwd`, does the actual hashing).
+- **Source Location**: `userland/apps/src/bin/passwd.rs` (client) + `kernel/src/drivers/passwd.rs` (`/dev/passwd`, executes kernel-side key derivation).
 - **Usage Syntax**:
   - `passwd NEW_PASSWORD`: Sets the password for the default user (`youareme`).
   - `passwd USER NEW_PASSWORD`: Sets the password for the specified user name.
 - **Input Validation**: enforced on both sides of the ioctl boundary (userland client and kernel driver) —
   - User and password strings must be non-empty.
   - User and password strings cannot contain `:` or newline `\n` characters.
-- **Storage format**: `passwd(1)` sends `{user, password}` to `/dev/passwd` via `ioctl(SET_PASSWORD_CMD)`; the kernel generates a 16-byte salt from the hardware TRNG, computes `SHA-256(salt || password)`, and writes a single line `user:$s5$<salt-hex>$<hash-hex>\n` to `/etc/passwd` (`O_WRONLY_CREATE_TRUNC`). The plaintext password is never written to flash. Stored on EspFs flash storage, making the credential change **persistent across reboots and re-flashes**.
+- **Storage format & Dedicated KDF**: `passwd(1)` sends `{user, password}` to `/dev/passwd` via `ioctl(SET_PASSWORD_CMD)`; the kernel generates a 16-byte cryptographic salt from the hardware TRNG, derives the key using **PBKDF2-HMAC-SHA256** (RFC 8018) with 1,000 iterations, and writes a single line `user:$pbkdf2-sha256$i=1000$<salt-hex>$<hash-hex>\n` to `/etc/passwd` (`O_WRONLY_CREATE_TRUNC`). The plaintext password is never written to flash, and key derivation occurs entirely in the kernel. Stored on EspFs flash storage, making the credential change **persistent across reboots and re-flashes**.
 
 #### Kernel SSH Authentication & Host Key Management
 - **Persistent Host Key**:
@@ -290,7 +300,7 @@ The system integrates identity management and user authentication for the SSH se
   - Decoded using the kernel's RFC 4648 Base64 engine (`drivers::ssh::base64`) and verified against the incoming client signature in constant time (`ct_eq`).
 - **Password Authentication (`/etc/passwd`)**:
   - On SSH password login request, the server attempts to resolve `/etc/passwd` via VFS (`vfs::mount::resolve("/etc/passwd")`).
-  - Matches the user in constant time (`ct_eq`). If the stored field starts with `$s5$`, it verifies `SHA-256(salt || password)`.
+  - Matches the user in constant time (`ct_eq`). If the stored field starts with `$pbkdf2-sha256$i=`, it parses iterations and salt, recomputes the PBKDF2-HMAC-SHA256 digest, and verifies in constant time. If it starts with legacy `$s5$`, it falls back to verify `SHA-256(salt || password)`. If un-prefixed, it compares against plaintext in constant time.
   - If `/etc/passwd` does not exist, it falls back to compiled developer credentials (`DEV_USER` / `DEV_PASSWORD`).
 - **Connection Timeouts & Socket Teardown**:
   - **Auth Timeout**: Non-authenticated sessions terminate after 60 seconds of inactivity.
@@ -367,19 +377,35 @@ cargo build --release
 cargo run --release
 ```
 
-`kernel/build.rs` automatically compiles all 122 userland binaries, generates relocation fixup tables, and embeds them into the kernel image.
+`kernel/build.rs` automatically compiles all 165 userland binaries, generates relocation fixup tables, and embeds them into the kernel image.
 
-### 4.4 Feature Gates
+### 4.4 Feature Gates & Build Configurations
 
 The following feature flags are available in `kernel/Cargo.toml`:
 
-| Feature Flag | Default State | Description |
+| Feature Flag | Default State | Rationale & Architectural Description |
 | :--- | :--- | :--- |
-| `syscall-trap` | Enabled | Enables CPU trap handling for system calls via `syscall` instruction (EXCCAUSE=1). |
-| `smp` | Disabled | Enables dual-core execution on ProCpu and AppCpu. |
-| `pms` | Disabled | Enables hardware memory protection monitor and stack guards. |
-| `diag-ble-sync` | Disabled | Diagnostic feature for synchronous BLE execution. |
-| `diag-32k-stack` | Disabled | Increases default task stack size to 32 KB for diagnostic testing. |
+| `syscall-trap` | **Enabled** | Enables CPU trap handling for system calls via `syscall` instruction (EXCCAUSE=1). |
+| `smp` | *Disabled* | Enables dual-core execution on ProCpu and AppCpu. *Disabled by default* to guarantee deterministic, jitter-free real-time servicing of the Wi-Fi PHY/MAC interrupt handlers in `esp-wifi` and eliminate spinlock bus contention across shared memory-mapped peripheral registers. |
+| `pms` | *Disabled* | Enables hardware Peripheral & Memory Protection Unit (PMS) monitor and World-1 sandboxing. *Disabled by default* because baseline software memory protection (32 PSRAM-Exec execution slots and stack canary guards) is always active, while strict hardware World-1 traps would restrict unbuffered zero-copy DMA access used by peripheral drivers. |
+| `diag-ble-sync` | *Disabled* | Diagnostic feature for synchronous BLE execution. |
+| `diag-32k-stack` | *Disabled* | Increases default task stack size to 32 KB for diagnostic testing. |
+
+#### Compiling with Custom Profiles:
+
+```bash
+# Standard Production Build (Single-core ProCpu determinism, baseline memory protection, 165 ELFs):
+cargo run --release
+
+# Dual-Core SMP Multiprocessing:
+cargo run --release --features smp
+
+# Hardware Memory Protection & World-1 Sandbox Enforcement:
+cargo run --release --features pms
+
+# Complete Subsystems Profile (Dual-core SMP + PMS Hardware Protection):
+cargo run --release --features "smp pms"
+```
 
 ### 4.5 Expected serial output
 
@@ -394,7 +420,7 @@ The following feature flags are available in `kernel/Cargo.toml`:
 ========================================
 [kernel] flash: 16 MB usable
 [kernel] / mounted on flash (espfs)
-[kernel] userland: 122 binaries installed/updated in EspFs
+[kernel] userland: 165 binaries installed/updated in EspFs
 [net] connecting to SSID '...'
 [net] associated with AP; negotiating DHCP...
 [net] IP = 192.168.2.146
@@ -408,7 +434,7 @@ EspressoOS:~$
 
 ## 5. Complete Command Reference
 
-The system includes **122 userland binaries** in `/bin` alongside shell built-in commands.
+The system includes **165 userland binaries** in `/bin` alongside shell built-in commands.
 
 ### Userland Binaries (`/bin/*`)
 
@@ -694,7 +720,7 @@ Flash layout defined in `kernel/src/prelude.rs` and `partitions.csv`:
 
 1. **Light Sleep & Low-Power CPU WFI Idle — IMPLEMENTED**: While platform-level RTC light sleep (`rtc.sleep_light()`) remains restricted due to octal PSRAM clock domain suspension risks on this HAL generation, safe low-power CPU sleep is now fully implemented via hardware Wait-For-Interrupt (`waiti 0`). The scheduler's idle task puts the Xtensa LX7 CPU into clock-gated low-power mode while awaiting timer ticks or hardware interrupts instead of executing a hot spin loop. Additionally, `/dev/power` exposes `POWER_SLEEP` and `POWER_IDLE` ioctls, and the userland utility `/bin/power sleep [SECONDS]` cleanly sleeps the CPU for the requested duration without resetting the board or hanging the bus.
 2. **EspFs Compaction Sparse Hole Preservation — FIXED**: Log-structured filesystem compaction previously materialized sparse holes as explicit zero-filled flash records and assigned distinct extent headers for every chunk, risking size expansion on heavily fragmented or sparse files. Compaction now actively inspects extent data buffers: all-zero chunk extents are omitted from flash writes, preserving sparse holes. If the file contains trailing zero regions or is completely sparse, a lightweight 8-byte `Truncate` log record is appended to preserve the logical file size upon reboot/replay without consuming data payload flash sectors.
-3. **Plaintext Password Storage — FIXED**: `/etc/passwd` stores `user:$s5$<salt-hex>$<hash-hex>` (SHA-256 of a 16-byte random salt + password), written by `/dev/passwd` (`kernel/src/drivers/passwd.rs`) so hashing occurs kernel-side. `ssh::auth::check_password` re-hashes and compares in constant time (`ct_eq`).
+3. **Plaintext Password Storage & Dedicated Key Derivation Function — FIXED**: `/etc/passwd` stores credentials derived with **PBKDF2-HMAC-SHA256 (RFC 8018)** (`user:$pbkdf2-sha256$i=1000$<salt-hex>$<hash-hex>`) utilizing 1,000 iterations and a 16-byte hardware TRNG salt, computed kernel-side via `/dev/passwd`. `ssh::auth::check_password` recomputes the PBKDF2 digest and compares in constant time (`ct_eq`), while retaining backward compatibility for legacy hashes.
 4. **Shared SSH Host Key — FIXED**: The SSH daemon no longer relies on a shared hardcoded development seed. On initial boot, the kernel generates a cryptographically secure 32-byte Ed25519 seed from the hardware TRNG (`esp_hal::rng::Rng`) and stores it in dedicated NVS flash sector 1 (`0x0000_A000`, `ESHK` format + CRC). Subsequent boots read the stored seed, ensuring consistent host fingerprints without client host key rotation warnings.
 5. **Passwordless Public-Key Authentication — IMPLEMENTED**: OpenSSH `ssh-ed25519` keys configured in `/etc/authorized_keys` are dynamically resolved via VFS, base64-decoded, and verified in constant time (`ct_eq`), enabling passwordless SSH access.
 6. **Process Slot Leaks & Reparenting — FIXED**: Orphaned child processes are automatically reparented to `PID 1` (`init-sup`). `sys_wait` implements `WNOHANG` (exposed via `libc::waitpid`), and `/bin/sh` non-blockingly reaps background jobs (`&`), preventing PSRAM-Exec slot exhaustion.
@@ -949,6 +975,11 @@ Flash layout defined in `kernel/src/prelude.rs` and `partitions.csv`:
   - Implemented running process priority alteration utility (`renice`) dynamically adjusting scheduling niceness within valid priority bounds with verification.
   - Expanded userland application suite to **165 dynamic ELF binaries**, all linking within their 16 KB PSRAM execution slot budgets.
   - Expanded automated test suite to **232 tests passing with 100% success rate** covering modules parsing, streaming join algorithms, case folding prefix matching, and database record lookups.
+- **Cryptographic Security & Architectural Consistency Alignment**:
+  - Upgraded credential key derivation to formal PBKDF2-HMAC-SHA256 (RFC 8018) with 1,000 iterations and a 16-byte hardware TRNG salt, replacing basic salted SHA-256.
+  - Implemented constant-time verification for PBKDF2-derived passwords, legacy salted hashes, and plaintext in the SSH daemon.
+  - Aligned userland application metrics consistently across all documentation sections to reflect all 165 dynamic ELF binaries.
+  - Clarified runtime architecture distinguishing default uniprocessor execution for real-time Wi-Fi responsiveness from opt-in dual-core multiprocessing, and baseline slot memory safety from opt-in hardware memory protection.
 
 ### [0.1.0] - 2026-08-06
 

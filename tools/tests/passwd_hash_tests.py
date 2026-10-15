@@ -31,16 +31,38 @@ def hex_decode(s: str) -> bytes | None:
         return None
 
 
-def make_line(user: str, password: bytes, salt: bytes) -> str:
-    """Espejo de drivers::passwd::hash_line."""
+def make_line(user: str, password: bytes, salt: bytes, iterations: int = 1000) -> str:
+    """Espejo de drivers::passwd::hash_line con PBKDF2-HMAC-SHA256."""
+    assert len(salt) == SALT_LEN
+    digest = hashlib.pbkdf2_hmac("sha256", password, salt, iterations)
+    return f"{user}:$pbkdf2-sha256$i={iterations}${hex_encode(salt)}${hex_encode(digest)}\n"
+
+
+def make_legacy_s5_line(user: str, password: bytes, salt: bytes) -> str:
+    """Formato legado $s5$."""
     assert len(salt) == SALT_LEN
     digest = hashlib.sha256(salt + password).digest()
     return f"{user}:$s5${hex_encode(salt)}${hex_encode(digest)}\n"
 
 
 def verify_stored(field: str, password: bytes) -> bool:
-    """Espejo de ssh::auth::verify_stored: entiende `$s5$<salt-hex>$<hash-hex>` y hace
-    fallback a comparación en texto plano para entradas legacy."""
+    """Espejo de ssh::auth::verify_stored: entiende $pbkdf2-sha256$, $s5$ y texto plano."""
+    if field.startswith("$pbkdf2-sha256$i="):
+        rest = field[len("$pbkdf2-sha256$i="):]
+        parts = rest.split("$", 2)
+        if len(parts) != 3:
+            return False
+        try:
+            iterations = int(parts[0])
+        except ValueError:
+            return False
+        salt = hex_decode(parts[1])
+        expected = hex_decode(parts[2])
+        if salt is None or expected is None or len(expected) != 32:
+            return False
+        got = hashlib.pbkdf2_hmac("sha256", password, salt, iterations)
+        return got == expected
+
     if field.startswith("$s5$"):
         rest = field[len("$s5$"):]
         parts = rest.split("$", 1)
@@ -52,6 +74,7 @@ def verify_stored(field: str, password: bytes) -> bool:
             return False
         got = hashlib.sha256(salt + password).digest()
         return got == expected
+
     return field.encode() == password
 
 
@@ -91,9 +114,17 @@ class PasswdHashFormatTests(unittest.TestCase):
     def test_known_vector(self):
         salt = bytes(range(16))  # 000102...0f
         password = b"correct horse battery staple"
-        expected = hashlib.sha256(salt + password).hexdigest()
-        line = make_line("u", password, salt)
-        self.assertIn(f"$s5$000102030405060708090a0b0c0d0e0f${expected}", line)
+        # Test PBKDF2 known vector
+        expected_pbkdf2 = hashlib.pbkdf2_hmac("sha256", password, salt, 1000).hex()
+        line = make_line("u", password, salt, 1000)
+        self.assertIn(f"$pbkdf2-sha256$i=1000$000102030405060708090a0b0c0d0e0f${expected_pbkdf2}", line)
+        self.assertTrue(verify_stored(f"$pbkdf2-sha256$i=1000$000102030405060708090a0b0c0d0e0f${expected_pbkdf2}", password))
+
+        # Test legacy $s5$ vector
+        expected_s5 = hashlib.sha256(salt + password).hexdigest()
+        line_s5 = make_legacy_s5_line("u", password, salt)
+        self.assertIn(f"$s5$000102030405060708090a0b0c0d0e0f${expected_s5}", line_s5)
+        self.assertTrue(verify_stored(f"$s5$000102030405060708090a0b0c0d0e0f${expected_s5}", password))
 
 
 if __name__ == "__main__":

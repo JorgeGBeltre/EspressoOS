@@ -4,15 +4,21 @@ use super::task::Tid;
 use super::Scheduler;
 
 pub(super) fn next_ready(sched: &mut Scheduler, core: usize) -> Option<Tid> {
-    for i in 0..sched.ready.len() {
-        let tid = sched.ready[i];
+    let mut best_idx = None;
+    let mut highest_prio = 0u8;
+
+    for (i, &tid) in sched.ready.iter().enumerate() {
         if let Some(t) = sched.tasks.get(&tid) {
             if t.affinity.is_none() || t.affinity == Some(core) {
-                return Some(sched.ready.remove(i));
+                if best_idx.is_none() || t.priority > highest_prio {
+                    highest_prio = t.priority;
+                    best_idx = Some(i);
+                }
             }
         }
     }
-    None
+
+    best_idx.map(|i| sched.ready.remove(i))
 }
 
 pub fn pick_next(core: usize) -> Option<Tid> {

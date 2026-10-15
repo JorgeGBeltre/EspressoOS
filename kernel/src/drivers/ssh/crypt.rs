@@ -7,6 +7,7 @@ use chacha20::ChaCha20Legacy;
 use poly1305::universal_hash::{KeyInit, UniversalHash};
 use poly1305::Poly1305;
 use subtle::ConstantTimeEq;
+use zeroize::Zeroize;
 
 pub const CIPHER_NAME: &str = "chacha20-poly1305@openssh.com";
 
@@ -14,10 +15,16 @@ pub const TAG_LEN: usize = 16;
 
 pub const LEN_LEN: usize = 4;
 
-#[derive(Clone)]
+#[derive(Clone, Zeroize)]
 pub struct Aead {
     k1: [u8; 32],
     k2: [u8; 32],
+}
+
+impl Drop for Aead {
+    fn drop(&mut self) {
+        self.zeroize();
+    }
 }
 
 impl Aead {

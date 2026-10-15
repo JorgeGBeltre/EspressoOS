@@ -32,7 +32,7 @@ use crate::prelude::*;
 
 const LED_GPIO: u8 = 2;
 
-const PRIO_DEFAULT: u8 = 1;
+const PRIO_DEFAULT: u8 = 10;
 
 const HEARTBEAT_MS: u64 = 500;
 

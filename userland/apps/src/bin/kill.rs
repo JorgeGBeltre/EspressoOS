@@ -53,7 +53,7 @@ pub extern "C" fn main(argc: i32, argv: *const *const u8) -> i32 {
 
     let pid_str = unsafe { arg(argv, pid_idx) };
     let pid = match parse_i32(pid_str) {
-        Some(p) if p > 0 => p as u32,
+        Some(p) if p != 0 => p as u32,
         _ => {
             println!("kill: invalid pid '{}'", pid_str);
             return 1;

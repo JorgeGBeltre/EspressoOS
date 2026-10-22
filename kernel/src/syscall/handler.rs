@@ -45,6 +45,8 @@ pub fn dispatch(
         Syscall::Dup2 => sys_dup2(args),
         Syscall::Chdir => sys_chdir(args),
         Syscall::Getcwd => sys_getcwd(args),
+        Syscall::Getpgid => sys_getpgid(args),
+        Syscall::Setpgid => sys_setpgid(args),
     }
 }
 
@@ -640,7 +642,7 @@ fn sys_sigaction(args: &[usize]) -> isize {
 }
 
 fn sys_kill(args: &[usize]) -> isize {
-    let pid = arg(args, 0) as u32;
+    let raw_target = arg(args, 0) as isize;
     let sig = arg(args, 1) as i32;
 
     if sig <= 0 || sig >= 32 {
@@ -648,6 +650,24 @@ fn sys_kill(args: &[usize]) -> isize {
     }
 
     let mut pt = crate::scheduler::process::PROCESS_TABLE.lock();
+    if raw_target < 0 {
+        let target_pgid = (-raw_target) as u32;
+        let mut matched = false;
+        for proc in pt.table.values_mut() {
+            if proc.pgid == target_pgid {
+                proc.pending_signals |= 1 << sig;
+                crate::scheduler::unblock_task(proc.main_task);
+                matched = true;
+            }
+        }
+        if matched {
+            crate::scheduler::set_need_resched();
+            return 0;
+        }
+        return KError::NotFound.as_errno();
+    }
+
+    let pid = raw_target as u32;
     if let Some(proc) = pt.table.get_mut(&pid) {
         proc.pending_signals |= 1 << sig;
 
@@ -658,6 +678,40 @@ fn sys_kill(args: &[usize]) -> isize {
     }
 
     KError::NotFound.as_errno()
+}
+
+fn sys_getpgid(args: &[usize]) -> isize {
+    let pid = arg(args, 0) as u32;
+    let target = if pid == 0 {
+        match crate::scheduler::process::get_current_pid() {
+            Some(p) => p,
+            None => return KError::NotFound.as_errno(),
+        }
+    } else {
+        pid
+    };
+    match crate::scheduler::process::get_pgid(target) {
+        Some(pgid) => pgid as isize,
+        None => KError::NotFound.as_errno(),
+    }
+}
+
+fn sys_setpgid(args: &[usize]) -> isize {
+    let pid = arg(args, 0) as u32;
+    let pgid = arg(args, 1) as u32;
+    let target = if pid == 0 {
+        match crate::scheduler::process::get_current_pid() {
+            Some(p) => p,
+            None => return KError::NotFound.as_errno(),
+        }
+    } else {
+        pid
+    };
+    let new_pgid = if pgid == 0 { target } else { pgid };
+    match crate::scheduler::process::set_pgid(target, new_pgid) {
+        Ok(()) => 0,
+        Err(e) => e.as_errno(),
+    }
 }
 
 fn sys_sigreturn(_args: &[usize], frame: *mut esp_hal::xtensa_lx_rt::exception::Context) -> isize {

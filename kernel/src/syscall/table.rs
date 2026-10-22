@@ -62,6 +62,10 @@ pub enum Syscall {
     Chdir = 28,
 
     Getcwd = 29,
+
+    Getpgid = 30,
+
+    Setpgid = 31,
 }
 
 impl Syscall {
@@ -97,6 +101,8 @@ impl Syscall {
             27 => Syscall::Dup2,
             28 => Syscall::Chdir,
             29 => Syscall::Getcwd,
+            30 => Syscall::Getpgid,
+            31 => Syscall::Setpgid,
             _ => return None,
         };
         Some(sc)

@@ -168,7 +168,21 @@ pub fn init() -> KResult<Arc<DevFs>> {
     let rand_dev = Arc::new(RandomDevice);
     register(&devfs, "random", rand_dev.clone())?;
     register(&devfs, "urandom", rand_dev)?;
+    register(&devfs, "log", Arc::new(LogDevice))?;
     Ok(devfs)
+}
+
+struct LogDevice;
+impl Device for LogDevice {
+    fn read(&self, _off: u64, _buf: &mut [u8]) -> KResult<usize> {
+        Ok(0)
+    }
+    fn write(&self, _off: u64, buf: &[u8]) -> KResult<usize> {
+        if let Ok(s) = core::str::from_utf8(buf) {
+            println!("[syslog] {}", s.trim_end());
+        }
+        Ok(buf.len())
+    }
 }
 
 struct RandomDevice;

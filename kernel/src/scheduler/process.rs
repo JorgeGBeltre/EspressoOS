@@ -16,6 +16,7 @@ pub enum ProcessState {
 pub struct Process {
     pub pid: Pid,
     pub parent_pid: Option<Pid>,
+    pub pgid: Pid,
     pub main_task: Tid,
     pub name: String,
     pub state: ProcessState,
@@ -190,6 +191,8 @@ pub fn register_process(
     // Note this cannot call cwd_set to reuse its validation even if it wanted to: the
     // guard is already held here, and cwd_set takes it again.
     let parent_pid = pt.pid_of_tid(current_tid);
+    let parent_pgid = parent_pid.and_then(|p| pt.table.get(&p)).map(|p| p.pgid);
+    let pgid = parent_pgid.unwrap_or(pid);
     let cwd = parent_pid
         .and_then(|p| pt.table.get(&p))
         .map(|p| p.cwd.clone())
@@ -198,6 +201,7 @@ pub fn register_process(
     let proc = Process {
         pid,
         parent_pid,
+        pgid,
         main_task: tid,
         name: String::from(name),
         state: ProcessState::Running,
@@ -226,6 +230,20 @@ pub fn register_process(
     }
 
     pid
+}
+
+pub fn get_pgid(pid: Pid) -> Option<Pid> {
+    PROCESS_TABLE.lock().table.get(&pid).map(|p| p.pgid)
+}
+
+pub fn set_pgid(pid: Pid, pgid: Pid) -> KResult<()> {
+    let mut pt = PROCESS_TABLE.lock();
+    if let Some(proc) = pt.table.get_mut(&pid) {
+        proc.pgid = pgid;
+        Ok(())
+    } else {
+        Err(KError::NotFound)
+    }
 }
 
 /// The calling process's working directory, or None if the caller has no process.

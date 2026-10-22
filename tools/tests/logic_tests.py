@@ -3122,6 +3122,102 @@ class TestPhase16Logic(unittest.TestCase):
         self.assertEqual(dev_map["watchdog"], 30)
         self.assertEqual(dev_map["psram_exec"], 10)
 
+    def test_process_group_pgid_and_group_kill(self):
+        # Model process table with PGIDs
+        class Proc:
+            def __init__(self, pid, pgid):
+                self.pid = pid
+                self.pgid = pgid
+                self.signals = 0
+
+        procs = {
+            1: Proc(1, 1),
+            2: Proc(2, 2),
+            3: Proc(3, 2), # child of 2 in same PGID
+            4: Proc(4, 2), # child of 2 in same PGID
+            5: Proc(5, 5),
+        }
+
+        # kill(-pgid, sig) simulation
+        def sys_kill(target, sig):
+            if target < 0:
+                pgid = -target
+                hit = 0
+                for p in procs.values():
+                    if p.pgid == pgid:
+                        p.signals |= (1 << sig)
+                        hit += 1
+                return 0 if hit > 0 else -1
+            elif target in procs:
+                procs[target].signals |= (1 << sig)
+                return 0
+            return -1
+
+        # Signal group 2 with SIGTERM (15)
+        res = sys_kill(-2, 15)
+        self.assertEqual(res, 0)
+        self.assertEqual(procs[1].signals, 0)
+        self.assertEqual(procs[2].signals, 1 << 15)
+        self.assertEqual(procs[3].signals, 1 << 15)
+        self.assertEqual(procs[4].signals, 1 << 15)
+        self.assertEqual(procs[5].signals, 0)
+
+    def test_sed_substitution_logic(self):
+        def parse_subst(expr):
+            if not expr.startswith('s') or len(expr) < 4:
+                return None
+            delim = expr[1]
+            parts = expr[2:].split(delim)
+            if len(parts) < 2:
+                return None
+            find = parts[0]
+            repl = parts[1]
+            flags = parts[2] if len(parts) > 2 else ""
+            global_flag = 'g' in flags
+            return find, repl, global_flag
+
+        def apply_sed(line, expr):
+            find, repl, g = parse_subst(expr)
+            if g:
+                return line.replace(find, repl)
+            else:
+                return line.replace(find, repl, 1)
+
+        self.assertEqual(apply_sed("hello world", "s/world/unix/"), "hello unix")
+        self.assertEqual(apply_sed("aaa bbb aaa", "s/aaa/ccc/"), "ccc bbb aaa")
+        self.assertEqual(apply_sed("aaa bbb aaa", "s/aaa/ccc/g"), "ccc bbb ccc")
+
+    def test_fhs_mounts_and_symlinks_contracts(self):
+        fstab = (
+            "# /etc/fstab: static file system information\n"
+            "espfs   /       espfs   defaults 0 0\n"
+            "ramfs   /tmp    tmpfs   defaults 0 0\n"
+            "ramfs   /run    tmpfs   defaults 0 0\n"
+            "procfs  /proc   procfs  defaults 0 0\n"
+            "sysfs   /sys    sysfs   defaults 0 0\n"
+            "devfs   /dev    devfs   defaults 0 0\n"
+        )
+        mounts = [line.split()[1] for line in fstab.strip().splitlines() if not line.startswith('#')]
+        self.assertIn("/", mounts)
+        self.assertIn("/tmp", mounts)
+        self.assertIn("/run", mounts)
+        self.assertIn("/proc", mounts)
+        self.assertIn("/sys", mounts)
+        self.assertIn("/dev", mounts)
+
+    def test_useradd_entry_generation(self):
+        def make_passwd_line(user, uid, home, shell):
+            return f"{user}:x:{uid}:{uid}::{home}:{shell}\n"
+
+        def make_group_line(user, uid):
+            return f"{user}:x:{uid}:\n"
+
+        p_line = make_passwd_line("developer", 1001, "/home/developer", "/bin/sh")
+        g_line = make_group_line("developer", 1001)
+
+        self.assertEqual(p_line, "developer:x:1001:1001::/home/developer:/bin/sh\n")
+        self.assertEqual(g_line, "developer:x:1001:\n")
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

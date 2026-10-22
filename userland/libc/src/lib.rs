@@ -221,6 +221,14 @@ pub fn dup2(oldfd: i32, newfd: i32) -> isize {
     unsafe { syscall(27, oldfd as usize, newfd as usize, 0, 0, 0, 0) }
 }
 
+pub fn getpgid(pid: u32) -> isize {
+    unsafe { syscall(30, pid as usize, 0, 0, 0, 0, 0) }
+}
+
+pub fn setpgid(pid: u32, pgid: u32) -> isize {
+    unsafe { syscall(31, pid as usize, pgid as usize, 0, 0, 0, 0) }
+}
+
 pub fn sbrk(size: usize) -> isize {
     unsafe { syscall(13, size, 0, 0, 0, 0, 0) }
 }

@@ -153,6 +153,9 @@ fn main() -> ! {
     if let Err(e) = vfs::mount("/tmp", fs::ramfs::RamFs::new()) {
         println!("[kernel] warning: mount /tmp failed: {:?}", e);
     }
+    if let Err(e) = vfs::mount("/run", fs::ramfs::RamFs::new()) {
+        println!("[kernel] warning: mount /run failed: {:?}", e);
+    }
     if let Err(e) = vfs::mount("/proc", alloc::sync::Arc::new(fs::ProcFs::new())) {
         println!("[kernel] warning: mount /proc failed: {:?}", e);
     }
@@ -182,12 +185,17 @@ fn main() -> ! {
         Err(e) => println!("[kernel] warning: no /dev/console for the kernel fd table: {:?}", e),
     }
 
+    let _ = vfs::mkdir("/run/lock");
+    let _ = vfs::mkdir("/root");
     let _ = vfs::mkdir("/sbin");
     let _ = vfs::mkdir("/var");
+    let _ = vfs::mkdir("/var/run");
+    let _ = vfs::mkdir("/var/lock");
     let _ = vfs::mkdir("/var/log");
     let _ = vfs::mkdir("/var/lib");
     let _ = vfs::mkdir("/home");
     let _ = vfs::mkdir("/mnt");
+    let _ = vfs::mkdir("/etc/services.d");
 
     install_userland();
 
@@ -626,6 +634,45 @@ fn init_etc_files() {
                 fd,
                 b"root:x:0:\ndaemon:x:1:\nbin:x:2:\nsys:x:3:\nadm:x:4:\nwheel:x:10:root,youareme\nusers:x:100:youareme\n",
             );
+            let _ = vfs::close(fd);
+        }
+    }
+
+    if vfs::mount::resolve("/etc/shells").is_err() {
+        if let Ok(fd) = vfs::open(
+            "/etc/shells",
+            vfs::OpenFlags(
+                vfs::OpenFlags::CREATE.0 | vfs::OpenFlags::WRONLY.0 | vfs::OpenFlags::TRUNC.0,
+            ),
+        ) {
+            let _ = vfs::write(fd, b"/bin/sh\n/bin/bash\n");
+            let _ = vfs::close(fd);
+        }
+    }
+
+    if vfs::mount::resolve("/etc/fstab").is_err() {
+        if let Ok(fd) = vfs::open(
+            "/etc/fstab",
+            vfs::OpenFlags(
+                vfs::OpenFlags::CREATE.0 | vfs::OpenFlags::WRONLY.0 | vfs::OpenFlags::TRUNC.0,
+            ),
+        ) {
+            let _ = vfs::write(
+                fd,
+                b"# /etc/fstab: static file system information\nespfs   /       espfs   defaults 0 0\nramfs   /tmp    tmpfs   defaults 0 0\nramfs   /run    tmpfs   defaults 0 0\nprocfs  /proc   procfs  defaults 0 0\nsysfs   /sys    sysfs   defaults 0 0\ndevfs   /dev    devfs   defaults 0 0\n",
+            );
+            let _ = vfs::close(fd);
+        }
+    }
+
+    if vfs::mount::resolve("/etc/mtab").is_err() {
+        if let Ok(fd) = vfs::open(
+            "/etc/mtab",
+            vfs::OpenFlags(
+                vfs::OpenFlags::CREATE.0 | vfs::OpenFlags::WRONLY.0 | vfs::OpenFlags::TRUNC.0,
+            ),
+        ) {
+            let _ = vfs::write(fd, b"/proc/mounts\n");
             let _ = vfs::close(fd);
         }
     }

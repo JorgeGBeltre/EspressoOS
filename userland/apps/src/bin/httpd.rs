@@ -3,7 +3,7 @@
 
 use libc::{
     accept, arg, bind, close, listen, open, println, read, sockaddr_in,
-    socket, write, setsockopt_timeout,
+    socket, write, setsockopt_timeout, O_RDONLY,
 };
 
 fn parse_port(s: &str) -> Option<u16> {
@@ -25,7 +25,7 @@ fn parse_port(s: &str) -> Option<u16> {
 }
 
 fn read_file_to_buf(path: &str, buf: &mut [u8]) -> usize {
-    let fd = open(path, 0);
+    let fd = open(path, O_RDONLY);
     if fd < 0 {
         return 0;
     }

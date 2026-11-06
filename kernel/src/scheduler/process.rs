@@ -44,6 +44,10 @@ pub struct Process {
     ///
     /// It costs nothing: the only readers were already in here.
     cwd: String,
+    root_dir: String,
+    pub uid: u16,
+    pub gid: u16,
+    pub session_id: u32,
 
     pub pending_signals: u32,
     pub signal_handlers: [usize; 32],
@@ -131,6 +135,13 @@ pub fn get_current_pid() -> Option<Pid> {
 /// place outside this module that removed a process, which made `by_tid` an
 /// invariant maintained by discipline instead of by construction.
 pub fn take_zombie_child(parent: Pid) -> Option<(Pid, i32, Option<crate::mm::psram_exec::SlotIndex>)> {
+    take_zombie_child_matching(parent, 0)
+}
+
+pub fn take_zombie_child_matching(
+    parent: Pid,
+    target_pid: Pid,
+) -> Option<(Pid, i32, Option<crate::mm::psram_exec::SlotIndex>)> {
     let mut pt = PROCESS_TABLE.lock();
     let child = pt
         .table
@@ -138,14 +149,32 @@ pub fn take_zombie_child(parent: Pid) -> Option<(Pid, i32, Option<crate::mm::psr
         .children
         .iter()
         .copied()
-        .find(|c| {
-            pt.table
-                .get(c)
-                .map(|p| p.state == ProcessState::Zombie)
-                .unwrap_or(false)
+        .find(|&c| {
+            (target_pid == 0 || c == target_pid)
+                && pt
+                    .table
+                    .get(&c)
+                    .map(|p| p.state == ProcessState::Zombie)
+                    .unwrap_or(false)
         })?;
     let proc = pt.remove_process(child)?;
     Some((proc.pid, proc.exit_code, proc.slot))
+}
+
+/// Whether `parent` has any children (or `target_pid` specifically when non-zero) left to wait for.
+pub fn has_matching_child(parent: Pid, target_pid: Pid) -> bool {
+    PROCESS_TABLE
+        .lock()
+        .table
+        .get(&parent)
+        .map(|p| {
+            if target_pid == 0 {
+                !p.children.is_empty()
+            } else {
+                p.children.contains(&target_pid)
+            }
+        })
+        .unwrap_or(false)
 }
 
 /// The PSRAM slot of the calling process, if it has one. Kernel tasks do not.
@@ -191,12 +220,17 @@ pub fn register_process(
     // Note this cannot call cwd_set to reuse its validation even if it wanted to: the
     // guard is already held here, and cwd_set takes it again.
     let parent_pid = pt.pid_of_tid(current_tid);
-    let parent_pgid = parent_pid.and_then(|p| pt.table.get(&p)).map(|p| p.pgid);
-    let pgid = parent_pgid.unwrap_or(pid);
-    let cwd = parent_pid
-        .and_then(|p| pt.table.get(&p))
+    let parent_ref = parent_pid.and_then(|p| pt.table.get(&p));
+    let pgid = parent_ref.map(|p| p.pgid).unwrap_or(pid);
+    let cwd = parent_ref
         .map(|p| p.cwd.clone())
         .unwrap_or_else(|| String::from("/"));
+    let root_dir = parent_ref
+        .map(|p| p.root_dir.clone())
+        .unwrap_or_else(|| String::from("/"));
+    let uid = parent_ref.map(|p| p.uid).unwrap_or(0);
+    let gid = parent_ref.map(|p| p.gid).unwrap_or(0);
+    let session_id = parent_ref.map(|p| p.session_id).unwrap_or(0);
 
     let proc = Process {
         pid,
@@ -209,6 +243,10 @@ pub fn register_process(
         children: Vec::new(),
         slot,
         cwd,
+        root_dir,
+        uid,
+        gid,
+        session_id,
         pending_signals: 0,
         signal_handlers: [0; 32],
         signal_restorers: [0; 32],
@@ -265,13 +303,121 @@ pub fn cwd_of_caller() -> Option<String> {
     PROCESS_TABLE.lock().table.get(&pid).map(|p| p.cwd.clone())
 }
 
-/// The calling process's working directory, or "/" for a task that has no process.
-///
-/// The total version, for display and for the shell -- which always has a process, so
-/// the fallback never fires there. Anything deciding where a relative path points must
-/// use `cwd_of_caller` instead and handle the None; see its doc for why.
+pub fn caller_paths() -> Option<(String, String)> {
+    let pid = get_current_pid()?;
+    PROCESS_TABLE
+        .lock()
+        .table
+        .get(&pid)
+        .map(|p| (p.cwd.clone(), p.root_dir.clone()))
+}
+
+pub fn caller_creds() -> (u16, u16) {
+    match get_current_pid() {
+        Some(pid) => PROCESS_TABLE
+            .lock()
+            .table
+            .get(&pid)
+            .map(|p| (p.uid, p.gid))
+            .unwrap_or((0, 0)),
+        None => (0, 0),
+    }
+}
+
+pub fn set_caller_creds(uid: u16, gid: u16) -> KResult<()> {
+    let pid = get_current_pid().ok_or(KError::NotFound)?;
+    let mut pt = PROCESS_TABLE.lock();
+    let proc = pt.table.get_mut(&pid).ok_or(KError::NotFound)?;
+    if proc.uid != 0 && (proc.uid != uid || proc.gid != gid) {
+        return Err(KError::PermissionDenied);
+    }
+    proc.uid = uid;
+    proc.gid = gid;
+    Ok(())
+}
+
+pub fn get_ppid(pid: Pid) -> Pid {
+    PROCESS_TABLE
+        .lock()
+        .table
+        .get(&pid)
+        .and_then(|p| p.parent_pid)
+        .unwrap_or(0)
+}
+
+pub fn set_process_session(pid: Pid, sid: u32) {
+    if let Some(proc) = PROCESS_TABLE.lock().table.get_mut(&pid) {
+        proc.session_id = sid;
+    }
+}
+
+pub fn caller_session_id() -> u32 {
+    match get_current_pid() {
+        Some(pid) => PROCESS_TABLE
+            .lock()
+            .table
+            .get(&pid)
+            .map(|p| p.session_id)
+            .unwrap_or(0),
+        None => 0,
+    }
+}
+
+pub fn has_pending_signals(pid: Pid) -> bool {
+    PROCESS_TABLE
+        .lock()
+        .table
+        .get(&pid)
+        .map(|p| p.pending_signals != 0)
+        .unwrap_or(false)
+}
+
+pub fn root_set(path: &str) -> KResult<()> {
+    let norm = crate::vfs::mount::normalize(path)?;
+    let inode = crate::vfs::mount::resolve(&norm)?;
+    if inode.kind() != crate::vfs::InodeKind::Dir {
+        return Err(KError::NotADirectory);
+    }
+
+    let pid = get_current_pid().ok_or(KError::NotFound)?;
+    let mut pt = PROCESS_TABLE.lock();
+    let proc = pt.table.get_mut(&pid).ok_or(KError::NotFound)?;
+    if proc.uid != 0 {
+        return Err(KError::PermissionDenied);
+    }
+    proc.root_dir.clear();
+    proc.root_dir.push_str(&norm);
+    let inside = if norm == "/" {
+        true
+    } else {
+        proc.cwd == norm
+            || (proc.cwd.starts_with(&norm)
+                && proc.cwd.as_bytes().get(norm.len()) == Some(&b'/'))
+    };
+    if !inside {
+        proc.cwd = norm;
+    }
+    Ok(())
+}
+
+/// The calling process's working directory, visible relative to its `root_dir`.
 pub fn cwd_get() -> String {
-    cwd_of_caller().unwrap_or_else(|| String::from("/"))
+    match caller_paths() {
+        Some((cwd, root)) => {
+            if root == "/" || root.is_empty() {
+                cwd
+            } else if let Some(rel) = cwd.strip_prefix(&root) {
+                if rel.is_empty() {
+                    String::from("/")
+                } else {
+                    String::from(rel)
+                }
+            } else {
+                String::from("/")
+            }
+        }
+        None => String::from("/"),
+    }
 }
 
 /// Sets the calling process's working directory, normalizing and validating `path`.
@@ -397,7 +543,10 @@ pub fn check_signals(save_frame: &mut esp_hal::xtensa_lx_rt::exception::Context)
         None => return false,
     };
 
-    let proc = pt.table.get_mut(&pid).unwrap();
+    let proc = match pt.table.get_mut(&pid) {
+        Some(p) => p,
+        None => return false,
+    };
     if proc.pending_signals == 0 {
         return false;
     }

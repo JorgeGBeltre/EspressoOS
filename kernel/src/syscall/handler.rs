@@ -47,6 +47,22 @@ pub fn dispatch(
         Syscall::Getcwd => sys_getcwd(args),
         Syscall::Getpgid => sys_getpgid(args),
         Syscall::Setpgid => sys_setpgid(args),
+        Syscall::Getpid => sys_getpid(args),
+        Syscall::Getppid => sys_getppid(args),
+        Syscall::Stat => sys_stat(args),
+        Syscall::Lstat => sys_lstat(args),
+        Syscall::Symlink => sys_symlink(args),
+        Syscall::Readlink => sys_readlink(args),
+        Syscall::Rename => sys_rename(args),
+        Syscall::Chmod => sys_chmod(args),
+        Syscall::Chown => sys_chown(args),
+        Syscall::Chroot => sys_chroot(args),
+        Syscall::Flock => sys_flock(args),
+        Syscall::Mount => sys_mount(args),
+        Syscall::Umount => sys_umount(args),
+        Syscall::Tcsetpgrp => sys_tcsetpgrp(args),
+        Syscall::Getuid => sys_getuid(args),
+        Syscall::Setuid => sys_setuid(args),
     }
 }
 
@@ -259,6 +275,7 @@ fn sys_exit(args: &[usize]) -> isize {
     let code = arg(args, 0) as i32;
 
     let current_tid = crate::scheduler::current();
+    crate::scheduler::mark_zombie(code);
 
     let parent_to_wake = {
         let mut pt = crate::scheduler::process::PROCESS_TABLE.lock();
@@ -281,7 +298,6 @@ fn sys_exit(args: &[usize]) -> isize {
         crate::scheduler::unblock_task(parent_tid);
     }
 
-    crate::scheduler::mark_zombie(code);
     crate::scheduler::set_need_resched();
     0
 }
@@ -424,14 +440,15 @@ fn sys_wait(args: &[usize]) -> isize {
         None => return KError::NotFound.as_errno(),
     };
 
-    if !crate::scheduler::process::has_children(current_pid) {
+    let target_pid = arg(args, 2) as u32;
+    crate::session::poll_uart_signals();
+
+    if !crate::scheduler::process::has_matching_child(current_pid, target_pid) {
         return KError::NotFound.as_errno();
     }
 
-    // Detaching the child belongs to process.rs: it was the one place outside that
-    // module that removed from PROCESS_TABLE, which is what made the tid->pid map an
-    // invariant kept by discipline rather than by construction.
-    let reaped = crate::scheduler::process::take_zombie_child(current_pid);
+    let reaped =
+        crate::scheduler::process::take_zombie_child_matching(current_pid, target_pid);
 
     if let Some((child_pid, code, slot)) = reaped {
         if !status_ptr.is_null() {
@@ -1010,4 +1027,171 @@ fn sys_ota_state(args: &[usize]) -> isize {
     } else {
         KError::InvalidArgument.as_errno()
     }
+}
+
+fn sys_getpid(_args: &[usize]) -> isize {
+    crate::scheduler::process::get_current_pid().unwrap_or(0) as isize
+}
+
+fn sys_getppid(_args: &[usize]) -> isize {
+    match crate::scheduler::process::get_current_pid() {
+        Some(pid) => crate::scheduler::process::get_ppid(pid) as isize,
+        None => 0,
+    }
+}
+
+fn write_stat_meta(ptr: usize, meta: crate::vfs::StatMeta) -> isize {
+    let sz = core::mem::size_of::<crate::vfs::StatMeta>();
+    let out = match unsafe { user_slice_mut(ptr, sz) } {
+        Ok(s) => s,
+        Err(e) => return e.as_errno(),
+    };
+    let src =
+        unsafe { core::slice::from_raw_parts(&meta as *const crate::vfs::StatMeta as *const u8, sz) };
+    out.copy_from_slice(src);
+    0
+}
+
+fn sys_stat(args: &[usize]) -> isize {
+    let path = match unsafe { user_str(arg(args, 0), arg(args, 1)) } {
+        Ok(s) => s,
+        Err(e) => return e.as_errno(),
+    };
+    let out_ptr = arg(args, 2);
+    match crate::vfs::stat(path) {
+        Ok(meta) => write_stat_meta(out_ptr, meta),
+        Err(e) => e.as_errno(),
+    }
+}
+
+fn sys_lstat(args: &[usize]) -> isize {
+    let path = match unsafe { user_str(arg(args, 0), arg(args, 1)) } {
+        Ok(s) => s,
+        Err(e) => return e.as_errno(),
+    };
+    let out_ptr = arg(args, 2);
+    match crate::vfs::lstat(path) {
+        Ok(meta) => write_stat_meta(out_ptr, meta),
+        Err(e) => e.as_errno(),
+    }
+}
+
+fn sys_symlink(args: &[usize]) -> isize {
+    let target = match unsafe { user_str(arg(args, 0), arg(args, 1)) } {
+        Ok(s) => s,
+        Err(e) => return e.as_errno(),
+    };
+    let link_path = match unsafe { user_str(arg(args, 2), arg(args, 3)) } {
+        Ok(s) => s,
+        Err(e) => return e.as_errno(),
+    };
+    ret_unit(crate::vfs::symlink(target, link_path))
+}
+
+fn sys_readlink(args: &[usize]) -> isize {
+    let path = match unsafe { user_str(arg(args, 0), arg(args, 1)) } {
+        Ok(s) => s,
+        Err(e) => return e.as_errno(),
+    };
+    let buf = match unsafe { user_slice_mut(arg(args, 2), arg(args, 3)) } {
+        Ok(b) => b,
+        Err(e) => return e.as_errno(),
+    };
+    match crate::vfs::readlink(path) {
+        Ok(target) => {
+            let bytes = target.as_bytes();
+            let n = core::cmp::min(bytes.len(), buf.len());
+            buf[..n].copy_from_slice(&bytes[..n]);
+            n as isize
+        }
+        Err(e) => e.as_errno(),
+    }
+}
+
+fn sys_rename(args: &[usize]) -> isize {
+    let old_p = match unsafe { user_str(arg(args, 0), arg(args, 1)) } {
+        Ok(s) => s,
+        Err(e) => return e.as_errno(),
+    };
+    let new_p = match unsafe { user_str(arg(args, 2), arg(args, 3)) } {
+        Ok(s) => s,
+        Err(e) => return e.as_errno(),
+    };
+    ret_unit(crate::vfs::rename(old_p, new_p))
+}
+
+fn sys_chmod(args: &[usize]) -> isize {
+    let path = match unsafe { user_str(arg(args, 0), arg(args, 1)) } {
+        Ok(s) => s,
+        Err(e) => return e.as_errno(),
+    };
+    let mode = (arg(args, 2) & 0o7777) as u16;
+    ret_unit(crate::vfs::chmod(path, mode))
+}
+
+fn sys_chown(args: &[usize]) -> isize {
+    let path = match unsafe { user_str(arg(args, 0), arg(args, 1)) } {
+        Ok(s) => s,
+        Err(e) => return e.as_errno(),
+    };
+    let raw_u = arg(args, 2) as u32;
+    let raw_g = arg(args, 3) as u32;
+    let uid = if raw_u >= 0xFFFF { None } else { Some(raw_u as u16) };
+    let gid = if raw_g >= 0xFFFF { None } else { Some(raw_g as u16) };
+    ret_unit(crate::vfs::chown(path, uid, gid))
+}
+
+fn sys_chroot(args: &[usize]) -> isize {
+    let path = match unsafe { user_str(arg(args, 0), arg(args, 1)) } {
+        Ok(s) => s,
+        Err(e) => return e.as_errno(),
+    };
+    ret_unit(crate::scheduler::process::root_set(path))
+}
+
+fn sys_flock(args: &[usize]) -> isize {
+    let fd = arg(args, 0) as Fd;
+    let op = arg(args, 1) as u32;
+    ret_unit(crate::vfs::flock(fd, op))
+}
+
+fn sys_mount(args: &[usize]) -> isize {
+    let src = match unsafe { user_str(arg(args, 0), arg(args, 1)) } {
+        Ok(s) => s,
+        Err(e) => return e.as_errno(),
+    };
+    let target = match unsafe { user_str(arg(args, 2), arg(args, 3)) } {
+        Ok(s) => s,
+        Err(e) => return e.as_errno(),
+    };
+    let fstype = match unsafe { user_str(arg(args, 4), arg(args, 5)) } {
+        Ok(s) => s,
+        Err(e) => return e.as_errno(),
+    };
+    ret_unit(crate::vfs::mount_user(src, target, fstype))
+}
+
+fn sys_umount(args: &[usize]) -> isize {
+    let target = match unsafe { user_str(arg(args, 0), arg(args, 1)) } {
+        Ok(s) => s,
+        Err(e) => return e.as_errno(),
+    };
+    ret_unit(crate::vfs::umount_user(target))
+}
+
+fn sys_tcsetpgrp(args: &[usize]) -> isize {
+    let pgid = arg(args, 0) as u32;
+    let sid = crate::scheduler::process::caller_session_id();
+    ret_unit(crate::session::set_session_fg_pgid(sid, pgid))
+}
+
+fn sys_getuid(_args: &[usize]) -> isize {
+    let (uid, gid) = crate::scheduler::process::caller_creds();
+    (((gid as usize) << 16) | (uid as usize)) as isize
+}
+
+fn sys_setuid(args: &[usize]) -> isize {
+    let uid = (arg(args, 0) & 0xFFFF) as u16;
+    let gid = (arg(args, 1) & 0xFFFF) as u16;
+    ret_unit(crate::scheduler::process::set_caller_creds(uid, gid))
 }

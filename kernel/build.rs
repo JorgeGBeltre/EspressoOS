@@ -34,6 +34,7 @@ const APPS: &[&str] = &[
     "lsmod", "modinfo", "getent", "join", "look", "renice",
     "file", "readelf", "tac", "pgrep", "pkill", "shred",
     "sed", "lscpu", "useradd", "flock",
+    "userdel", "groupadd", "systemctl",
 ];
 
 // Every binary links at the same address and the loader relocates it into whatever

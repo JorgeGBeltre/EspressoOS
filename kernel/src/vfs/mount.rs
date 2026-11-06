@@ -91,16 +91,37 @@ fn normalize_against(base: &str, path: &str) -> KResult<String> {
 /// the tree already normalizes before locking -- `resolve` below at :97 before MOUNTS at
 /// :101, `mount`, `unmount`, `vfs::open` before the fd table, and `cwd_set` before
 /// PROCESS_TABLE, where getting it wrong would be same-lock reentry and a silent wedge.
-pub fn normalize(path: &str) -> KResult<String> {
-    if path.starts_with('/') {
-        return normalize_against("", path);
+pub fn normalize_rooted(root: &str, cwd: &str, path: &str) -> KResult<String> {
+    if root.is_empty() || root == "/" {
+        return normalize_against(cwd, path);
     }
-    // Relative -- and "" lands here too, since it does not start with '/'. It is left to
-    // normalize_against to reject rather than guarded again here: the cost is one wasted
-    // cwd lookup on exactly one input, which is cheaper than a second copy of the rule
-    // that would have to stay in step with the first.
-    let cwd = crate::scheduler::process::cwd_of_caller().ok_or(KError::InvalidArgument)?;
-    normalize_against(&cwd, path)
+    let rel_cwd = match cwd.strip_prefix(root) {
+        Some("") => "/",
+        Some(s) if s.starts_with('/') => s,
+        _ => "/",
+    };
+    let vpath = normalize_against(rel_cwd, path)?;
+    if vpath == "/" {
+        Ok(String::from(root))
+    } else {
+        let mut out = String::with_capacity(root.len() + vpath.len());
+        out.push_str(root.trim_end_matches('/'));
+        out.push_str(&vpath);
+        Ok(out)
+    }
+}
+
+pub fn normalize(path: &str) -> KResult<String> {
+    match crate::scheduler::process::caller_paths() {
+        Some((cwd, root)) => normalize_rooted(&root, &cwd, path),
+        None => {
+            if path.starts_with('/') {
+                normalize_against("", path)
+            } else {
+                Err(KError::InvalidArgument)
+            }
+        }
+    }
 }
 
 pub fn split_parent(path: &str) -> KResult<(&str, &str)> {
@@ -148,42 +169,115 @@ pub fn unmount(path: &str) -> KResult<()> {
     }
 }
 
-pub fn resolve(path: &str) -> KResult<Arc<dyn Inode>> {
-    let norm = normalize(path)?;
-    let target: Vec<&str> = split_components(&norm);
+pub const MAX_SYMLINKS: usize = 8;
 
-    let (fs, mount_len) = {
-        let mounts = MOUNTS.lock();
-        let mut best: Option<(Arc<dyn FileSystem>, usize)> = None;
-        for m in mounts.iter() {
-            let mc = split_components(&m.path);
-            let mlen = mc.len();
-            if mlen > target.len() {
-                continue;
-            }
-
-            let is_prefix = mc.iter().zip(target.iter()).all(|(a, b)| a == b);
-            if is_prefix {
-                let replace = match &best {
-                    Some((_, best_len)) => mlen > *best_len,
-                    None => true,
-                };
-                if replace {
-                    best = Some((m.fs.clone(), mlen));
-                }
+fn find_best_mount(target: &[&str]) -> KResult<(Arc<dyn FileSystem>, usize)> {
+    let mounts = MOUNTS.lock();
+    let mut best: Option<(Arc<dyn FileSystem>, usize)> = None;
+    for m in mounts.iter() {
+        let mc = split_components(&m.path);
+        let mlen = mc.len();
+        if mlen > target.len() {
+            continue;
+        }
+        let is_prefix = mc.iter().zip(target.iter()).all(|(a, b)| a == b);
+        if is_prefix {
+            let replace = match &best {
+                Some((_, best_len)) => mlen > *best_len,
+                None => true,
+            };
+            if replace {
+                best = Some((m.fs.clone(), mlen));
             }
         }
-        match best {
-            Some(v) => v,
-            None => return Err(KError::NotFound),
-        }
-    };
-
-    let mut node = fs.root();
-    for comp in target.iter().skip(mount_len) {
-        node = node.lookup(comp)?;
     }
-    Ok(node)
+    best.ok_or(KError::NotFound)
+}
+
+pub fn find_mount_and_rel(norm: &str) -> KResult<(Arc<dyn FileSystem>, String)> {
+    let comps = split_components(norm);
+    let (fs, mount_len) = find_best_mount(&comps)?;
+    let mut rel = String::new();
+    for c in comps.iter().skip(mount_len) {
+        if !rel.is_empty() {
+            rel.push('/');
+        }
+        rel.push_str(c);
+    }
+    Ok((fs, rel))
+}
+
+fn join_components(comps: &[&str]) -> String {
+    if comps.is_empty() {
+        return String::from("/");
+    }
+    let mut out = String::new();
+    for c in comps {
+        out.push('/');
+        out.push_str(c);
+    }
+    out
+}
+
+fn resolve_inner(path: &str, follow_leaf: bool) -> KResult<Arc<dyn Inode>> {
+    let mut current_norm = normalize(path)?;
+    let caller_root = crate::scheduler::process::caller_paths()
+        .map(|(_, r)| r)
+        .unwrap_or_else(|| String::from("/"));
+    let mut symlinks_followed: usize = 0;
+
+    loop {
+        let comps: Vec<String> = split_components(&current_norm)
+            .into_iter()
+            .map(String::from)
+            .collect();
+        let comp_refs: Vec<&str> = comps.iter().map(|s| s.as_str()).collect();
+        let (fs, mount_len) = find_best_mount(&comp_refs)?;
+
+        let mut node = fs.root();
+        let mut restarted = false;
+
+        for i in mount_len..comp_refs.len() {
+            node = node.lookup(comp_refs[i])?;
+            let is_last = i + 1 == comp_refs.len();
+            if node.kind() == InodeKind::Symlink && (!is_last || follow_leaf) {
+                symlinks_followed += 1;
+                if symlinks_followed > MAX_SYMLINKS {
+                    return Err(KError::InvalidArgument);
+                }
+                let link_target = node.readlink()?;
+                let parent_path = join_components(&comp_refs[..i]);
+                if is_last {
+                    current_norm =
+                        normalize_rooted(&caller_root, &parent_path, &link_target)?;
+                } else {
+                    let mut combined_link = link_target;
+                    for rem in &comp_refs[i + 1..] {
+                        if !combined_link.ends_with('/') {
+                            combined_link.push('/');
+                        }
+                        combined_link.push_str(rem);
+                    }
+                    current_norm =
+                        normalize_rooted(&caller_root, &parent_path, &combined_link)?;
+                }
+                restarted = true;
+                break;
+            }
+        }
+
+        if !restarted {
+            return Ok(node);
+        }
+    }
+}
+
+pub fn resolve(path: &str) -> KResult<Arc<dyn Inode>> {
+    resolve_inner(path, true)
+}
+
+pub fn resolve_nofollow(path: &str) -> KResult<Arc<dyn Inode>> {
+    resolve_inner(path, false)
 }
 
 pub fn child_mounts(dir_path: &str) -> KResult<Vec<(String, InodeKind)>> {

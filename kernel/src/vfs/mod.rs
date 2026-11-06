@@ -11,7 +11,53 @@ pub mod pipe;
 pub mod socket;
 
 pub use file::{Fd, OpenFile, OpenFlags, SeekFrom};
-pub use inode::{DirEntry, FileSystem, Inode, InodeKind, VfsError};
+pub use inode::{DirEntry, FileSystem, Inode, InodeKind, StatMeta, VfsError};
+
+pub const LOCK_SH: u32 = 1;
+pub const LOCK_EX: u32 = 2;
+pub const LOCK_NB: u32 = 4;
+pub const LOCK_UN: u32 = 8;
+
+struct FlockEntry {
+    exclusive: Option<u32>,
+    shared: Vec<u32>,
+}
+
+static FLOCK_TABLE: Mutex<alloc::collections::BTreeMap<(usize, u64), FlockEntry>> =
+    Mutex::new(alloc::collections::BTreeMap::new());
+
+fn release_flock_owner(owner: u32) {
+    if owner == 0 {
+        return;
+    }
+    let mut locks = FLOCK_TABLE.lock();
+    let mut empty_keys = Vec::new();
+    for (k, entry) in locks.iter_mut() {
+        if entry.exclusive == Some(owner) {
+            entry.exclusive = None;
+        }
+        entry.shared.retain(|&o| o != owner);
+        if entry.exclusive.is_none() && entry.shared.is_empty() {
+            empty_keys.push(*k);
+        }
+    }
+    for k in empty_keys {
+        locks.remove(&k);
+    }
+}
+
+fn owner_still_open(tables: &alloc::collections::BTreeMap<Pid, FdTable>, owner: u32) -> bool {
+    for t in tables.values() {
+        for slot in &t.entries {
+            if let Some(f) = slot {
+                if f.lock_owner == owner {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
 
 const MAX_OPEN_FILES: usize = 64;
 
@@ -52,15 +98,12 @@ impl FdTable {
         }
     }
 
-    fn remove(&mut self, fd: Fd) -> KResult<()> {
+    fn remove(&mut self, fd: Fd) -> KResult<OpenFile> {
         if fd < 0 {
             return Err(KError::BadFd);
         }
         match self.entries.get_mut(fd as usize) {
-            Some(slot) if slot.is_some() => {
-                *slot = None;
-                Ok(())
-            }
+            Some(slot) if slot.is_some() => slot.take().ok_or(KError::BadFd),
             _ => Err(KError::BadFd),
         }
     }
@@ -96,8 +139,24 @@ pub fn init() -> KResult<()> {
 }
 
 pub fn cleanup_process_fds(pid: Pid) {
-    let mut tables = PROCESS_FD_TABLES.lock();
-    tables.remove(&pid);
+    let orphan_owners: Vec<u32> = {
+        let mut tables = PROCESS_FD_TABLES.lock();
+        let removed = match tables.remove(&pid) {
+            Some(t) => t,
+            None => return,
+        };
+        let mut out = Vec::new();
+        for slot in removed.entries.into_iter().flatten() {
+            let owner = slot.lock_owner;
+            if !out.contains(&owner) && !owner_still_open(&tables, owner) {
+                out.push(owner);
+            }
+        }
+        out
+    };
+    for owner in orphan_owners {
+        release_flock_owner(owner);
+    }
 }
 
 /// `pid`'s fd table, or BadFd if it has none.
@@ -128,9 +187,41 @@ fn create_path(path: &str, kind: InodeKind) -> KResult<Arc<dyn Inode>> {
     parent.create(name, kind)
 }
 
+fn check_open_perms(inode: &Arc<dyn Inode>, flags: OpenFlags) -> KResult<()> {
+    let (uid, gid) = crate::scheduler::process::caller_creds();
+    if uid == 0 {
+        return Ok(());
+    }
+    let meta = inode.meta();
+    let shift = if uid == meta.uid {
+        6
+    } else if gid == meta.gid {
+        3
+    } else {
+        0
+    };
+    let bits = (meta.mode >> shift) & 0o7;
+    if flags.contains(OpenFlags::RDONLY) && (bits & 0o4) == 0 {
+        return Err(KError::PermissionDenied);
+    }
+    if flags.contains(OpenFlags::WRONLY) && (bits & 0o2) == 0 {
+        return Err(KError::PermissionDenied);
+    }
+    Ok(())
+}
+
 pub fn open(path: &str, flags: OpenFlags) -> KResult<Fd> {
+    if flags.contains(OpenFlags::CREATE) && flags.contains(OpenFlags::EXCL) {
+        if mount::resolve_nofollow(path).is_ok() {
+            return Err(KError::AlreadyExists);
+        }
+    }
+
     let inode = match mount::resolve(path) {
-        Ok(node) => node,
+        Ok(node) => {
+            check_open_perms(&node, flags)?;
+            node
+        }
         Err(KError::NotFound) if flags.contains(OpenFlags::CREATE) => {
             create_path(path, InodeKind::File)?
         }
@@ -150,9 +241,20 @@ pub fn open(path: &str, flags: OpenFlags) -> KResult<Fd> {
 
 pub fn close(fd: Fd) -> KResult<()> {
     let pid = crate::scheduler::process::get_current_pid().unwrap_or(0);
-    let mut tables = PROCESS_FD_TABLES.lock();
-    let table = table_of(&mut tables, pid)?;
-    table.remove(fd)
+    let release_owner = {
+        let mut tables = PROCESS_FD_TABLES.lock();
+        let table = table_of(&mut tables, pid)?;
+        let closed = table.remove(fd)?;
+        if !owner_still_open(&tables, closed.lock_owner) {
+            Some(closed.lock_owner)
+        } else {
+            None
+        }
+    };
+    if let Some(owner) = release_owner {
+        release_flock_owner(owner);
+    }
+    Ok(())
 }
 
 /// Writes the post-I/O offset back into the fd table.
@@ -409,11 +511,7 @@ pub fn get_inode(fd: Fd) -> KResult<Arc<dyn Inode>> {
 }
 
 pub fn remove_fd(fd: Fd) -> KResult<()> {
-    let pid = crate::scheduler::process::get_current_pid().unwrap_or(0);
-    let mut tables = PROCESS_FD_TABLES.lock();
-    let table = table_of(&mut tables, pid)?;
-    table.remove(fd)?;
-    Ok(())
+    close(fd)
 }
 
 pub fn dup2(oldfd: Fd, newfd: Fd) -> KResult<Fd> {
@@ -421,23 +519,34 @@ pub fn dup2(oldfd: Fd, newfd: Fd) -> KResult<Fd> {
         return Err(KError::BadFd);
     }
     let pid = crate::scheduler::process::get_current_pid().unwrap_or(0);
-    let mut tables = PROCESS_FD_TABLES.lock();
-    let table = table_of(&mut tables, pid)?;
+    let replaced_owner = {
+        let mut tables = PROCESS_FD_TABLES.lock();
+        let table = table_of(&mut tables, pid)?;
 
-    let open_file = match table.entries.get(oldfd as usize) {
-        Some(Some(f)) => f.clone(),
-        _ => return Err(KError::BadFd),
+        let open_file = match table.entries.get(oldfd as usize) {
+            Some(Some(f)) => f.clone(),
+            _ => return Err(KError::BadFd),
+        };
+
+        if oldfd == newfd {
+            return Ok(newfd);
+        }
+
+        while table.entries.len() <= newfd as usize {
+            table.entries.push(None);
+        }
+
+        let prev = table.entries[newfd as usize].replace(open_file);
+        match prev {
+            Some(old_open) if !owner_still_open(&tables, old_open.lock_owner) => {
+                Some(old_open.lock_owner)
+            }
+            _ => None,
+        }
     };
-
-    if oldfd == newfd {
-        return Ok(newfd);
+    if let Some(owner) = replaced_owner {
+        release_flock_owner(owner);
     }
-
-    while table.entries.len() <= newfd as usize {
-        table.entries.push(None);
-    }
-
-    table.entries[newfd as usize] = Some(open_file);
     Ok(newfd)
 }
 
@@ -491,9 +600,18 @@ pub fn close_in(pid: Pid, fd: Fd) {
     if fd < 0 {
         return;
     }
-    let mut tables = PROCESS_FD_TABLES.lock();
-    if let Some(table) = tables.get_mut(&pid) {
-        let _ = table.remove(fd);
+    let release_owner = {
+        let mut tables = PROCESS_FD_TABLES.lock();
+        let closed = tables
+            .get_mut(&pid)
+            .and_then(|table| table.remove(fd).ok());
+        match closed {
+            Some(c) if !owner_still_open(&tables, c.lock_owner) => Some(c.lock_owner),
+            _ => None,
+        }
+    };
+    if let Some(owner) = release_owner {
+        release_flock_owner(owner);
     }
 }
 
@@ -503,4 +621,204 @@ pub fn clone_fd_table(parent_pid: Pid, child_pid: Pid) {
     if let Some(t) = parent_table {
         tables.insert(child_pid, t);
     }
+}
+
+pub fn stat(path: &str) -> KResult<StatMeta> {
+    let inode = mount::resolve(path)?;
+    Ok(inode.meta())
+}
+
+pub fn lstat(path: &str) -> KResult<StatMeta> {
+    let inode = mount::resolve_nofollow(path)?;
+    Ok(inode.meta())
+}
+
+pub fn symlink(target: &str, link_path: &str) -> KResult<()> {
+    if target.is_empty() || target.len() > mount::MAX_NAME_LEN {
+        return Err(KError::InvalidArgument);
+    }
+    if mount::resolve_nofollow(link_path).is_ok() {
+        return Err(KError::AlreadyExists);
+    }
+    let norm = mount::normalize(link_path)?;
+    let (parent_path, name) = mount::split_parent(&norm)?;
+    if name.len() > mount::MAX_NAME_LEN {
+        return Err(KError::NameTooLong);
+    }
+    let parent = mount::resolve(parent_path)?;
+    if parent.kind() != InodeKind::Dir {
+        return Err(KError::NotADirectory);
+    }
+    parent.create_symlink(name, target)?;
+    Ok(())
+}
+
+pub fn readlink(path: &str) -> KResult<String> {
+    let inode = mount::resolve_nofollow(path)?;
+    inode.readlink()
+}
+
+pub fn chmod(path: &str, mode: u16) -> KResult<()> {
+    let inode = mount::resolve(path)?;
+    let (uid, _) = crate::scheduler::process::caller_creds();
+    let meta = inode.meta();
+    if uid != 0 && uid != meta.uid {
+        return Err(KError::PermissionDenied);
+    }
+    inode.set_mode(mode & 0o7777)
+}
+
+pub fn chown(path: &str, uid: Option<u16>, gid: Option<u16>) -> KResult<()> {
+    let (caller_uid, caller_gid) = crate::scheduler::process::caller_creds();
+    let inode = mount::resolve_nofollow(path)?;
+    let meta = inode.meta();
+    if caller_uid != 0 {
+        if uid.is_some() && uid != Some(meta.uid) {
+            return Err(KError::PermissionDenied);
+        }
+        if let Some(new_gid) = gid {
+            if caller_uid != meta.uid || (new_gid != caller_gid && new_gid != meta.gid) {
+                return Err(KError::PermissionDenied);
+            }
+        }
+    }
+    inode.set_owner(uid, gid)
+}
+
+pub fn rename(old_path: &str, new_path: &str) -> KResult<()> {
+    let last_old = old_path.trim_end_matches('/').rsplit('/').next().unwrap_or("");
+    let last_new = new_path.trim_end_matches('/').rsplit('/').next().unwrap_or("");
+    if last_old == "." || last_old == ".." || last_new == "." || last_new == ".." {
+        return Err(KError::InvalidArgument);
+    }
+
+    let old_norm = mount::normalize(old_path)?;
+    let new_norm = mount::normalize(new_path)?;
+    if old_norm == "/" || new_norm == "/" {
+        return Err(KError::Busy);
+    }
+    if old_norm == new_norm {
+        return Ok(());
+    }
+
+    let (fs_old, rel_old) = mount::find_mount_and_rel(&old_norm)?;
+    let (fs_new, rel_new) = mount::find_mount_and_rel(&new_norm)?;
+    if rel_old.is_empty() || rel_new.is_empty() {
+        return Err(KError::Busy);
+    }
+    if !Arc::ptr_eq(&fs_old, &fs_new) {
+        return Err(KError::NotSupported);
+    }
+    fs_old.rename(&rel_old, &rel_new)
+}
+
+pub fn flock(fd: Fd, operation: u32) -> KResult<()> {
+    let nonblock = (operation & LOCK_NB) != 0;
+    let mode = operation & !LOCK_NB;
+    if mode != LOCK_SH && mode != LOCK_EX && mode != LOCK_UN {
+        return Err(KError::InvalidArgument);
+    }
+
+    let pid = crate::scheduler::process::get_current_pid().unwrap_or(0);
+    let (key, owner) = {
+        let mut tables = PROCESS_FD_TABLES.lock();
+        let table = table_of(&mut tables, pid)?;
+        let file = table.get_mut(fd)?;
+        (file.inode.inode_key(), file.lock_owner)
+    };
+    if key.1 == 0 && key.0 == 0 {
+        return Err(KError::InvalidArgument);
+    }
+
+    if mode == LOCK_UN {
+        let mut locks = FLOCK_TABLE.lock();
+        if let Some(entry) = locks.get_mut(&key) {
+            if entry.exclusive == Some(owner) {
+                entry.exclusive = None;
+            }
+            entry.shared.retain(|&o| o != owner);
+            if entry.exclusive.is_none() && entry.shared.is_empty() {
+                locks.remove(&key);
+            }
+        }
+        return Ok(());
+    }
+
+    loop {
+        let acquired = {
+            let mut locks = FLOCK_TABLE.lock();
+            let entry = locks.entry(key).or_insert_with(|| FlockEntry {
+                exclusive: None,
+                shared: Vec::new(),
+            });
+            if mode == LOCK_SH {
+                match entry.exclusive {
+                    None => {
+                        if !entry.shared.contains(&owner) {
+                            entry.shared.push(owner);
+                        }
+                        true
+                    }
+                    Some(ex) if ex == owner => {
+                        entry.exclusive = None;
+                        if !entry.shared.contains(&owner) {
+                            entry.shared.push(owner);
+                        }
+                        true
+                    }
+                    Some(_) => false,
+                }
+            } else {
+                let others_shared = entry.shared.iter().any(|&o| o != owner);
+                let others_excl = entry.exclusive.map(|ex| ex != owner).unwrap_or(false);
+                if !others_shared && !others_excl {
+                    entry.shared.retain(|&o| o != owner);
+                    entry.exclusive = Some(owner);
+                    true
+                } else {
+                    false
+                }
+            }
+        };
+
+        if acquired {
+            return Ok(());
+        }
+        if nonblock {
+            return Err(KError::WouldBlock);
+        }
+        if pid != 0 && crate::scheduler::process::has_pending_signals(pid) {
+            return Err(KError::Interrupted);
+        }
+        crate::scheduler::yield_now();
+    }
+}
+
+pub fn mount_user(_src: &str, target: &str, fstype: &str) -> KResult<()> {
+    let (uid, _) = crate::scheduler::process::caller_creds();
+    if uid != 0 {
+        return Err(KError::PermissionDenied);
+    }
+    let dir = mount::resolve(target)?;
+    if dir.kind() != InodeKind::Dir {
+        return Err(KError::NotADirectory);
+    }
+    let fs: Arc<dyn FileSystem> = match fstype {
+        "ramfs" | "tmpfs" => crate::fs::ramfs::RamFs::new(),
+        "littlefs" => crate::fs::littlefs::LittleFs::mount_default()?,
+        _ => return Err(KError::NotSupported),
+    };
+    mount::mount(target, fs)
+}
+
+pub fn umount_user(target: &str) -> KResult<()> {
+    let (uid, _) = crate::scheduler::process::caller_creds();
+    if uid != 0 {
+        return Err(KError::PermissionDenied);
+    }
+    let norm = mount::normalize(target)?;
+    if norm == "/" || norm == "/dev" || norm == "/proc" || norm == "/sys" || norm == "/run" {
+        return Err(KError::Busy);
+    }
+    mount::unmount(&norm)
 }

@@ -87,12 +87,7 @@ pub fn pbkdf2_hmac_sha256(password: &[u8], salt: &[u8], iterations: u32) -> [u8;
 
 pub const PBKDF2_ROUNDS: u32 = 1000;
 
-/// Builds the `/etc/passwd` line for `user:pass` using PBKDF2-HMAC-SHA256 (RFC 8018)
-/// in `$pbkdf2-sha256$i=1000$<salt-hex>$<hash-hex>` format.
-fn hash_line(user: &str, password: &[u8]) -> KResult<String> {
-    if user.is_empty() || user.contains(':') || user.contains('\n') {
-        return Err(KError::InvalidArgument);
-    }
+fn hash_field(password: &[u8]) -> KResult<String> {
     if password.is_empty() || password.contains(&b':') || password.contains(&b'\n') {
         return Err(KError::InvalidArgument);
     }
@@ -103,18 +98,82 @@ fn hash_line(user: &str, password: &[u8]) -> KResult<String> {
 
     let hash = pbkdf2_hmac_sha256(password, &salt, PBKDF2_ROUNDS);
 
-    let mut line = String::from(user);
-    line.push(':');
-    line.push_str("$pbkdf2-sha256$i=1000$");
+    let mut field = String::from("$pbkdf2-sha256$i=1000$");
     for b in salt {
-        hex_push(b, &mut line);
+        hex_push(b, &mut field);
     }
-    line.push('$');
+    field.push('$');
     for b in hash {
-        hex_push(b, &mut line);
+        hex_push(b, &mut field);
     }
-    line.push('\n');
-    Ok(line)
+    Ok(field)
+}
+
+/// Upserts `user`'s password hash in `/etc/passwd` while preserving all other accounts
+/// and existing POSIX 7-field metadata (`uid:gid:gecos:home:shell`).
+fn update_passwd_content(existing: &str, user: &str, hashed_field: &str) -> KResult<String> {
+    if user.is_empty() || user.contains(':') || user.contains('\n') {
+        return Err(KError::InvalidArgument);
+    }
+    let mut out = String::new();
+    let mut updated = false;
+    let mut max_uid: u32 = 999;
+
+    for raw_line in existing.lines() {
+        let trimmed = raw_line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if trimmed.starts_with('#') {
+            out.push_str(trimmed);
+            out.push('\n');
+            continue;
+        }
+        let parts: Vec<&str> = trimmed.split(':').collect();
+        if parts.len() >= 3 {
+            if let Ok(u) = parts[2].parse::<u32>() {
+                if u >= 1000 && u < 65000 && u > max_uid {
+                    max_uid = u;
+                }
+            }
+        }
+        if !parts.is_empty() && parts[0].trim() == user {
+            out.push_str(user);
+            out.push(':');
+            out.push_str(hashed_field);
+            if parts.len() >= 7 {
+                for p in &parts[2..7] {
+                    out.push(':');
+                    out.push_str(p);
+                }
+            } else if user == "root" {
+                out.push_str(":0:0:root:/root:/bin/sh");
+            } else {
+                let uid = max_uid + 1;
+                max_uid = uid;
+                out.push_str(&alloc::format!(":{}:{}:{}:/home/{}:/bin/sh", uid, uid, user, user));
+            }
+            out.push('\n');
+            updated = true;
+        } else {
+            out.push_str(trimmed);
+            out.push('\n');
+        }
+    }
+
+    if !updated {
+        out.push_str(user);
+        out.push(':');
+        out.push_str(hashed_field);
+        if user == "root" {
+            out.push_str(":0:0:root:/root:/bin/sh\n");
+        } else {
+            let uid = max_uid + 1;
+            out.push_str(&alloc::format!(":{}:{}:{}:/home/{}:/bin/sh\n", uid, uid, user, user));
+        }
+    }
+
+    Ok(out)
 }
 
 struct PasswdDevice;
@@ -159,10 +218,30 @@ impl crate::vfs::devfs::Device for PasswdDevice {
                     .map_err(|_| KError::InvalidArgument)?;
                 let pass = &pbuf[..req.pass_len];
 
-                let line = hash_line(user, pass)?;
+                let hashed = hash_field(pass)?;
+                let mut existing = String::new();
+                if let Ok(rfd) = crate::vfs::open("/etc/passwd", OpenFlags::RDONLY) {
+                    let mut rbuf = [0u8; 512];
+                    loop {
+                        match crate::vfs::read(rfd, &mut rbuf) {
+                            Ok(0) | Err(_) => break,
+                            Ok(n) => {
+                                if let Ok(chunk) = core::str::from_utf8(&rbuf[..n]) {
+                                    existing.push_str(chunk);
+                                }
+                                if existing.len() > 4096 {
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    let _ = crate::vfs::close(rfd);
+                }
+
+                let updated_doc = update_passwd_content(&existing, user, &hashed)?;
 
                 let fd = crate::vfs::open("/etc/passwd", OpenFlags(O_WRONLY_CREATE_TRUNC))?;
-                let res = crate::vfs::write(fd, line.as_bytes());
+                let res = crate::vfs::write(fd, updated_doc.as_bytes());
                 let _ = crate::vfs::close(fd);
                 res
             }

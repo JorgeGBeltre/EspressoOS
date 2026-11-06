@@ -1,70 +1,163 @@
 #![no_std]
 #![no_main]
 
-use libc::{arg, close, open, print, println, read, O_RDONLY};
+use libc::{arg, close, getuid_gid, open, println, read, O_RDONLY};
+
+fn parse_u32(s: &str) -> Option<u32> {
+    if s.is_empty() {
+        return None;
+    }
+    let mut v = 0u32;
+    for &b in s.as_bytes() {
+        if b >= b'0' && b <= b'9' {
+            v = v.saturating_mul(10).saturating_add((b - b'0') as u32);
+        } else {
+            return None;
+        }
+    }
+    Some(v)
+}
+
+fn resolve_user_by_uid<'a>(uid: u32, pbuf: &'a [u8]) -> Option<(&'a str, u32)> {
+    let text = core::str::from_utf8(pbuf).ok()?;
+    for line in text.lines() {
+        let t = line.trim();
+        if t.is_empty() || t.starts_with('#') {
+            continue;
+        }
+        let mut p = t.split(':');
+        let u = p.next().unwrap_or("");
+        let _pw = p.next();
+        if let Some(us) = p.next() {
+            if parse_u32(us) == Some(uid) {
+                let g = p.next().and_then(parse_u32).unwrap_or(uid);
+                return Some((u, g));
+            }
+        } else if uid == 0 && !u.is_empty() {
+            return Some((u, 0));
+        }
+    }
+    None
+}
+
+fn resolve_user_by_name<'a>(name: &'a str, pbuf: &'a [u8]) -> Option<(u32, u32)> {
+    if let Ok(text) = core::str::from_utf8(pbuf) {
+        for line in text.lines() {
+            let t = line.trim();
+            if t.is_empty() || t.starts_with('#') {
+                continue;
+            }
+            let mut p = t.split(':');
+            let u = p.next().unwrap_or("");
+            let _pw = p.next();
+            if u == name {
+                let uid = p.next().and_then(parse_u32).unwrap_or(0);
+                let gid = p.next().and_then(parse_u32).unwrap_or(uid);
+                return Some((uid, gid));
+            }
+        }
+    }
+    if name == "root" {
+        Some((0, 0))
+    } else {
+        None
+    }
+}
+
+fn resolve_group_by_gid<'a>(gid: u32, gbuf: &'a [u8]) -> &'a str {
+    if let Ok(text) = core::str::from_utf8(gbuf) {
+        for line in text.lines() {
+            let t = line.trim();
+            if t.is_empty() || t.starts_with('#') {
+                continue;
+            }
+            let mut p = t.split(':');
+            let g = p.next().unwrap_or("");
+            let _pw = p.next();
+            if p.next().and_then(parse_u32) == Some(gid) && !g.is_empty() {
+                return g;
+            }
+        }
+    }
+    match gid {
+        0 => "root",
+        10 => "wheel",
+        100 => "users",
+        _ => "users",
+    }
+}
 
 #[no_mangle]
 pub extern "C" fn main(argc: i32, argv: *const *const u8) -> i32 {
     let mut print_u_only = false;
     let mut print_g_only = false;
     let mut print_name_only = false;
+    let mut target_user = "";
 
-    if argc > 1 {
-        let flag = unsafe { arg(argv, 1) };
+    let mut i = 1;
+    while i < argc {
+        let flag = unsafe { arg(argv, i) };
         if flag == "-u" {
             print_u_only = true;
         } else if flag == "-g" {
             print_g_only = true;
-        } else if flag == "-un" {
+        } else if flag == "-n" {
+            print_name_only = true;
+        } else if flag == "-un" || flag == "-nu" {
             print_u_only = true;
             print_name_only = true;
-        } else if flag == "-gn" {
+        } else if flag == "-gn" || flag == "-ng" {
             print_g_only = true;
             print_name_only = true;
+        } else if !flag.starts_with('-') {
+            target_user = flag;
+        }
+        i += 1;
+    }
+
+    let mut pbuf = [0u8; 512];
+    let mut plen = 0usize;
+    let pfd = open("/etc/passwd", O_RDONLY);
+    if pfd >= 0 {
+        let n = read(pfd as i32, &mut pbuf);
+        close(pfd as i32);
+        if n > 0 {
+            plen = n as usize;
         }
     }
 
-    let mut user_name = "youareme";
-    let mut name_buf = [0u8; 32];
-    let mut has_custom_user = false;
-
-    let fd = open("/etc/passwd", O_RDONLY);
-    if fd >= 0 {
-        let mut buf = [0u8; 128];
-        let n = read(fd as i32, &mut buf);
-        close(fd as i32);
+    let mut gbuf = [0u8; 512];
+    let mut glen = 0usize;
+    let gfd = open("/etc/group", O_RDONLY);
+    if gfd >= 0 {
+        let n = read(gfd as i32, &mut gbuf);
+        close(gfd as i32);
         if n > 0 {
-            if let Ok(s) = core::str::from_utf8(&buf[..n as usize]) {
-                if let Some(first_line) = s.split('\n').next() {
-                    if let Some(u) = first_line.split(':').next() {
-                        let trimmed = u.trim();
-                        if !trimmed.is_empty() {
-                            let len = trimmed.len().min(31);
-                            name_buf[..len].copy_from_slice(&trimmed.as_bytes()[..len]);
-                            name_buf[len] = 0;
-                            has_custom_user = true;
-                        }
-                    }
-                }
+            glen = n as usize;
+        }
+    }
+
+    let (uid, gid, uname) = if !target_user.is_empty() {
+        match resolve_user_by_name(target_user, &pbuf[..plen]) {
+            Some((u, g)) => (u, g, target_user),
+            None => {
+                println!("id: '{}': no such user", target_user);
+                return 1;
             }
         }
-    }
-
-    if has_custom_user {
-        let len = name_buf.iter().position(|&c| c == 0).unwrap_or(name_buf.len());
-        if let Ok(s) = core::str::from_utf8(&name_buf[..len]) {
-            user_name = s;
+    } else {
+        let (ku, kg) = getuid_gid();
+        match resolve_user_by_uid(ku, &pbuf[..plen]) {
+            Some((name, _)) => (ku, kg, name),
+            None => (ku, kg, if ku == 0 { "root" } else { "user" }),
         }
-    }
+    };
 
-    let is_root = user_name == "root";
-    let uid = if is_root { 0 } else { 1000 };
-    let gid = if is_root { 0 } else { 1000 };
-    let grp_name = if is_root { "root" } else { "users" };
+    let gname = resolve_group_by_gid(gid, &gbuf[..glen]);
 
     if print_u_only {
         if print_name_only {
-            println!("{}", user_name);
+            println!("{}", uname);
         } else {
             println!("{}", uid);
         }
@@ -73,7 +166,7 @@ pub extern "C" fn main(argc: i32, argv: *const *const u8) -> i32 {
 
     if print_g_only {
         if print_name_only {
-            println!("{}", grp_name);
+            println!("{}", gname);
         } else {
             println!("{}", gid);
         }
@@ -82,7 +175,7 @@ pub extern "C" fn main(argc: i32, argv: *const *const u8) -> i32 {
 
     println!(
         "uid={}({}) gid={}({}) groups={}({})",
-        uid, user_name, gid, grp_name, gid, grp_name
+        uid, uname, gid, gname, gid, gname
     );
     0
 }

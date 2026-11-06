@@ -1,7 +1,7 @@
 #![no_std]
 #![no_main]
 
-use libc::{arg, chdir, println, spawn, waitpid};
+use libc::{arg, chdir, chroot, println, spawn, waitpid};
 
 #[no_mangle]
 pub extern "C" fn main(argc: i32, argv: *const *const u8) -> i32 {
@@ -18,16 +18,24 @@ pub extern "C" fn main(argc: i32, argv: *const *const u8) -> i32 {
         return 0;
     }
 
-    if chdir(newroot) < 0 {
-        println!("chroot: cannot change root directory to '{}': No such file or directory", newroot);
+    let rc = chroot(newroot);
+    if rc < 0 {
+        let reason = match rc {
+            -1 => "Operation not permitted",
+            -20 => "Not a directory",
+            _ => "No such file or directory",
+        };
+        println!("chroot: cannot change root directory to '{}': {}", newroot, reason);
         return 125;
     }
+    let _ = chdir("/");
 
+    let default_argv = [b"sh\0".as_ptr(), core::ptr::null()];
     let (cmd, child_argv) = if argc >= 3 {
         let c = unsafe { arg(argv, 2) };
         (c, unsafe { argv.offset(2) })
     } else {
-        ("/bin/sh", core::ptr::null())
+        ("/bin/sh", default_argv.as_ptr())
     };
 
     let mut path_buf = [0u8; 64];

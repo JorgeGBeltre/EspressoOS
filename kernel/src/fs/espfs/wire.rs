@@ -62,6 +62,9 @@ pub enum RecType {
     Write = 3,
     Truncate = 4,
     Unlink = 5,
+    MkSymlink = 6,
+    SetAttr = 7,
+    Rename = 8,
 }
 
 impl RecType {
@@ -72,6 +75,9 @@ impl RecType {
             3 => Some(RecType::Write),
             4 => Some(RecType::Truncate),
             5 => Some(RecType::Unlink),
+            6 => Some(RecType::MkSymlink),
+            7 => Some(RecType::SetAttr),
+            8 => Some(RecType::Rename),
             _ => None,
         }
     }
@@ -196,6 +202,78 @@ pub fn dec_unlink(p: &[u8]) -> Option<(u32, &[u8])> {
         return None;
     }
     Some((rd_u32(p, 0), &p[4..]))
+}
+
+pub fn enc_symlink(ino: u32, parent: u32, name: &[u8], target: &[u8]) -> Vec<u8> {
+    let mut v = Vec::with_capacity(12 + name.len() + target.len());
+    v.extend_from_slice(&ino.to_le_bytes());
+    v.extend_from_slice(&parent.to_le_bytes());
+    v.extend_from_slice(&(name.len() as u16).to_le_bytes());
+    v.extend_from_slice(&(target.len() as u16).to_le_bytes());
+    v.extend_from_slice(name);
+    v.extend_from_slice(target);
+    v
+}
+
+pub fn dec_symlink(p: &[u8]) -> Option<(u32, u32, &[u8], &[u8])> {
+    if p.len() < 12 {
+        return None;
+    }
+    let ino = rd_u32(p, 0);
+    let parent = rd_u32(p, 4);
+    let nlen = rd_u16(p, 8) as usize;
+    let tlen = rd_u16(p, 10) as usize;
+    if p.len() < 12 + nlen + tlen {
+        return None;
+    }
+    Some((ino, parent, &p[12..12 + nlen], &p[12 + nlen..12 + nlen + tlen]))
+}
+
+pub fn enc_setattr(ino: u32, mode: u16, uid: u16, gid: u16) -> Vec<u8> {
+    let mut v = Vec::with_capacity(12);
+    v.extend_from_slice(&ino.to_le_bytes());
+    v.extend_from_slice(&mode.to_le_bytes());
+    v.extend_from_slice(&uid.to_le_bytes());
+    v.extend_from_slice(&gid.to_le_bytes());
+    v.extend_from_slice(&0u16.to_le_bytes());
+    v
+}
+
+pub fn dec_setattr(p: &[u8]) -> Option<(u32, u16, u16, u16)> {
+    if p.len() < 10 {
+        return None;
+    }
+    Some((rd_u32(p, 0), rd_u16(p, 4), rd_u16(p, 6), rd_u16(p, 8)))
+}
+
+pub fn enc_rename(
+    old_parent: u32,
+    new_parent: u32,
+    old_name: &[u8],
+    new_name: &[u8],
+) -> Vec<u8> {
+    let mut v = Vec::with_capacity(12 + old_name.len() + new_name.len());
+    v.extend_from_slice(&old_parent.to_le_bytes());
+    v.extend_from_slice(&new_parent.to_le_bytes());
+    v.extend_from_slice(&(old_name.len() as u16).to_le_bytes());
+    v.extend_from_slice(&(new_name.len() as u16).to_le_bytes());
+    v.extend_from_slice(old_name);
+    v.extend_from_slice(new_name);
+    v
+}
+
+pub fn dec_rename(p: &[u8]) -> Option<(u32, u32, &[u8], &[u8])> {
+    if p.len() < 12 {
+        return None;
+    }
+    let old_p = rd_u32(p, 0);
+    let new_p = rd_u32(p, 4);
+    let olen = rd_u16(p, 8) as usize;
+    let nlen = rd_u16(p, 10) as usize;
+    if p.len() < 12 + olen + nlen {
+        return None;
+    }
+    Some((old_p, new_p, &p[12..12 + olen], &p[12 + olen..12 + olen + nlen]))
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

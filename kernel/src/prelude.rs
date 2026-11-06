@@ -42,12 +42,15 @@ pub enum KError {
     Fault,
 
     TableFull,
+
+    Interrupted,
 }
 
 impl KError {
     pub const fn as_errno(self) -> isize {
         match self {
             KError::NotFound => -2,
+            KError::Interrupted => -4,
             KError::IoError => -5,
             KError::BadFd => -9,
             KError::NoMem => -12,
@@ -79,6 +82,8 @@ pub mod layout {
     pub const NVS_SIZE: u32 = 0x0000_6000;
     pub const OTADATA_OFFSET: u32 = 0x0000_F000;
     pub const OTADATA_SIZE: u32 = 0x0000_2000;
+    pub const AUX_LFS_OFFSET: u32 = 0x0001_1000;
+    pub const AUX_LFS_SIZE: u32 = 0x0000_F000;
     pub const FACTORY_OFFSET: u32 = 0x0002_0000;
     pub const FACTORY_SIZE: u32 = 0x0040_0000;
     pub const OTA0_OFFSET: u32 = 0x0042_0000;

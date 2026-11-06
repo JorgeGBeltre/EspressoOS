@@ -11,7 +11,7 @@
 
 **EspressoOS** is a Unix-like operating system written from scratch in `no_std` Rust for the **ESP32-S3-WROOM-1-N16R8** development board (Xtensa LX7 dual-core, 16 MB external flash, and 8 MB Octal PSRAM).
 
-It operates under the Unix philosophy ("everything is a file"): preemptive multitasking with a handwritten Xtensa context switch, a Virtual File System (VFS) with `/dev`, `/proc`, and `/sys` mount points, kernel device drivers reached through a unified `ioctl` pattern, a frozen 30-call syscall ABI, **ELF userland binaries executing from PSRAM** (relocated at load time to bypass LLVM's lack of PIC support for Xtensa), a Wi-Fi and TCP/IP stack (`esp-wifi` + `smoltcp`), an **SSH-2.0 server**, a BLE advertiser, and interactive shells accessible over both serial console and SSH.
+It operates under the Unix philosophy ("everything is a file"): preemptive multitasking with a handwritten Xtensa context switch, a Virtual File System (VFS) with `/dev`, `/proc`, `/sys`, `/run`, `/tmp`, and `/mnt/lfs` mount points, kernel device drivers reached through a unified `ioctl` pattern, an extended 48-call syscall ABI (`0..=47`), **ELF userland binaries executing from PSRAM** (relocated at load time to bypass LLVM's lack of PIC support for Xtensa), a Wi-Fi and TCP/IP stack (`esp-wifi` + `smoltcp`), an **SSH-2.0 server**, a BLE advertiser, declarative Micro-Systemd service supervision (`/bin/init` + `/bin/systemctl`), and interactive shells accessible over both serial console and SSH.
 
 All runtime output and shells are in **English**, identifying the system as **EspressoOS** (SSH ident `SSH-2.0-EspressoOS_0.1`, BLE advertising name `EspressoOS`).
 
@@ -65,10 +65,10 @@ EspressoOS boots and executes on physical ESP32-S3 hardware. The system acquires
 ### Hardware-Verified Capabilities
 
 - **Compilation & Linking**: Clean compilation in `--release` mode for `xtensa-esp32s3-none-elf`.
-- **Kernel Boot**: HAL initialization, 128 KB SRAM internal heap, VFS mounts (`/` EspFs on flash, `/tmp` ramfs in RAM, `/dev` devfs, `/proc` procfs, `/sys` sysfs).
+- **Kernel Boot**: HAL initialization, 128 KB SRAM internal heap, VFS mounts (`/` EspFs on flash, `/tmp` and `/run` ramfs in RAM, `/mnt/lfs` LittleFs on NOR flash, `/dev` devfs, `/proc` procfs, `/sys` sysfs), and Linux From Scratch (LFS 13.1) FHS symlinks (`/var/run -> /run`, `/var/lock -> /run/lock`, `/etc/mtab -> /proc/self/mounts`).
 - **PSRAM Execution (PSRAM-Exec)**: 8 MB PSRAM carve-up with 1 MB reserved for code execution on the instruction bus (`0x42800000`). Boot selftest verifies instruction execution in PSRAM returning code 42.
 - **Preemptive Multitasking & Deterministic Scheduling**: Scheduler driven by SYSTIMER at 100 Hz, 50 ms quantum, and Model B in-ISR context switching. By default, the scheduler operates on Core 0 (ProCpu), ensuring deterministic, jitter-free timing for `esp-wifi` MAC/PHY interrupts and avoiding cross-core bus contention. Opt-in dual-core SMP dispatching is available via `--features smp`. Automatic reparenting of orphan processes to PID 1 (`init-sup`) and non-blocking zombie reaping with `waitpid` (`WNOHANG`), preventing PSRAM-Exec slot leaks.
-- **Dynamic Userland ELFs**: Suite of **171 ELF binaries** executing from PSRAM with `argv` support, 32-slot pool, and load-time relocation without requiring Position Independent Code (PIC).
+- **Dynamic Userland ELFs**: Suite of **178 ELF binaries** executing from PSRAM with `argv` support, 32-slot pool, and load-time relocation without requiring Position Independent Code (PIC).
 - **Wi-Fi + TCP/IP Stack**: Station (STA) mode, DHCP client, and active TCP/IP stack (`smoltcp`). Runtime Wi-Fi scan, connect, and disconnect. Credential persistence in flash NVS sector 0 (`0x0000_9000`).
 - **Hardened SSH-2.0 Server**: Server supporting curve25519-sha256, ssh-ed25519, and chacha20-poly1305@openssh.com.
   - **Persistent Host Key**: Unique Ed25519 host key generated via hardware TRNG on first boot and persisted to NVS flash sector 1 (`0x0000_A000`, `ESHK` format).
@@ -99,13 +99,13 @@ EspressoOS boots and executes on physical ESP32-S3 hardware. The system acquires
 - **Light Sleep**: Removed (`power sleep` no longer exists). esp-hal's `rtc.sleep_light()` hangs the CPU on this hardware/HAL generation; `power deep-sleep` and `power reboot` cover the same use cases without that risk.
 - **Dual-Core Execution (SMP — `--features smp`)**: The physical ESP32-S3 SoC contains two Xtensa LX7 cores (ProCpu and AppCpu). By default, EspressoOS executes in uniprocessor mode on ProCpu to guarantee real-time Wi-Fi responsiveness and eliminate spinlock bus contention across shared peripherals. Dual-core execution is fully implemented and can be compiled in with `cargo run --release --features smp`.
 - **Hardware Memory Protection (PMS — `--features pms`)**: Baseline memory isolation (32-slot PSRAM-Exec execution pools, stack watermarking with canary bounds checking, and syscall argument validation) is active by default. The ESP32-S3 hardware Peripheral & Memory Protection Unit (PMS) is feature-gated to avoid cross-world permission traps during zero-copy DMA transfers; enabling `--features pms` activates DRAM0/IRAM0 violation monitors and enables `pms world1` W^X execution enforcement.
-- **littlefs**: Static stub in `kernel/src/fs/littlefs/mod.rs` returning an empty read-only root. Not mounted by default.
+- **littlefs**: Persistent hierarchical NOR flash filesystem in `kernel/src/fs/littlefs/mod.rs` backed by the 60 KB auxiliary NOR flash region (`0x0001_1000..0x0002_0000`, `ELFS` header + IEEE CRC32 integrity verification) and mounted at `/mnt/lfs`.
 
 ---
 
 ## 3. Architecture by Subsystem
 
-Module tree declared in `kernel/src/main.rs`: `arch`, `drivers`, `fs`, `mm`, `ota`, `prelude`, `scheduler`, `session`, `shell`, `syscall`, `vfs`, `wifi_credentials`.
+Module tree declared in `kernel/src/main.rs`: `arch`, `drivers`, `fs`, `klog`, `mm`, `ota`, `prelude`, `scheduler`, `session`, `shell`, `syscall`, `vfs`, `wifi_credentials`.
 
 ### 3.1 Boot Sequence
 
@@ -118,10 +118,10 @@ Entry point located in `kernel/src/main.rs` (`#[esp_hal::main] fn main() -> !`):
 5. **VFS Mounts**:
    - Mount `/dev` (devfs).
    - Mount root `/` from NOR flash (`EspFs::mount()`). Falls back to `ramfs` if EspFs is unformatted or corrupt.
-   - Mount `/tmp` (ramfs), `/proc` (procfs), `/sys` (sysfs), `/mnt` (ramfs).
+   - Mount `/tmp` (ramfs, `0o1777`), `/run` (ramfs), `/proc` (procfs), `/sys` (sysfs), `/mnt` (ramfs), and `/mnt/lfs` (`LittleFs` on NOR flash).
 6. **PID 0 File Descriptor Table**: Seed `/dev/console` for standard streams (fd 0, 1, 2).
-7. **Userland Deployment**: `install_userland()` inspects all 171 embedded binaries and deploys or updates `/bin/*` on EspFs.
-8. **System Files Setup**: `init_etc_files()` writes `/etc/rc`. If `/etc/passwd` exists, the kernel logs a warning noting custom SSH credentials are active.
+7. **Userland Deployment**: `install_userland()` inspects all 178 embedded binaries and deploys or updates `/bin/*` on EspFs.
+8. **System Files Setup**: `init_etc_files()` seeds `/etc/rc`, canonical LFS 13.1 configuration files (`/etc/nsswitch.conf`, `/etc/locale.conf`, `/etc/inputrc`, `/etc/services.conf`), declarative `.service` units under `/etc/services.d/`, and FHS symlinks (`/var/run -> /run`, `/var/lock -> /run/lock`, `/etc/mtab -> /proc/self/mounts`). If `/etc/passwd` exists, the kernel logs a warning noting custom SSH credentials are active.
 9. **I2C and SPI Init**: Initialize `I2C0` and `SPI2`.
 10. **Scheduler & Supervisor Bring-up**: Task creation:
     - `idle` (TID 0): System idle task.
@@ -166,17 +166,17 @@ Memory layout defined in `kernel/src/prelude.rs` (`layout`).
   - Preemption: SYSTIMER generates 100 Hz ticks (10 ms). Quantum is set to 5 ticks (50 ms).
   - Context Switch (Model B): ISR frame dispatcher modifies the saved register frame (`save_frame`) in-place, swapping current and next task frame pointers.
 - **Process Management** (`kernel/src/scheduler/process.rs`):
-  - `Process` structure holds `pid`, `parent_pid`, `main_task`, state, working directory `cwd`, file descriptor table (`FdTable`), signal handlers, and assigned PSRAM slot.
-  - Reaping releases file descriptors and returns the PSRAM slot to the pool. Orphaned processes are swept by `reap_orphans()`.
-- **Signal Handling**:
-  - Internal signal support for `SIGINT` (2), `SIGKILL` (9), and `SIGTERM` (15).
+  - `Process` structure holds `pid`, `parent_pid`, `pgid`, `session_id`, `uid`, `gid`, `main_task`, state, working directory `cwd`, chroot root `root_dir`, file descriptor table (`FdTable`), signal handlers, and assigned PSRAM slot.
+  - Reaping releases file descriptors, advisory `flock` entries, and returns the PSRAM slot to the pool. Orphaned processes are swept by `reap_orphans()`.
+- **Signal Handling & TTY Job Control**:
+  - Internal signal support for `SIGINT` (2), `SIGKILL` (9), `SIGTERM` (15), `SIGCONT` (18), and `SIGTSTP` (20), including negative-PID process group delivery (`kill(-pgid, sig)`) and foreground TTY group routing via `tcsetpgrp`.
   - User/kernel guard: Pending signals are dispatched in `check_signals` before returning to user mode, protecting kernel routines from corruption.
 
 ---
 
 ### 3.4 Syscall ABI (Full Table)
 
-The system call ABI is frozen across syscall numbers 0 to 29 (`kernel/src/syscall/table.rs`). Arguments are passed in `a3..a8`, syscall number in `a2`, and return value in `a2`.
+The system call ABI spans 48 syscalls (`0..=47` in `kernel/src/syscall/table.rs`, preserving backward compatibility across `0..=29`). Arguments are passed in `a3..a7`, syscall number in `a2`, and return value in `a2`.
 
 | Number | Syscall | Description |
 | :--- | :--- | :--- |
@@ -210,15 +210,34 @@ The system call ABI is frozen across syscall numbers 0 to 29 (`kernel/src/syscal
 | 27 | `Dup2` | Duplicate file descriptor |
 | 28 | `Chdir` | Change working directory |
 | 29 | `Getcwd` | Get current working directory |
+| 30 | `Getpgid` | Query process group ID |
+| 31 | `Setpgid` | Set process group ID |
+| 32 | `Getpid` | Get calling process ID |
+| 33 | `Getppid` | Get parent process ID |
+| 34 | `Stat` | Query 32-byte POSIX inode metadata (follows symlinks) |
+| 35 | `Lstat` | Query 32-byte POSIX inode metadata without following final symlink |
+| 36 | `Symlink` | Create symbolic link |
+| 37 | `Readlink` | Read symbolic link target string |
+| 38 | `Rename` | Atomically rename or move directory entry within a mount |
+| 39 | `Chmod` | Update POSIX file mode bits (including sticky bit `0o1000`) |
+| 40 | `Chown` | Update file owner `uid` and `gid` (`uid == 0`) |
+| 41 | `Chroot` | Confine process root directory (`uid == 0`) |
+| 42 | `Flock` | Acquire or release advisory file lock (`LOCK_SH`, `LOCK_EX`, `LOCK_NB`, `LOCK_UN`) |
+| 43 | `Mount` | Dynamically mount `ramfs`/`tmpfs`, `procfs`, `sysfs`, or `littlefs` (`uid == 0`) |
+| 44 | `Umount` | Unmount secondary mount point (`uid == 0`) |
+| 45 | `Tcsetpgrp` | Set foreground process group ID on the active TTY session |
+| 46 | `Getuid` | Query packed `(gid << 16) \| uid` credentials |
+| 47 | `Setuid` | Set process `uid` and `gid` credentials |
 
 ---
 
 ### 3.5 Virtual File System (VFS), /dev, /proc, /sys, Pipes & Sockets
 
-- **Core VFS Architecture** (`kernel/src/vfs/`): Represented by the `Inode` trait. Open flags include `RDONLY` (0x1), `WRONLY` (0x2), `RDWR` (0x3), `CREATE` (0x100), `APPEND` (0x200), and `TRUNC` (0x400). Per-process file descriptor table supports up to 64 open files per process.
+- **Core VFS Architecture** (`kernel/src/vfs/`): Represented by the `Inode` trait with 32-byte POSIX `StatMeta` (`mode`, `uid`, `gid`, `size`, `ino`, `nlink`, `kind`, `mtime`), cross-mount symlink resolution (`MAX_SYMLINKS = 8` loop detection), `chroot`-confined path normalization (`normalize_rooted`), sticky-bit (`0o1000`) unlink protection on shared directories, and advisory file locking (`flock`). Open flags include `RDONLY` (0x1), `WRONLY` (0x2), `RDWR` (0x3), `CREATE` (0x100), `APPEND` (0x200), `TRUNC` (0x400), and `EXCL` (0x800). Per-process file descriptor table supports up to 64 open files per process.
 - **DevFs Nodes (`/dev`)**:
   - `/dev/null`, `/dev/zero`: Null and zero generators.
-  - `/dev/console`: Interactive console (UART or SSH session).
+  - `/dev/console`, `/dev/tty`, `/dev/ttyS0`: Interactive console (UART or SSH session).
+  - `/dev/log`: Kernel syslog sink forwarding entries to the 4 KB `klog` circular buffer and `/var/log/messages`.
   - `/dev/i2c0`: Master I2C bus node.
   - `/dev/spi0`: Master SPI bus node.
   - `/dev/wlan0`: Wi-Fi adapter control interface.
@@ -241,7 +260,8 @@ The system call ABI is frozen across syscall numbers 0 to 29 (`kernel/src/syscal
   - `/proc/interrupts`: CPU interrupt lines, vectors, and scheduler tick counters.
   - `/proc/partitions`: Flash partition table matching hardware memory layout.
   - `/proc/crypto`: Hardware accelerators and cryptographic cipher engines.
-  - `/proc/<pid>/status`: Process-specific status metrics.
+  - `/proc/dmesg`, `/proc/diskstats`: Live kernel circular log (`klog`) and NOR flash read/write/erase counters.
+  - `/proc/self`, `/proc/<pid>/{status,stat,cmdline,cwd,mounts,fd}`: Dynamic caller symlink and per-process hierarchy/credential metrics.
 - **SysFs Synthesized Files (`/sys`)**:
   - `/sys/kernel`: Kernel identification and version string.
   - `/sys/smp`: Multiprocessing status.
@@ -250,9 +270,9 @@ The system call ABI is frozen across syscall numbers 0 to 29 (`kernel/src/syscal
 - **Pipes** (`kernel/src/vfs/pipe.rs`): In-memory IPC pipes supporting blocking reads/writes and task notification.
 - **Sockets** (`kernel/src/vfs/socket.rs`): Userland socket interface over `smoltcp` for TCP and UDP.
 - **Flash & Memory Filesystems**:
-  - **EspFs** (`kernel/src/fs/espfs/`): Log-structured filesystem on NOR flash with atomic superblocks and compaction ping-pong.
-  - **ramfs** (`kernel/src/fs/ramfs.rs`): In-memory volatile filesystem backing `/tmp` and `/mnt`.
-  - **LittleFs** (`kernel/src/fs/littlefs/`): Resilient hierarchical Inode-based filesystem engine supporting files, directories, read/write/truncate, and mount points.
+  - **EspFs** (`kernel/src/fs/espfs/`): Log-structured filesystem on NOR flash with atomic superblocks, compaction ping-pong, symlinks (`MkSymlink`), DAC attributes (`SetAttr`), and atomic `Rename`.
+  - **ramfs** (`kernel/src/fs/ramfs.rs`): In-memory volatile filesystem backing `/tmp`, `/run`, and `/mnt` with symlinks, DAC attributes, and atomic rename.
+  - **LittleFs** (`kernel/src/fs/littlefs/`): Persistent NOR flash hierarchical filesystem (`0x0001_1000..0x0002_0000`, `ELFS` header + CRC32) mounted at `/mnt/lfs` supporting files, directories, symlinks, DAC metadata, and atomic rename.
 
 ---
 
@@ -290,7 +310,7 @@ The system integrates identity management and user authentication for the SSH se
 - **Input Validation**: enforced on both sides of the ioctl boundary (userland client and kernel driver) —
   - User and password strings must be non-empty.
   - User and password strings cannot contain `:` or newline `\n` characters.
-- **Storage format & Dedicated KDF**: `passwd(1)` sends `{user, password}` to `/dev/passwd` via `ioctl(SET_PASSWORD_CMD)`; the kernel generates a 16-byte cryptographic salt from the hardware TRNG, derives the key using **PBKDF2-HMAC-SHA256** (RFC 8018) with 1,000 iterations, and writes a single line `user:$pbkdf2-sha256$i=1000$<salt-hex>$<hash-hex>\n` to `/etc/passwd` (`O_WRONLY_CREATE_TRUNC`). The plaintext password is never written to flash, and key derivation occurs entirely in the kernel. Stored on EspFs flash storage, making the credential change **persistent across reboots and re-flashes**.
+- **Storage format & Dedicated KDF**: `passwd(1)` sends `{user, password}` to `/dev/passwd` via `ioctl(SET_PASSWORD_CMD)`; the kernel generates a 16-byte cryptographic salt from the hardware TRNG, derives the key using **PBKDF2-HMAC-SHA256** (RFC 8018) with 1,000 iterations, and non-destructively upserts the user's 7-field POSIX entry (`user:$pbkdf2-sha256$i=1000$<salt-hex>$<hash-hex>:uid:gid:gecos:home:shell`) in `/etc/passwd` while preserving all other accounts. The plaintext password is never written to flash, and key derivation occurs entirely in the kernel. Stored on EspFs flash storage, making the credential change **persistent across reboots and re-flashes**.
 
 #### Kernel SSH Authentication & Host Key Management
 - **Persistent Host Key**:
@@ -303,7 +323,7 @@ The system integrates identity management and user authentication for the SSH se
   - Decoded using the kernel's RFC 4648 Base64 engine (`drivers::ssh::base64`) and verified against the incoming client signature in constant time (`ct_eq`).
 - **Password Authentication (`/etc/passwd`)**:
   - On SSH password login request, the server attempts to resolve `/etc/passwd` via VFS (`vfs::mount::resolve("/etc/passwd")`).
-  - Matches the user in constant time (`ct_eq`). If the stored field starts with `$pbkdf2-sha256$i=`, it parses iterations and salt, recomputes the PBKDF2-HMAC-SHA256 digest, and verifies in constant time. If it starts with legacy `$s5$`, it falls back to verify `SHA-256(salt || password)`. If un-prefixed, it compares against plaintext in constant time.
+  - Matches the user in constant time (`ct_eq`). Empty password fields, shadow placeholders (`x`), disabled markers (`*`), and locked account prefixes (`!`) are unconditionally rejected before any comparison. If the stored field starts with `$pbkdf2-sha256$i=`, it parses iterations and salt, recomputes the PBKDF2-HMAC-SHA256 digest, and verifies in constant time. If it starts with legacy `$s5$`, it falls back to verify `SHA-256(salt || password)`. If un-prefixed, it compares against plaintext in constant time.
   - When `/etc/passwd` contains configured accounts, it strictly governs authentication; compiled bootstrap credentials are completely disabled. On unconfigured systems without `/etc/passwd`, bootstrap credentials (`youareme` / `851963Y@#`) allow initial provisioning.
 - **Cryptographic Key Hygiene & Zeroize**:
   - Symmetric session ciphers (`Aead` in `drivers/ssh/crypt.rs`) implement `zeroize::Zeroize` and wipe key material (`k1`, `k2`) upon drop. Intermediate key derivation arrays (`c_key`, `d_key`) are wiped immediately after handshake completion.
@@ -332,11 +352,13 @@ The system integrates identity management and user authentication for the SSH se
   - When an exited process has live child processes, they are automatically reparented to `PID 1` (`init-sup`).
   - `sys_wait` (`syscall 7`) implements `WNOHANG`, exposed via `libc::waitpid(pid, status, options)`.
   - `/bin/sh` non-blockingly reaps background jobs (`&`) before displaying each interactive prompt, eliminating zombie accumulation and PSRAM slot leaks.
-- **`libc` Library** (`userland/libc/`): Provides entry `_start`, panic handler, 32 KB non-reclaiming bump allocator, and typed wrappers for all 30 syscalls.
+- **`libc` Library** (`userland/libc/`): Provides entry `_start`, panic handler, 32 KB non-reclaiming bump allocator, and typed wrappers for all 48 syscalls (`0..=47`).
 - **Userland Shell (`/bin/sh`)**:
-  - Interactive shell located at `/bin/sh`.
-  - Supports multi-stage pipelines (`|`), input/output redirection (`>`, `>>`), command sequencing (`;`), background execution (`&`), and quote parsing.
-  - Built-in commands: `cd`, `pwd`, `clear`, `sudo` (no-op prefix), `exit`, `help`.
+  - Interactive POSIX-oriented shell located at `/bin/sh` (`-c` batch command mode supported).
+  - Supports multi-stage pipelines (`|`), input/output/stderr redirection (`<`, `>`, `>>`, `2>`, `2>&1`), conditional command chaining (`;`, `&&`, `||`), variable expansion (`$VAR`, `${VAR}`, `$?`, `$$`), persistent history (`/root/.sh_history`), foreground TTY process-group job control (`setpgid` + `tcsetpgrp` for `Ctrl+C`/`Ctrl+Z`), background execution (`&`), and quote parsing.
+  - Built-in commands: `cd`, `pwd`, `export`, `unset`, `source` (`.`), `history`, `jobs`, `fg`, `bg`, `clear`, `sudo` (no-op prefix), `exit`, `help`.
+- **Micro-Systemd Service Supervisor (`/bin/init`, `/bin/systemctl`, `/bin/service`)**:
+  - PID 1 (`/bin/init`) executes `/etc/rc`, parses declarative INI unit files under `/etc/services.d/*.service`, computes Kahn DAG topological startup order (`After=`, `Requires=`) with deterministic cycle breaking, supervises `Type=simple|oneshot` daemons with `Restart=no|always|on-failure` exponential backoff and `/var/log/<unit>.log` output capture, publishes live unit states to `/run/systemd/units.state`, and handles runtime lifecycle requests (`start`, `stop`, `restart`, `reload`, `enable`, `disable`) over `/run/init.ctl`.
 
 ---
 
@@ -383,7 +405,7 @@ cargo build --release
 cargo run --release
 ```
 
-`kernel/build.rs` automatically compiles all 171 userland binaries, generates relocation fixup tables, and embeds them into the kernel image.
+`kernel/build.rs` automatically compiles all 178 userland binaries, generates relocation fixup tables, and embeds them into the kernel image.
 
 ### 4.4 Feature Gates & Build Configurations
 
@@ -400,7 +422,7 @@ The following feature flags are available in `kernel/Cargo.toml`:
 #### Compiling with Custom Profiles:
 
 ```bash
-# Standard Production Build (Single-core ProCpu determinism, baseline memory protection, 171 ELFs):
+# Standard Production Build (Single-core ProCpu determinism, baseline memory protection, 178 ELFs):
 cargo run --release
 
 # Dual-Core SMP Multiprocessing:
@@ -426,7 +448,7 @@ cargo run --release --features "smp pms"
 ========================================
 [kernel] flash: 16 MB usable
 [kernel] / mounted on flash (espfs)
-[kernel] userland: 171 binaries installed/updated in EspFs
+[kernel] userland: 178 binaries installed/updated in EspFs
 [net] connecting to SSID '...'
 [net] associated with AP; negotiating DHCP...
 [net] IP = 192.168.2.146
@@ -440,12 +462,12 @@ EspressoOS:~$
 
 ## 5. Complete Command Reference
 
-The system includes **171 userland binaries** in `/bin` alongside shell built-in commands.
+The system includes **178 userland binaries** in `/bin` alongside shell built-in commands.
 
 ### Userland Binaries (`/bin/*`)
 
-1. **`init`**: Supervisor process executing `/etc/rc` and launching interactive `/bin/sh`.
-2. **`sh`**: Primary interactive command shell with pipe, redirection, background jobs (`&`), and variable support.
+1. **`init`**: PID 1 Micro-Systemd supervisor executing `/etc/rc`, supervising `/etc/services.d/*.service` units in DAG order, and launching interactive `/bin/sh`.
+2. **`sh`**: Primary interactive POSIX-oriented shell with pipes, `<`/`>`/`>>`/`2>`/`2>&1` redirection, `;`/`&&`/`||` chaining, `$VAR`/`$?`/`$$` expansion, foreground TTY job control, and background jobs (`&`).
 3. **`cat`**: Display file contents or stream standard input.
 4. **`echo`**: Print text arguments (`echo [-n] TEXT`).
 5. **`ls`**: List directory contents.
@@ -615,6 +637,13 @@ The system includes **171 userland binaries** in `/bin` alongside shell built-in
 169. **`pgrep`**: Search for active processes matching name patterns or exact command strings (`pgrep [-l] [-x] PATTERN`).
 170. **`pkill`**: Signal processes matching specified process names or patterns (`pkill [-SIGNAL] [-e] PATTERN`).
 171. **`shred`**: Securely overwrite and destroy files to prevent recovery (`shred [-u] [-z] [-n N] FILE...`).
+172. **`sed`**: Stream editor supporting `-n`, `-e`, atomic in-place `-i` editing, line deletion/printing (`d`, `p`), and regex/literal substitutions (`s/PAT/REPL/[gp]`).
+173. **`lscpu`**: Display live Xtensa LX7 CPU architecture, clock speed, SMP/PMS status, and memory hierarchy from `/proc` and `/sys`.
+174. **`useradd`**: Create new POSIX user accounts in `/etc/passwd` and `/etc/group` with locked initial credentials (`:!:`), automatic UID/GID allocation (`>= 1000`), and home directory provisioning (`useradd [-m] [-u UID] [-s SHELL] USER`).
+175. **`flock`**: Acquire shared or exclusive kernel advisory file locks around command execution (`flock [-s | -x] [-n] LOCKFILE COMMAND [ARGS...]`).
+176. **`userdel`**: Remove user accounts from `/etc/passwd` and `/etc/group`, optionally purging home directories (`userdel [-r] USER`).
+177. **`groupadd`**: Register new POSIX groups in `/etc/group` with explicit or automatic GID assignment (`groupadd [-g GID] GROUP`).
+178. **`systemctl`**: Micro-Systemd control client inspecting and managing declarative `.service` units (`systemctl [list-units | status | start | stop | restart | reload | enable | disable | is-active | daemon-reload] [UNIT]`).
 
 ---
 
@@ -625,7 +654,7 @@ The system includes **171 userland binaries** in `/bin` alongside shell built-in
 - SSH Session (`/bin/sh` over SSH): `youareme@EspressoOS:~$` (or authenticated username).
 
 ### Redirection
-Output redirection uses `>` (truncate) and `>>` (append), modifying file descriptor tables via `dup2`.
+Input, output, and error redirection uses `<` (stdin), `>` (truncate stdout), `>>` (append stdout), `2>` (stderr to file), and `2>&1` (merge stderr into stdout), modifying child file descriptor mappings on `spawn`.
 
 Example:
 ```bash
@@ -647,7 +676,7 @@ Each serial or SSH connection runs an isolated session (`SessionChannel`) with d
 
 ### Userland programs (`/bin`)
 
-See the full 171-binary list in §5. Selected usage:
+See the full 178-binary list in §5. Selected usage:
 
 ```text
 EspressoOS:~$ /bin/echo hola mundo | /bin/cat
@@ -671,7 +700,7 @@ EspressoOS/
 │   └── config.toml          # Xtensa target config and espflash runner setup
 ├── bootloader/              # Second-stage bootloader skeleton (future phase)
 ├── kernel/                  # EspressoOS Kernel crate
-│   ├── build.rs             # Build script: compiles 171 userland ELFs and generates fixup tables
+│   ├── build.rs             # Build script: compiles 178 userland ELFs and generates fixup tables
 │   ├── src/
 │   │   ├── arch/xtensa/     # Context switch, ISR vectors, and SYSTIMER driver
 │   │   ├── drivers/         # Drivers: gpio, uart, i2c, spi, crypto, flash, power, ble, wifi, ssh
@@ -680,15 +709,16 @@ EspressoOS/
 │   │   ├── ota/             # OTA A/B partition management
 │   │   ├── scheduler/       # Multitasking scheduler, tasks, Round-Robin policy, processes
 │   │   ├── shell/           # Kernel fallback shell module
-│   │   ├── syscall/         # Syscall table (0..29), handlers, and trap dispatch
+│   │   ├── syscall/         # Syscall table (0..47), handlers, and trap dispatch
 │   │   ├── vfs/             # Virtual File System: inodes, devfs, pipes, sockets, mounts
+│   │   ├── klog.rs          # 4 KB circular kernel diagnostic ring buffer
 │   │   ├── main.rs          # Kernel entry point and boot sequencer
 │   │   ├── prelude.rs       # Memory layout, system constants, and prelude imports
 │   │   └── session.rs       # Session channels (UART / SSH)
 │   └── Cargo.toml
-├── tools/                   # Partition generation tools and test scripts
+├── tools/                   # Partition generation tools and test scripts (255 host unit tests)
 ├── userland/                # no_std userland workspace (executes from PSRAM)
-│   ├── apps/src/bin/        # Source code for 171 userland binaries (/bin/*)
+│   ├── apps/src/bin/        # Source code for 178 userland binaries (/bin/*)
 │   ├── libc/                # Userland base library: _start, syscall wrappers, allocator
 │   └── Cargo.toml
 ├── Cargo.lock               # Cargo workspace lockfile
@@ -710,7 +740,8 @@ Flash layout defined in `kernel/src/prelude.rs` and `partitions.csv`:
 0x00000000 - 0x00007FFF : Second-stage Bootloader (32 KB)
 0x00008000 - 0x00008FFF : Partition Table (4 KB)
 0x00009000 - 0x0000EFFF : NVS Storage (24 KB - Wi-Fi creds @ 0x9000, SSH Host Key @ 0xA000)
-0x0000F000 - 0x0001FFFF : OTA Control Data otadata (68 KB)
+0x0000F000 - 0x00010FFF : OTA Control Data otadata (8 KB)
+0x00011000 - 0x0001FFFF : LittleFs Auxiliary NOR Storage /mnt/lfs (60 KB, ELFS + CRC32)
 0x00020000 - 0x0041FFFF : Factory Partition / Slot A (Primary kernel, 4 MB)
 0x00420000 - 0x0081FFFF : OTA_0 Partition / Slot B (Secondary kernel, 4 MB)
 0x00820000 - 0x00FEFFFF : EspFs Filesystem (7.8 MB)
@@ -1002,6 +1033,15 @@ Flash layout defined in `kernel/src/prelude.rs` and `partitions.csv`:
   - Added synthetic swap and miscellaneous device nodes to the virtual process filesystem (`/proc/swaps` and `/proc/misc`).
   - Expanded userland application suite to **171 dynamic ELF binaries**, all linking within their 16 KB PSRAM execution slot budgets.
   - Expanded automated test suite to **238 tests passing with 100% success rate** covering file classification, readelf parsing, tac line reversal, pgrep/pkill matching, shred entropy overwrite, and procfs nodes.
+- **Phase 26 — Linux From Scratch (LFS 13.1-systemd) & POSIX Subsystem Completion**:
+  - Extended syscall ABI from 30 to **48 syscalls (`0..=47`)**, adding `Getpgid`, `Setpgid`, `Getpid`, `Getppid`, `Stat`, `Lstat`, `Symlink`, `Readlink`, `Rename`, `Chmod`, `Chown`, `Chroot`, `Flock`, `Mount`, `Umount`, `Tcsetpgrp`, `Getuid`, and `Setuid`.
+  - Upgraded VFS, `RamFs`, `EspFs` (new log records `MkSymlink`, `SetAttr`, `Rename`), and `LittleFs` (genuine 60 KB NOR flash persistence at `0x0001_1000` with `ELFS` + IEEE CRC32 mounted at `/mnt/lfs`) with cross-mount symlinks, `chroot` confinement (`normalize_rooted`), sticky-bit (`0o1000`) unlink protection, `O_EXCL` atomic creation, and kernel advisory file locking (`flock`).
+  - Added 4 KB circular kernel diagnostic ring buffer (`klog.rs`) wired to `/dev/log` and `/proc/dmesg`, live flash sector I/O counters in `/proc/diskstats`, dynamic `/proc/self` symlink, and `/proc/<pid>/{stat,cmdline,mounts,status}`.
+  - Hardened multi-user authentication: `drivers/ssh/auth.rs` unconditionally rejects empty, `x`, `*`, and `!`-locked password fields; `/dev/passwd` performs non-destructive 7-field POSIX upserts in `/etc/passwd`.
+  - Upgraded `/bin/sh` with `<`, `>`, `>>`, `2>`, `2>&1` redirections, `;`/`&&`/`||` conditional chains, `$VAR`/`${VAR}`/`$?`/`$$` expansion, `export`/`unset`/`.` (`source`)/`history` builtins, `/root/.sh_history`, and `setpgid` + `tcsetpgrp` foreground TTY job control.
+  - Implemented Micro-Systemd (`init`, `systemctl`, `service`) parsing declarative `/etc/services.d/*.service` units with Kahn DAG topological ordering (`After=`, `Requires=`), `Restart=no|always|on-failure` backoff supervision, `/var/log/<unit>.log` capture, and `/run/init.ctl` runtime control.
+  - Expanded userland application suite to **178 dynamic ELF binaries** (adding `sed`, `lscpu`, `useradd`, `flock`, `userdel`, `groupadd`, `systemctl`, and upgrading `stat`, `ls`, `ln`, `readlink`, `chmod`, `chown`, `chgrp`, `chroot`, `mv`, `mount`, `umount`, `pkg`, `id`, `whoami`, `su`, `httpd`, `netstat`, `tee`, `logger`), all linking within their 16 KB PSRAM execution slot budgets.
+  - Expanded automated host test suite to **255 tests passing with 100% success rate** across 7 harnesses (`posix_lfs_tests.py` + extended `espfs_tests.py`).
 
 ### [0.1.0] - 2026-08-06
 

@@ -1,48 +1,45 @@
 #![no_std]
 #![no_main]
 
-use libc::{arg, close, open, println, read, seek, write};
-
-const O_WRONLY_CREATE: u32 = 2 | 4;
-const O_TRUNC: u32 = 8;
-const SEEK_END: i32 = 2;
+use libc::{arg, close, open, println, read, write, O_APPEND, O_CREATE, O_TRUNC, O_WRONLY};
 
 #[no_mangle]
 pub extern "C" fn main(argc: i32, argv: *const *const u8) -> i32 {
-    if argc < 2 {
-        println!("Usage: tee [-a] <file>");
-        return 1;
-    }
-
     let mut append = false;
-    let mut filename = "";
+    let mut files = [""; 8];
+    let mut file_count = 0usize;
 
-    if argc >= 3 {
-        let opt = unsafe { arg(argv, 1) };
-        if opt == "-a" {
+    let mut i = 1;
+    while i < argc {
+        let a = unsafe { arg(argv, i) };
+        if a == "-h" || a == "--help" {
+            println!("Usage: tee [-a] [FILE...]");
+            return 0;
+        } else if a == "-a" || a == "--append" {
             append = true;
-            filename = unsafe { arg(argv, 2) };
-        } else {
-            filename = unsafe { arg(argv, 1) };
+        } else if file_count < files.len() {
+            files[file_count] = a;
+            file_count += 1;
         }
-    } else {
-        filename = unsafe { arg(argv, 1) };
+        i += 1;
     }
 
     let flags = if append {
-        O_WRONLY_CREATE
+        O_WRONLY | O_CREATE | O_APPEND
     } else {
-        O_WRONLY_CREATE | O_TRUNC
+        O_WRONLY | O_CREATE | O_TRUNC
     };
 
-    let fd = open(filename, flags);
-    if fd < 0 {
-        println!("tee: cannot open '{}'", filename);
-        return 1;
-    }
-
-    if append {
-        let _ = seek(fd as i32, 0, SEEK_END);
+    let mut fds = [-1i32; 8];
+    let mut status = 0;
+    for k in 0..file_count {
+        let fd = open(files[k], flags);
+        if fd < 0 {
+            println!("tee: cannot open '{}'", files[k]);
+            status = 1;
+        } else {
+            fds[k] = fd as i32;
+        }
     }
 
     let mut buf = [0u8; 256];
@@ -53,9 +50,17 @@ pub extern "C" fn main(argc: i32, argv: *const *const u8) -> i32 {
         }
         let chunk = &buf[..n as usize];
         let _ = write(1, chunk);
-        let _ = write(fd as i32, chunk);
+        for k in 0..file_count {
+            if fds[k] >= 0 {
+                let _ = write(fds[k], chunk);
+            }
+        }
     }
 
-    close(fd as i32);
-    0
+    for k in 0..file_count {
+        if fds[k] >= 0 {
+            close(fds[k]);
+        }
+    }
+    status
 }

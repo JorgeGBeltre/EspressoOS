@@ -1,7 +1,97 @@
 #![no_std]
 #![no_main]
 
-use libc::{arg, chdir, close, dup2, getcwd_str, open, print, println, read, readdir, spawn, wait, waitpid, yield_now, pipe, PATH_MAX, WNOHANG};
+use libc::{
+    arg, chdir, close, dup2, getcwd, getpid, open, pipe, read, readdir, setpgid, spawn, tcsetpgrp,
+    uptime_ms, waitpid, write, yield_now, O_APPEND, O_CREATE, O_RDONLY, O_TRUNC, O_WRONLY,
+    PATH_MAX, WNOHANG,
+};
+
+const MAX_ARGV: usize = 20;
+const LINE: usize = 256;
+const MAX_STAGES: usize = 8;
+const SCRIPT_MAX: usize = 2048;
+const HISTORY_MAX: usize = 12;
+const ENV_MAX: usize = 16;
+const KEY_MAX: usize = 20;
+const VAL_MAX: usize = 48;
+
+static mut USER_BUF: [u8; 32] = [0; 32];
+static mut USER_LEN: usize = 0;
+static mut LAST_STATUS: i32 = 0;
+
+static mut SCRIPT_BUF: [u8; SCRIPT_MAX] = [0; SCRIPT_MAX];
+static mut DIR_BUF: [u8; 3584] = [0; 3584];
+static mut EXP_BUF: [u8; LINE + 64] = [0; LINE + 64];
+
+static mut HISTORY_BUF: [[u8; LINE]; HISTORY_MAX] = [[0; LINE]; HISTORY_MAX];
+static mut HISTORY_LENS: [usize; HISTORY_MAX] = [0; HISTORY_MAX];
+static mut HISTORY_COUNT: usize = 0;
+
+static mut ENV_KEYS: [[u8; KEY_MAX]; ENV_MAX] = [[0; KEY_MAX]; ENV_MAX];
+static mut ENV_KLEN: [usize; ENV_MAX] = [0; ENV_MAX];
+static mut ENV_VALS: [[u8; VAL_MAX]; ENV_MAX] = [[0; VAL_MAX]; ENV_MAX];
+static mut ENV_VLEN: [usize; ENV_MAX] = [0; ENV_MAX];
+
+#[inline(never)]
+fn puts(s: &[u8]) {
+    if !s.is_empty() {
+        let _ = write(1, s);
+    }
+}
+
+#[inline(never)]
+fn putln(s: &[u8]) {
+    puts(s);
+    let _ = write(1, b"\n");
+}
+
+#[inline(never)]
+fn fmt_usize(mut n: usize, buf: &mut [u8; 16]) -> &[u8] {
+    if n == 0 {
+        buf[0] = b'0';
+        return &buf[..1];
+    }
+    let mut tmp = [0u8; 16];
+    let mut k = 0;
+    while n > 0 {
+        tmp[k] = b'0' + (n % 10) as u8;
+        n /= 10;
+        k += 1;
+    }
+    for i in 0..k {
+        buf[i] = tmp[k - 1 - i];
+    }
+    &buf[..k]
+}
+
+#[inline(never)]
+fn fmt_i32(v: i32, buf: &mut [u8; 16]) -> &[u8] {
+    if v < 0 {
+        let mut ubuf = [0u8; 16];
+        let ub = fmt_usize((-v) as usize, &mut ubuf);
+        buf[0] = b'-';
+        buf[1..1 + ub.len()].copy_from_slice(ub);
+        &buf[..1 + ub.len()]
+    } else {
+        fmt_usize(v as usize, buf)
+    }
+}
+
+fn put_i32(v: i32) {
+    let mut b = [0u8; 16];
+    puts(fmt_i32(v, &mut b));
+}
+
+#[inline(never)]
+fn ascii_str(b: &[u8]) -> Option<&str> {
+    for &c in b {
+        if c >= 0x80 {
+            return None;
+        }
+    }
+    Some(unsafe { core::str::from_utf8_unchecked(b) })
+}
 
 #[inline(never)]
 fn reap_background_jobs() {
@@ -9,28 +99,254 @@ fn reap_background_jobs() {
     while waitpid(-1, &mut status, WNOHANG) > 0 {}
 }
 
-/// Most tokens one command can have, counting argv[0] and the trailing NULL.
-const MAX_ARGV: usize = 16;
+fn set_status(st: i32) {
+    unsafe { LAST_STATUS = st; }
+}
 
-/// Longest command line accepted. `LINE + 1` bytes are kept: `tokenize` writes the
-/// last token's NUL one past the end of the range it is given.
-const LINE: usize = 64;
+fn get_status() -> i32 {
+    unsafe { LAST_STATUS }
+}
 
-const O_RDONLY: u32 = 1;
-const O_WRONLY: u32 = 0x0002;
-const O_CREATE: u32 = 0x0100;
-const O_APPEND: u32 = 0x0200;
-const O_TRUNC: u32 = 0x0400;
+fn trim(buf: &[u8], mut s: usize, mut e: usize) -> (usize, usize) {
+    if e > buf.len() {
+        e = buf.len();
+    }
+    while s < e && (buf[s] == b' ' || buf[s] == b'\t') {
+        s += 1;
+    }
+    while e > s && (buf[e - 1] == b' ' || buf[e - 1] == b'\t') {
+        e -= 1;
+    }
+    (s, e)
+}
 
-/// Máximo de etapas en un pipeline (`a | b | c | ...`).
-const MAX_STAGES: usize = 8;
+fn is_var_char(b: u8) -> bool {
+    (b >= b'a' && b <= b'z') || (b >= b'A' && b <= b'Z') || (b >= b'0' && b <= b'9') || b == b'_'
+}
 
-static mut USER_BUF: [u8; 32] = [0; 32];
-static mut USER_LEN: usize = 0;
+fn env_set(key: &[u8], val: &[u8]) {
+    if key.is_empty() || key.len() > KEY_MAX {
+        return;
+    }
+    let vlen = val.len().min(VAL_MAX);
+    unsafe {
+        let mut free_slot = None;
+        for i in 0..ENV_MAX {
+            if ENV_KLEN[i] == key.len() && &ENV_KEYS[i][..key.len()] == key {
+                ENV_VALS[i][..vlen].copy_from_slice(&val[..vlen]);
+                ENV_VLEN[i] = vlen;
+                return;
+            }
+            if ENV_KLEN[i] == 0 && free_slot.is_none() {
+                free_slot = Some(i);
+            }
+        }
+        if let Some(i) = free_slot {
+            ENV_KEYS[i][..key.len()].copy_from_slice(key);
+            ENV_KLEN[i] = key.len();
+            ENV_VALS[i][..vlen].copy_from_slice(&val[..vlen]);
+            ENV_VLEN[i] = vlen;
+        }
+    }
+}
+
+fn env_unset(key: &[u8]) {
+    unsafe {
+        for i in 0..ENV_MAX {
+            if ENV_KLEN[i] == key.len() && &ENV_KEYS[i][..key.len()] == key {
+                ENV_KLEN[i] = 0;
+                ENV_VLEN[i] = 0;
+            }
+        }
+    }
+}
+
+fn env_get<'a>(key: &[u8], out: &'a mut [u8; PATH_MAX]) -> Option<&'a [u8]> {
+    if key == b"PWD" {
+        let n = getcwd(out);
+        if n >= 0 {
+            return Some(&out[..n as usize]);
+        }
+        return None;
+    }
+    unsafe {
+        for i in 0..ENV_MAX {
+            if ENV_KLEN[i] == key.len() && &ENV_KEYS[i][..key.len()] == key {
+                let vl = ENV_VLEN[i];
+                out[..vl].copy_from_slice(&ENV_VALS[i][..vl]);
+                return Some(&out[..vl]);
+            }
+        }
+    }
+    None
+}
+
+fn sync_env_file() {
+    let fd = open("/run/sh.env", O_WRONLY | O_CREATE | O_TRUNC);
+    if fd < 0 {
+        return;
+    }
+    let fd = fd as i32;
+    unsafe {
+        for i in 0..ENV_MAX {
+            let kl = ENV_KLEN[i];
+            if kl > 0 {
+                let _ = write(fd, &ENV_KEYS[i][..kl]);
+                let _ = write(fd, b"=");
+                let _ = write(fd, &ENV_VALS[i][..ENV_VLEN[i]]);
+                let _ = write(fd, b"\n");
+            }
+        }
+    }
+    close(fd);
+}
+
+fn parse_env_blob(blob: &[u8], require_export_prefix: bool) {
+    let mut start = 0usize;
+    let n = blob.len();
+    while start < n {
+        let mut end = start;
+        while end < n && blob[end] != b'\n' {
+            end += 1;
+        }
+        let mut e = end;
+        if e > start && blob[e - 1] == b'\r' {
+            e -= 1;
+        }
+        let (ts, te) = trim(blob, start, e);
+        if ts < te && blob[ts] != b'#' {
+            let line = &blob[ts..te];
+            let assign = if require_export_prefix {
+                if line.starts_with(b"export ") {
+                    &line[7..]
+                } else {
+                    &[][..]
+                }
+            } else {
+                line
+            };
+            if let Some(eq) = assign.iter().position(|&b| b == b'=') {
+                let k = &assign[..eq];
+                let mut v = &assign[eq + 1..];
+                if v.len() >= 2 && (v[0] == b'"' || v[0] == b'\'') && v[v.len() - 1] == v[0] {
+                    v = &v[1..v.len() - 1];
+                }
+                env_set(k, v);
+            }
+        }
+        start = end + 1;
+    }
+}
+
+fn init_env() {
+    env_set(b"OS", b"EspressoOS");
+    env_set(b"ARCH", b"xtensa-lx7");
+    env_set(b"SHELL", b"/bin/sh");
+    env_set(b"PATH", b"/bin");
+    env_set(b"HOME", b"/root");
+    env_set(b"USER", b"root");
+    env_set(b"TERM", b"xterm-256color");
+
+    unsafe {
+        if USER_LEN > 0 {
+            let u = &(&*core::ptr::addr_of!(USER_BUF))[..USER_LEN];
+            env_set(b"USER", u);
+        }
+    }
+
+    let mut ebuf = [0u8; 512];
+    let fd = open("/run/sh.env", O_RDONLY);
+    if fd >= 0 {
+        let n = read(fd as i32, &mut ebuf);
+        close(fd as i32);
+        if n > 0 {
+            parse_env_blob(&ebuf[..n as usize], false);
+        }
+    } else {
+        let pfd = open("/etc/profile", O_RDONLY);
+        if pfd >= 0 {
+            let n = read(pfd as i32, &mut ebuf);
+            close(pfd as i32);
+            if n > 0 {
+                parse_env_blob(&ebuf[..n as usize], true);
+            }
+        }
+    }
+    sync_env_file();
+}
+
+fn push_history_mem(entry: &[u8]) {
+    if entry.is_empty() || entry.len() > LINE {
+        return;
+    }
+    unsafe {
+        if HISTORY_COUNT > 0 {
+            let prev = (HISTORY_COUNT - 1) % HISTORY_MAX;
+            if HISTORY_LENS[prev] == entry.len() && &HISTORY_BUF[prev][..entry.len()] == entry {
+                return;
+            }
+        }
+        let slot = HISTORY_COUNT % HISTORY_MAX;
+        HISTORY_BUF[slot][..entry.len()].copy_from_slice(entry);
+        HISTORY_LENS[slot] = entry.len();
+        HISTORY_COUNT += 1;
+    }
+}
+
+fn load_history() {
+    let mut fd = open("/root/.sh_history", O_RDONLY);
+    if fd < 0 {
+        fd = open("/tmp/.sh_history", O_RDONLY);
+    }
+    if fd < 0 {
+        return;
+    }
+    let mut hbuf = [0u8; 768];
+    let n = read(fd as i32, &mut hbuf);
+    close(fd as i32);
+    if n <= 0 {
+        return;
+    }
+    let limit = n as usize;
+    let mut s = 0usize;
+    while s < limit {
+        let mut e = s;
+        while e < limit && hbuf[e] != b'\n' {
+            e += 1;
+        }
+        let mut le = e;
+        if le > s && hbuf[le - 1] == b'\r' {
+            le -= 1;
+        }
+        if le > s {
+            push_history_mem(&hbuf[s..le]);
+        }
+        s = e + 1;
+    }
+}
+
+fn record_history(entry: &[u8]) {
+    let (s, e) = trim(entry, 0, entry.len());
+    if s >= e {
+        return;
+    }
+    let slice = &entry[s..e];
+    push_history_mem(slice);
+    let mut fd = open("/root/.sh_history", O_WRONLY | O_CREATE | O_APPEND);
+    if fd < 0 {
+        fd = open("/tmp/.sh_history", O_WRONLY | O_CREATE | O_APPEND);
+    }
+    if fd >= 0 {
+        let _ = write(fd as i32, slice);
+        let _ = write(fd as i32, b"\n");
+        close(fd as i32);
+    }
+}
 
 #[no_mangle]
 pub extern "C" fn main(argc: i32, argv: *const *const u8) -> i32 {
     let mut script_path: Option<&str> = None;
+    let mut cmd_string: Option<&str> = None;
     let mut i = 1;
     while i < argc {
         let a = unsafe { arg(argv, i) };
@@ -39,69 +355,77 @@ pub extern "C" fn main(argc: i32, argv: *const *const u8) -> i32 {
             let u = unsafe { arg(argv, i) };
             unsafe {
                 let bytes = u.as_bytes();
-                let len = bytes.len().min(USER_BUF.len());
-                USER_BUF[..len].copy_from_slice(&bytes[..len]);
+                let ubuf = &mut *core::ptr::addr_of_mut!(USER_BUF);
+                let len = bytes.len().min(ubuf.len());
+                ubuf[..len].copy_from_slice(&bytes[..len]);
                 USER_LEN = len;
             }
+        } else if a == "-c" && i + 1 < argc {
+            i += 1;
+            cmd_string = Some(unsafe { arg(argv, i) });
         } else if script_path.is_none() {
             script_path = Some(a);
         }
         i += 1;
     }
 
+    init_env();
+
+    if let Some(cmdline) = cmd_string {
+        let mut buf = [0u8; LINE + 1];
+        let bytes = cmdline.as_bytes();
+        if bytes.len() > LINE {
+            putln(b"sh: -c command too long");
+            return 1;
+        }
+        buf[..bytes.len()].copy_from_slice(bytes);
+        let (s, e) = trim(&buf, 0, bytes.len());
+        let _ = run_line(&mut buf, s, e);
+        return get_status();
+    }
+
     if let Some(path) = script_path {
         return run_script(path);
     }
 
-    println!("--- EspressoOS Shell (Userland) ---");
+    load_history();
+    putln(b"--- EspressoOS Shell (Userland) ---");
     let mut buf = [0u8; LINE + 1];
     loop {
         reap_background_jobs();
         print_prompt();
         let len = read_line(&mut buf[..LINE]);
+        if len == usize::MAX {
+            break;
+        }
         let (s, e) = trim(&buf, 0, len);
+        if s < e {
+            record_history(&buf[s..e]);
+        }
         if !run_line(&mut buf, s, e) {
-            println!("Exiting the shell...");
+            putln(b"Exiting the shell...");
             break;
         }
     }
-    0
+    get_status()
 }
 
-/// Tamaño máximo de script. Vive en la pila de `sh` y sigue vivo A TRAVÉS de `spawn`
-/// (la syscall más profunda — la que desbordó los 8K originales). Si `/etc/rc` crece,
-/// mover el buffer a `static`, NO agrandarlo aquí en pila.
-const SCRIPT_MAX: usize = 1024;
-
-/// Ejecuta cada línea del fichero en `path` y retorna. Semántica DELIBERADA (no
-/// "arreglar" hacia abort-on-error): una línea que falla se reporta y el script
-/// CONTINÚA — un `ls` roto en `/etc/rc` no debe impedir llegar a la consola. Salta
-/// vacías y comentarios ('#'), recorta '\r' final (CRLF de hosts Windows), honra
-/// `exit`, y NUNCA trunca en silencio: fichero sobredimensionado = error ruidoso y
-/// exit 1; línea más larga que `LINE` = se reporta y se salta entera.
-///
-/// Enruta por `run_line` (NO `exec_line`) para conservar la paridad de `;` que el
-/// modo interactivo ya tiene: `echo uno ; echo dos` en un script se comporta igual.
 fn run_script(path: &str) -> i32 {
     let fd = open(path, O_RDONLY);
     if fd < 0 {
-        println!("sh: cannot open {}", path);
+        puts(b"sh: cannot open ");
+        putln(path.as_bytes());
         return 1;
     }
-    let mut file = [0u8; SCRIPT_MAX];
-    // Bucle de lectura: un solo `read` puede devolver corto sin ser EOF.
+    let file = unsafe { &mut *core::ptr::addr_of_mut!(SCRIPT_BUF) };
     let mut total = 0usize;
     loop {
         if total == file.len() {
-            // El buffer se llenó. ¿Queda más fichero? Un byte de sonda lo decide: si lo
-            // hay, el script no cabe y NO se ejecuta medio — error ruidoso y exit 1.
             let mut probe = [0u8; 1];
             if read(fd as i32, &mut probe) > 0 {
                 close(fd as i32);
-                println!(
-                    "sh: {}: larger than {} bytes; refusing to run a truncated script",
-                    path, SCRIPT_MAX
-                );
+                puts(b"sh: script too large: ");
+                putln(path.as_bytes());
                 return 1;
             }
             break;
@@ -109,7 +433,8 @@ fn run_script(path: &str) -> i32 {
         let n = read(fd as i32, &mut file[total..]);
         if n < 0 {
             close(fd as i32);
-            println!("sh: read error on {}: {}", path, n);
+            puts(b"sh: read error on ");
+            putln(path.as_bytes());
             return 1;
         }
         if n == 0 {
@@ -126,81 +451,288 @@ fn run_script(path: &str) -> i32 {
     while i <= end {
         if i == end || file[i] == b'\n' {
             let mut line: &[u8] = &file[start..i];
-            // CRLF: recorta el '\r' final antes de tokenizar (o "ls\r" no casaría).
             if line.last() == Some(&b'\r') {
                 line = &line[..line.len() - 1];
             }
             if line.len() > LINE {
-                // Nunca ejecutar un comando cortado: la línea se reporta y se salta.
-                println!("sh: {}: line longer than {} bytes, skipped", path, LINE);
+                puts(b"sh: line too long, skipped in ");
+                putln(path.as_bytes());
             } else {
                 let m = line.len();
                 buf[..m].copy_from_slice(line);
                 let (s, e) = trim(&buf, 0, m);
-                // Salta vacías y comentarios; run_line hace el resto (incluido `;`), y
-                // su `false` (un `exit` en el script) detiene el script, igual que en
-                // interactivo.
                 if s < e && buf[s] != b'#' && !run_line(&mut buf, s, e) {
-                    return 0;
+                    return get_status();
                 }
             }
             start = i + 1;
         }
         i += 1;
     }
-    0
+    get_status()
 }
 
-/// Ejecuta una línea ya recortada a `buf[s..e]`. Devuelve false si el usuario pidió
-/// salir, true en caso contrario. Interactivo y modo-script comparten esta función.
-///
-/// DEUDA (`&`, background): no se soporta en SP1. Sin reparentado-a-init, un daemon
-/// lanzado con `&` desde `sh /etc/rc` queda huérfano al terminar el script y su entrada
-/// de proceso se fuga. El reparentado-a-PID-1 es SP4; el `&` llega entonces.
-fn exec_line(buf: &mut [u8], s: usize, e: usize) -> bool {
-    if s == e {
+fn expand_segment(src: &[u8], out: &mut [u8; LINE + 1]) -> usize {
+    let exp = unsafe { &mut *core::ptr::addr_of_mut!(EXP_BUF) };
+    let mut r = 0usize;
+    let mut w = 0usize;
+    let mut quote: u8 = 0;
+
+    while r < src.len() && w < LINE {
+        let c = src[r];
+        if quote == b'\'' {
+            if c == b'\'' {
+                quote = 0;
+            }
+            exp[w] = c;
+            w += 1;
+            r += 1;
+            continue;
+        }
+        if c == b'\'' || c == b'"' {
+            quote = if quote == c { 0 } else { c };
+            exp[w] = c;
+            w += 1;
+            r += 1;
+            continue;
+        }
+        if c == b'$' && r + 1 < src.len() {
+            let next = src[r + 1];
+            if next == b'?' {
+                let mut nbuf = [0u8; 16];
+                let bytes = fmt_i32(get_status(), &mut nbuf);
+                let cp = bytes.len().min(LINE - w);
+                exp[w..w + cp].copy_from_slice(&bytes[..cp]);
+                w += cp;
+                r += 2;
+                continue;
+            } else if next == b'$' {
+                let mut nbuf = [0u8; 16];
+                let bytes = fmt_usize(getpid() as usize, &mut nbuf);
+                let cp = bytes.len().min(LINE - w);
+                exp[w..w + cp].copy_from_slice(&bytes[..cp]);
+                w += cp;
+                r += 2;
+                continue;
+            } else if next == b'{' {
+                if let Some(close_rel) = src[r + 2..].iter().position(|&b| b == b'}') {
+                    let key = &src[r + 2..r + 2 + close_rel];
+                    let mut vbuf = [0u8; PATH_MAX];
+                    if let Some(val) = env_get(key, &mut vbuf) {
+                        let cp = val.len().min(LINE - w);
+                        exp[w..w + cp].copy_from_slice(&val[..cp]);
+                        w += cp;
+                    }
+                    r += 3 + close_rel;
+                    continue;
+                }
+            } else if is_var_char(next) {
+                let mut kend = r + 1;
+                while kend < src.len() && is_var_char(src[kend]) {
+                    kend += 1;
+                }
+                let key = &src[r + 1..kend];
+                let mut vbuf = [0u8; PATH_MAX];
+                if let Some(val) = env_get(key, &mut vbuf) {
+                    let cp = val.len().min(LINE - w);
+                    exp[w..w + cp].copy_from_slice(&val[..cp]);
+                    w += cp;
+                }
+                r = kend;
+                continue;
+            }
+        }
+        exp[w] = c;
+        w += 1;
+        r += 1;
+    }
+
+    out[..w].copy_from_slice(&exp[..w]);
+    out[w] = 0;
+    w
+}
+
+fn is_assignment_only(seg: &[u8]) -> Option<(&[u8], &[u8])> {
+    let eq = seg.iter().position(|&b| b == b'=')?;
+    if eq == 0 {
+        return None;
+    }
+    let key = &seg[..eq];
+    for (idx, &b) in key.iter().enumerate() {
+        if (idx == 0 && b >= b'0' && b <= b'9') || !is_var_char(b) {
+            return None;
+        }
+    }
+    let rest = &seg[eq + 1..];
+    let quoted = rest.len() >= 2 && (rest[0] == b'"' || rest[0] == b'\'') && rest[rest.len() - 1] == rest[0];
+    if rest.contains(&b' ') && !quoted {
+        return None;
+    }
+    Some((key, if quoted { &rest[1..rest.len() - 1] } else { rest }))
+}
+
+fn builtin_export(rest: &[u8]) {
+    let (s, e) = trim(rest, 0, rest.len());
+    if s >= e {
+        unsafe {
+            for i in 0..ENV_MAX {
+                let kl = ENV_KLEN[i];
+                if kl > 0 {
+                    puts(b"export ");
+                    puts(&ENV_KEYS[i][..kl]);
+                    puts(b"=\"");
+                    puts(&ENV_VALS[i][..ENV_VLEN[i]]);
+                    putln(b"\"");
+                }
+            }
+        }
+        set_status(0);
+        return;
+    }
+    let sub = &rest[s..e];
+    if let Some(eq) = sub.iter().position(|&b| b == b'=') {
+        let key = &sub[..eq];
+        let mut val = &sub[eq + 1..];
+        if val.len() >= 2 && (val[0] == b'"' || val[0] == b'\'') && val[val.len() - 1] == val[0] {
+            val = &val[1..val.len() - 1];
+        }
+        env_set(key, val);
+    }
+    sync_env_file();
+    set_status(0);
+}
+
+fn builtin_history() {
+    unsafe {
+        let start = HISTORY_COUNT.saturating_sub(HISTORY_MAX);
+        for idx in start..HISTORY_COUNT {
+            let slot = idx % HISTORY_MAX;
+            let mut nbuf = [0u8; 16];
+            puts(b"  ");
+            puts(fmt_usize(idx + 1, &mut nbuf));
+            puts(b"  ");
+            putln(&HISTORY_BUF[slot][..HISTORY_LENS[slot]]);
+        }
+    }
+    set_status(0);
+}
+
+fn exec_line(raw_buf: &[u8], s: usize, e: usize) -> bool {
+    if s >= e {
         return true;
     }
-    if &buf[s..e] == b"exit" {
+    let mut exp_line = [0u8; LINE + 1];
+    let elen = expand_segment(&raw_buf[s..e], &mut exp_line);
+    let (s, e) = trim(&exp_line, 0, elen);
+    if s >= e {
+        return true;
+    }
+
+    let slice = &exp_line[s..e];
+    if slice == b"exit" || slice.starts_with(b"exit ") {
+        if slice.len() > 5 {
+            let mut code = 0i32;
+            let (cs, ce) = trim(&exp_line, s + 5, e);
+            for &b in &exp_line[cs..ce] {
+                if b >= b'0' && b <= b'9' {
+                    code = code * 10 + (b - b'0') as i32;
+                }
+            }
+            set_status(code);
+        }
         return false;
     }
-    if &buf[s..e] == b"help" {
+    if slice == b"help" {
         print_help();
+        set_status(0);
         return true;
     }
-    if &buf[s..e] == b"clear" {
-        // Limpia pantalla (ANSI) + cursor al origen, igual que el builtin del kernel.
-        print!("\x1b[2J\x1b[H");
+    if slice == b"clear" {
+        puts(b"\x1b[2J\x1b[H");
+        set_status(0);
         return true;
     }
-    // sudo es un no-op: EspressoOS no tiene separación de privilegios (README §5). Se
-    // ejecuta el resto de la línea como si el prefijo no estuviera.
-    if buf[s..e].starts_with(b"sudo ") {
-        let (ss, se) = trim(buf, s + 5, e);
+    if slice == b"true" {
+        set_status(0);
+        return true;
+    }
+    if slice == b"false" {
+        set_status(1);
+        return true;
+    }
+    if slice.starts_with(b"sudo ") {
+        let (ss, se) = trim(&exp_line, s + 5, e);
         if ss < se {
-            return exec_line(buf, ss, se);
+            return exec_line(&exp_line, ss, se);
         }
         return true;
     }
-    // cd/pwd son builtins obligatoriamente: un hijo spawneado no puede cambiar el cwd
-    // de este proceso.
-    if &buf[s..e] == b"pwd" || buf[s..e].starts_with(b"pwd ") {
-        builtin_pwd();
+    if slice == b"history" {
+        builtin_history();
         return true;
     }
-    if &buf[s..e] == b"cd" || buf[s..e].starts_with(b"cd ") {
-        builtin_cd(&buf[s..e]);
-        return true;
+
+    if find_top(&exp_line, s, e, b'|').is_none() && find_top(&exp_line, s, e, b'>').is_none() {
+        if slice == b"pwd" || slice.starts_with(b"pwd ") {
+            builtin_pwd();
+            return true;
+        }
+        if slice == b"cd" || slice.starts_with(b"cd ") {
+            builtin_cd(slice);
+            return true;
+        }
+        if slice == b"export" {
+            builtin_export(&[]);
+            return true;
+        }
+        if slice.starts_with(b"export ") {
+            builtin_export(&slice[7..]);
+            return true;
+        }
+        if slice.starts_with(b"unset ") {
+            let (ks, ke) = trim(&slice[6..], 0, slice.len() - 6);
+            if ks < ke {
+                env_unset(&slice[6 + ks..6 + ke]);
+                sync_env_file();
+            }
+            set_status(0);
+            return true;
+        }
+        if slice.starts_with(b". ") || slice.starts_with(b"source ") {
+            let skip = if slice[0] == b'.' { 2 } else { 7 };
+            let (ps, pe) = trim(&slice[skip..], 0, slice.len() - skip);
+            if let Some(spath) = ascii_str(&slice[skip + ps..skip + pe]) {
+                let st = run_script(spath);
+                set_status(st);
+            }
+            return true;
+        }
+        if let Some((k, v)) = is_assignment_only(slice) {
+            env_set(k, v);
+            sync_env_file();
+            set_status(0);
+            return true;
+        }
     }
-    // Pipeline de N etapas, partiendo por `|` top-level (`echo "a|b"` es una etapa).
+
+    let mut ce = e;
+    let mut is_bg = false;
+    if ce > s && exp_line[ce - 1] == b'&' {
+        is_bg = true;
+        ce -= 1;
+        let t = trim(&exp_line, s, ce);
+        ce = t.1;
+    }
+
     let mut stages = [(0usize, 0usize); MAX_STAGES];
     let mut nst = 0usize;
     let mut a = s;
     loop {
-        let cut = find_top(buf, a, e, b'|');
-        let b = cut.unwrap_or(e);
+        let cut = find_top(&exp_line, a, ce, b'|');
+        let b = cut.unwrap_or(ce);
         if nst >= MAX_STAGES {
-            println!("sh: too many pipeline stages (max {})", MAX_STAGES);
+            putln(b"sh: too many pipeline stages");
+            set_status(1);
             return true;
         }
         stages[nst] = (a, b);
@@ -210,150 +742,150 @@ fn exec_line(buf: &mut [u8], s: usize, e: usize) -> bool {
             None => break,
         }
     }
-    if nst == 1 {
-        run_single(buf, stages[0]);
-    } else {
-        run_pipeline_n(buf, &stages[..nst]);
-    }
+    run_stages(&mut exp_line, &stages[..nst], is_bg);
     true
 }
 
-/// Ejecuta una línea que puede tener varios comandos separados por `;`, en orden.
-/// Devuelve false si algún comando fue `exit`.
-///
-/// `;` se reconoce aquí (partiendo la línea), no en el tokenizador, por la misma razón
-/// que en el shell del kernel: partir la cadena cruda cortaría `echo "a;b"` por la
-/// mitad, así que las comillas lo protegen. Un `;` de sobra o final es inofensivo (el
-/// segmento vacío se salta). NO hay `&&`/`||`/`&` -- sólo el separador secuencial, que
-/// es la paridad que el shell del kernel ya tiene.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ChainOp {
+    Always,
+    And,
+    Or,
+}
+
 fn run_line(buf: &mut [u8], s: usize, e: usize) -> bool {
     let mut seg_start = s;
+    let mut prev_op = ChainOp::Always;
     let mut i = s;
-    let mut quote: u8 = 0; // 0 = fuera de comillas; si no, b'\'' o b'"'
-    while i < e {
-        let c = buf[i];
-        if quote != 0 {
-            if c == quote {
-                quote = 0;
+    let mut quote: u8 = 0;
+
+    loop {
+        let split = if i >= e {
+            Some((e, 0usize, ChainOp::Always))
+        } else {
+            let c = buf[i];
+            if quote != 0 {
+                if c == quote {
+                    quote = 0;
+                }
+                None
+            } else if c == b'\'' || c == b'"' {
+                quote = c;
+                None
+            } else if c == b';' {
+                Some((i, 1usize, ChainOp::Always))
+            } else if c == b'&' && i + 1 < e && buf[i + 1] == b'&' {
+                Some((i, 2usize, ChainOp::And))
+            } else if c == b'|' && i + 1 < e && buf[i + 1] == b'|' {
+                Some((i, 2usize, ChainOp::Or))
+            } else {
+                None
             }
-        } else if c == b'\'' || c == b'"' {
-            quote = c;
-        } else if c == b';' {
-            let (ss, se) = trim(buf, seg_start, i);
-            // exec_line muta buf[ss..se] (tokenize mete NULs), pero eso queda detrás de
-            // `i`; el resto de la línea (los segmentos por venir) no se toca.
-            if ss < se && !exec_line(buf, ss, se) {
-                return false;
+        };
+
+        if let Some((pos, adv, next_op)) = split {
+            let st = get_status();
+            let run = prev_op == ChainOp::Always
+                || (prev_op == ChainOp::And && st == 0)
+                || (prev_op == ChainOp::Or && st != 0);
+            if run {
+                let (ss, se) = trim(buf, seg_start, pos);
+                if ss < se && !exec_line(buf, ss, se) {
+                    return false;
+                }
             }
-            seg_start = i + 1;
+            if pos >= e {
+                break;
+            }
+            prev_op = next_op;
+            seg_start = pos + adv;
+            i = pos + adv;
+        } else {
+            i += 1;
         }
-        i += 1;
-    }
-    let (ss, se) = trim(buf, seg_start, e);
-    if ss < se {
-        return exec_line(buf, ss, se);
     }
     true
 }
 
 fn builtin_pwd() {
     let mut cwd = [0u8; PATH_MAX];
-    match getcwd_str(&mut cwd) {
-        Ok(s) => println!("{}", s),
-        Err(n) => println!("pwd: error {}", n),
+    let n = getcwd(&mut cwd);
+    if n >= 0 {
+        putln(&cwd[..n as usize]);
+        set_status(0);
+    } else {
+        putln(b"pwd: error");
+        set_status(1);
     }
 }
 
 fn builtin_cd(line: &[u8]) {
-    let target = core::str::from_utf8(&line[2..]).unwrap_or("").trim();
-    let target = if target.is_empty() { "/" } else { target };
+    let (ts, te) = if line.len() > 2 {
+        trim(&line[2..], 0, line.len() - 2)
+    } else {
+        (0, 0)
+    };
+    let mut hbuf = [0u8; PATH_MAX];
+    let target_bytes = if ts >= te || &line[2 + ts..2 + te] == b"~" {
+        env_get(b"HOME", &mut hbuf).unwrap_or(b"/")
+    } else {
+        &line[2 + ts..2 + te]
+    };
+    let target = ascii_str(target_bytes).unwrap_or("/");
     let r = chdir(target);
     if r < 0 {
-        let reason = match r {
-            -2 => "no such file or directory",
-            -20 => "not a directory",
-            _ => "cannot change directory",
-        };
-        println!("cd: {}: {}", target, reason);
+        puts(b"cd: ");
+        puts(target.as_bytes());
+        if r == -20 {
+            putln(b": not a directory");
+        } else {
+            putln(b": no such file or directory");
+        }
+        set_status(1);
+    } else {
+        set_status(0);
     }
-}
-
-const HISTORY_MAX: usize = 16;
-static mut HISTORY_BUF: [[u8; LINE]; HISTORY_MAX] = [[0; LINE]; HISTORY_MAX];
-static mut HISTORY_LENS: [usize; HISTORY_MAX] = [0; HISTORY_MAX];
-static mut HISTORY_COUNT: usize = 0;
-
-fn itoa<'a>(mut n: usize, buf: &'a mut [u8; 16]) -> &'a str {
-    if n == 0 {
-        buf[0] = b'0';
-        return core::str::from_utf8(&buf[..1]).unwrap_or("0");
-    }
-    let mut len = 0;
-    let mut tmp = [0u8; 16];
-    while n > 0 {
-        tmp[len] = b'0' + (n % 10) as u8;
-        n /= 10;
-        len += 1;
-    }
-    for i in 0..len {
-        buf[i] = tmp[len - 1 - i];
-    }
-    core::str::from_utf8(&buf[..len]).unwrap_or("")
 }
 
 fn prompt_bytes(out: &mut [u8]) -> usize {
     let mut cwd = [0u8; PATH_MAX];
-    let user_str = unsafe {
-        if USER_LEN > 0 {
-            core::str::from_utf8(&USER_BUF[..USER_LEN]).unwrap_or("")
-        } else {
-            ""
-        }
-    };
-    let at = if !user_str.is_empty() { "@" } else { "" };
     let mut o = 0;
-    let ubytes = user_str.as_bytes();
-    if o + ubytes.len() <= out.len() {
-        out[o..o + ubytes.len()].copy_from_slice(ubytes);
-        o += ubytes.len();
-    }
-    let abytes = at.as_bytes();
-    if o + abytes.len() <= out.len() {
-        out[o..o + abytes.len()].copy_from_slice(abytes);
-        o += abytes.len();
+    unsafe {
+        if USER_LEN > 0 {
+            let u = &(&*core::ptr::addr_of!(USER_BUF))[..USER_LEN];
+            if o + u.len() + 1 <= out.len() {
+                out[o..o + u.len()].copy_from_slice(u);
+                o += u.len();
+                out[o] = b'@';
+                o += 1;
+            }
+        }
     }
 
-    match getcwd_str(&mut cwd) {
-        Ok("/") => {
-            let p = b"EspressoOS:~$ ";
-            if o + p.len() <= out.len() {
-                out[o..o + p.len()].copy_from_slice(p);
-                o += p.len();
-            }
+    let cn = getcwd(&mut cwd);
+    if cn == 1 && cwd[0] == b'/' {
+        let p = b"EspressoOS:~$ ";
+        if o + p.len() <= out.len() {
+            out[o..o + p.len()].copy_from_slice(p);
+            o += p.len();
         }
-        Ok(s) => {
-            let p1 = b"EspressoOS:";
-            if o + p1.len() <= out.len() {
-                out[o..o + p1.len()].copy_from_slice(p1);
-                o += p1.len();
-            }
-            let sbytes = s.as_bytes();
-            if o + sbytes.len() <= out.len() {
-                out[o..o + sbytes.len()].copy_from_slice(sbytes);
-                o += sbytes.len();
-            }
-            let p2 = b"$ ";
-            if o + p2.len() <= out.len() {
-                out[o..o + p2.len()].copy_from_slice(p2);
-                o += p2.len();
-            }
+    } else if cn > 0 {
+        let p1 = b"EspressoOS:";
+        let s = &cwd[..cn as usize];
+        let p2 = b"$ ";
+        if o + p1.len() + s.len() + p2.len() <= out.len() {
+            out[o..o + p1.len()].copy_from_slice(p1);
+            o += p1.len();
+            out[o..o + s.len()].copy_from_slice(s);
+            o += s.len();
+            out[o..o + p2.len()].copy_from_slice(p2);
+            o += p2.len();
         }
-        Err(_) => {
-            let p = b"EspressoOS:?$ ";
-            if o + p.len() <= out.len() {
-                out[o..o + p.len()].copy_from_slice(p);
-                o += p.len();
-            }
+    } else {
+        let p = b"EspressoOS:?$ ";
+        if o + p.len() <= out.len() {
+            out[o..o + p.len()].copy_from_slice(p);
+            o += p.len();
         }
     }
     o
@@ -362,181 +894,176 @@ fn prompt_bytes(out: &mut [u8]) -> usize {
 fn print_prompt() {
     let mut buf = [0u8; 128];
     let n = prompt_bytes(&mut buf);
-    let _ = libc::write(1, &buf[..n]);
+    puts(&buf[..n]);
 }
 
 fn redraw_line(buf: &[u8], len: usize, pos: usize) {
-    let mut scratch = [0u8; 256];
+    let mut scratch = [0u8; 384];
     let mut o = 0;
     scratch[o] = b'\r';
     o += 1;
     o += prompt_bytes(&mut scratch[o..]);
     if len > 0 {
-        let chunk_len = len.min(LINE).min(scratch.len().saturating_sub(o + 32));
+        let chunk_len = len.min(LINE).min(scratch.len().saturating_sub(o + 24));
         scratch[o..o + chunk_len].copy_from_slice(&buf[..chunk_len]);
         o += chunk_len;
     }
-    let clear = b"\x1b[K";
-    scratch[o..o + clear.len()].copy_from_slice(clear);
-    o += clear.len();
+    scratch[o..o + 3].copy_from_slice(b"\x1b[K");
+    o += 3;
 
     if pos < len {
         let back = len - pos;
         let mut num_buf = [0u8; 16];
-        let back_str = itoa(back, &mut num_buf);
-        let prefix = b"\x1b[";
-        scratch[o..o + prefix.len()].copy_from_slice(prefix);
-        o += prefix.len();
-        let bbytes = back_str.as_bytes();
+        let bbytes = fmt_usize(back, &mut num_buf);
+        scratch[o..o + 2].copy_from_slice(b"\x1b[");
+        o += 2;
         scratch[o..o + bbytes.len()].copy_from_slice(bbytes);
         o += bbytes.len();
         scratch[o] = b'D';
         o += 1;
     }
-    let _ = libc::write(1, &scratch[..o]);
+    puts(&scratch[..o]);
 }
 
 fn try_read_byte() -> Option<u8> {
     let mut c = [0u8; 1];
-    let start = libc::uptime_ms();
+    let start = uptime_ms();
     loop {
         if read(0, &mut c) > 0 {
             return Some(c[0]);
         }
-        if libc::uptime_ms().saturating_sub(start) > 20 {
+        if uptime_ms().saturating_sub(start) > 20 {
             return None;
         }
         yield_now();
     }
 }
 
-const BUILTINS: &[&str] = &["help", "clear", "exit", "cd", "pwd", "sudo"];
+const BUILTINS: &[&[u8]] = &[
+    b"help", b"clear", b"exit", b"cd", b"pwd", b"sudo", b"export", b"unset", b"source",
+    b"history", b"true", b"false",
+];
+
+fn rfind_slash(b: &[u8]) -> Option<usize> {
+    let mut i = b.len();
+    while i > 0 {
+        i -= 1;
+        if b[i] == b'/' {
+            return Some(i);
+        }
+    }
+    None
+}
 
 fn handle_tab_completion(buf: &mut [u8], len: &mut usize, pos: &mut usize) {
-    let mut bin_buf = [0u8; 1024];
-    let mut dir_buf = [0u8; 1024];
+    let dir_buf = unsafe { &mut *core::ptr::addr_of_mut!(DIR_BUF) };
+    let mut idx = *pos;
+    while idx > 0 && buf[idx - 1] != b' ' {
+        idx -= 1;
+    }
+    let word_start = idx;
+    let mut pfx_copy = [0u8; 64];
+    let plen = (*pos - word_start).min(64);
+    pfx_copy[..plen].copy_from_slice(&buf[word_start..word_start + plen]);
+    let prefix = &pfx_copy[..plen];
 
-    let word_start = {
-        let mut idx = *pos;
-        while idx > 0 && buf[idx - 1] != b' ' {
-            idx -= 1;
-        }
-        idx
-    };
-
-    let prefix_bytes = &buf[word_start..*pos];
-    let prefix = match core::str::from_utf8(prefix_bytes) {
-        Ok(s) => s,
-        Err(_) => return,
-    };
-
-    let mut matches = [[""; 2]; 32];
+    let mut matches: [(&[u8], &[u8]); 24] = [(&[], &[]); 24];
     let mut match_count = 0usize;
 
-    if word_start == 0 && !prefix.contains('/') {
+    if word_start == 0 && rfind_slash(prefix).is_none() {
         for &b in BUILTINS {
-            if b.starts_with(prefix) && match_count < 32 {
-                matches[match_count] = [b, " "];
+            if b.starts_with(prefix) && match_count < 24 {
+                matches[match_count] = (b, b" ");
                 match_count += 1;
             }
         }
-        let n = readdir("/bin", &mut bin_buf);
+        let n = readdir("/bin", dir_buf);
         if n > 0 {
             let limit = n as usize;
             let mut p = 0;
             while p + 11 <= limit {
-                let name_len = u16::from_le_bytes([bin_buf[p + 9], bin_buf[p + 10]]) as usize;
+                let nl = u16::from_le_bytes([dir_buf[p + 9], dir_buf[p + 10]]) as usize;
                 p += 11;
-                if p + name_len > limit {
+                if p + nl > limit {
                     break;
                 }
-                if let Ok(name) = core::str::from_utf8(&bin_buf[p..p + name_len]) {
-                    if name.starts_with(prefix) && match_count < 32 {
-                        let mut exists = false;
-                        for i in 0..match_count {
-                            if matches[i][0] == name {
-                                exists = true;
-                                break;
-                            }
-                        }
-                        if !exists {
-                            matches[match_count] = [name, " "];
-                            match_count += 1;
+                let name = &dir_buf[p..p + nl];
+                if name.starts_with(prefix) && match_count < 24 {
+                    let mut exists = false;
+                    for k in 0..match_count {
+                        if matches[k].0 == name {
+                            exists = true;
+                            break;
                         }
                     }
+                    if !exists {
+                        matches[match_count] = (name, b" ");
+                        match_count += 1;
+                    }
                 }
-                p += name_len;
+                p += nl;
             }
         }
     } else {
-        let (dir_path, file_prefix) = match prefix.rfind('/') {
-            Some(slash_pos) => (&prefix[..slash_pos + 1], &prefix[slash_pos + 1..]),
-            None => (".", prefix),
+        let (dir_b, file_pfx) = match rfind_slash(prefix) {
+            Some(sp) => (&prefix[..sp + 1], &prefix[sp + 1..]),
+            None => (&b"."[..], prefix),
         };
-        let target_dir = if dir_path.is_empty() { "." } else { dir_path };
-        let n = readdir(target_dir, &mut dir_buf);
+        let dstr = ascii_str(if dir_b.is_empty() { b"." } else { dir_b }).unwrap_or(".");
+        let n = readdir(dstr, dir_buf);
         if n > 0 {
             let limit = n as usize;
             let mut p = 0;
             while p + 11 <= limit {
                 let kind = dir_buf[p + 8];
-                let name_len = u16::from_le_bytes([dir_buf[p + 9], dir_buf[p + 10]]) as usize;
+                let nl = u16::from_le_bytes([dir_buf[p + 9], dir_buf[p + 10]]) as usize;
                 p += 11;
-                if p + name_len > limit {
+                if p + nl > limit {
                     break;
                 }
-                if let Ok(name) = core::str::from_utf8(&dir_buf[p..p + name_len]) {
-                    if name != "." && name != ".." && name.starts_with(file_prefix) && match_count < 32 {
-                        let suffix = if kind == 1 { "/" } else { " " };
-                        matches[match_count] = [name, suffix];
-                        match_count += 1;
-                    }
+                let name = &dir_buf[p..p + nl];
+                if name != b"." && name != b".." && name.starts_with(file_pfx) && match_count < 24 {
+                    matches[match_count] = (name, if kind == 2 { b"/" } else { b" " });
+                    match_count += 1;
                 }
-                p += name_len;
+                p += nl;
             }
         }
     }
 
     if match_count == 1 {
-        let name = matches[0][0];
-        let suffix = matches[0][1];
-
-        let file_sub_prefix = if word_start != 0 && prefix.contains('/') {
-            if let Some(slash_pos) = prefix.rfind('/') {
-                &prefix[slash_pos + 1..]
-            } else {
-                prefix
+        let (name, suff) = matches[0];
+        let sub_pfx = if word_start != 0 {
+            match rfind_slash(prefix) {
+                Some(sp) => &prefix[sp + 1..],
+                None => prefix,
             }
         } else {
             prefix
         };
-
-        if name.len() >= file_sub_prefix.len() {
-            let insert_str = &name[file_sub_prefix.len()..];
-            let comp_bytes = insert_str.as_bytes();
-            let suff_bytes = suffix.as_bytes();
-            let total_add = comp_bytes.len() + suff_bytes.len();
-
-            if *len + total_add <= buf.len() {
-                buf.copy_within(*pos..*len, *pos + total_add);
-                buf[*pos..*pos + comp_bytes.len()].copy_from_slice(comp_bytes);
-                buf[*pos + comp_bytes.len()..*pos + total_add].copy_from_slice(suff_bytes);
-                *len += total_add;
-                *pos += total_add;
+        if name.len() >= sub_pfx.len() {
+            let comp = &name[sub_pfx.len()..];
+            let add = comp.len() + suff.len();
+            if *len + add <= buf.len() {
+                buf.copy_within(*pos..*len, *pos + add);
+                buf[*pos..*pos + comp.len()].copy_from_slice(comp);
+                buf[*pos + comp.len()..*pos + add].copy_from_slice(suff);
+                *len += add;
+                *pos += add;
                 redraw_line(buf, *len, *pos);
             }
         }
     } else if match_count > 1 {
-        println!("");
-        for i in 0..match_count {
-            print!("{}  ", matches[i][0]);
+        putln(b"");
+        for k in 0..match_count {
+            puts(matches[k].0);
+            puts(b"  ");
         }
-        println!("");
+        putln(b"");
         redraw_line(buf, *len, *pos);
     }
 }
 
-/// Reads one line into `buf`, with editing, history, tab completion, and control shortcuts.
 fn read_line(buf: &mut [u8]) -> usize {
     let mut len = 0usize;
     let mut pos = 0usize;
@@ -553,156 +1080,129 @@ fn read_line(buf: &mut [u8]) -> usize {
                 continue;
             }
             let ch = c[0];
+            let mut dirty = false;
 
             match ch {
                 b'\n' | b'\r' => {
-                    println!("");
+                    putln(b"");
                     return len;
                 }
-                0x08 | 0x7f => { // Backspace / DEL
-                    if pos > 0 {
-                        buf.copy_within(pos..len, pos - 1);
-                        len -= 1;
-                        pos -= 1;
-                        redraw_line(buf, len, pos);
-                    }
+                0x08 | 0x7f if pos > 0 => {
+                    buf.copy_within(pos..len, pos - 1);
+                    len -= 1;
+                    pos -= 1;
+                    dirty = true;
                 }
-                0x09 => { // Tab completion
-                    handle_tab_completion(buf, &mut len, &mut pos);
-                }
-                0x01 => { // Ctrl+A (Home)
+                0x09 => handle_tab_completion(buf, &mut len, &mut pos),
+                0x01 => {
                     pos = 0;
-                    redraw_line(buf, len, pos);
+                    dirty = true;
                 }
-                0x05 => { // Ctrl+E (End)
+                0x05 => {
                     pos = len;
-                    redraw_line(buf, len, pos);
+                    dirty = true;
                 }
-                0x15 => { // Ctrl+U (Delete line before cursor)
-                    if pos > 0 {
-                        buf.copy_within(pos..len, 0);
-                        len -= pos;
-                        pos = 0;
-                        redraw_line(buf, len, pos);
+                0x15 if pos > 0 => {
+                    buf.copy_within(pos..len, 0);
+                    len -= pos;
+                    pos = 0;
+                    dirty = true;
+                }
+                0x0b if pos < len => {
+                    len = pos;
+                    dirty = true;
+                }
+                0x17 if pos > 0 => {
+                    let mut wstart = pos;
+                    while wstart > 0 && buf[wstart - 1] == b' ' {
+                        wstart -= 1;
                     }
-                }
-                0x0b => { // Ctrl+K (Delete line after cursor)
-                    if pos < len {
-                        len = pos;
-                        redraw_line(buf, len, pos);
+                    while wstart > 0 && buf[wstart - 1] != b' ' {
+                        wstart -= 1;
                     }
+                    buf.copy_within(pos..len, wstart);
+                    len -= pos - wstart;
+                    pos = wstart;
+                    dirty = true;
                 }
-                0x17 => { // Ctrl+W (Delete word before cursor)
-                    if pos > 0 {
-                        let mut wstart = pos;
-                        while wstart > 0 && buf[wstart - 1] == b' ' {
-                            wstart -= 1;
-                        }
-                        while wstart > 0 && buf[wstart - 1] != b' ' {
-                            wstart -= 1;
-                        }
-                        let diff = pos - wstart;
-                        buf.copy_within(pos..len, wstart);
-                        len -= diff;
-                        pos = wstart;
-                        redraw_line(buf, len, pos);
-                    }
+                0x0c => {
+                    puts(b"\x1b[2J\x1b[H");
+                    dirty = true;
                 }
-                0x0c => { // Ctrl+L (Clear screen)
-                    let _ = libc::write(1, b"\x1b[2J\x1b[H");
-                    redraw_line(buf, len, pos);
-                }
-                0x04 => { // Ctrl+D
+                0x04 => {
                     if len == 0 {
-                        println!("exit");
+                        putln(b"exit");
                         return usize::MAX;
                     } else if pos < len {
                         buf.copy_within(pos + 1..len, pos);
                         len -= 1;
-                        redraw_line(buf, len, pos);
+                        dirty = true;
                     }
                 }
-                0x03 => { // Ctrl+C
-                    println!("^C");
+                0x03 => {
+                    putln(b"^C");
                     len = 0;
                     pos = 0;
+                    set_status(130);
                     print_prompt();
                 }
-                0x1b => { // ANSI Escape Sequence
-                    if let Some(b'[') = try_read_byte() {
+                0x1b => {
+                    if try_read_byte() == Some(b'[') {
                         if let Some(code) = try_read_byte() {
                             match code {
-                                b'A' => { // Up Arrow (History back)
-                                    if HISTORY_COUNT > 0 && history_idx > 0 {
-                                        let min_idx = if HISTORY_COUNT > HISTORY_MAX { HISTORY_COUNT - HISTORY_MAX } else { 0 };
-                                        if history_idx > min_idx {
-                                            if history_idx == HISTORY_COUNT {
-                                                draft_buf[..len].copy_from_slice(&buf[..len]);
-                                                draft_len = len;
-                                            }
-                                            history_idx -= 1;
-                                            let h_idx = history_idx % HISTORY_MAX;
-                                            let h_len = HISTORY_LENS[h_idx];
-                                            buf[..h_len].copy_from_slice(&HISTORY_BUF[h_idx][..h_len]);
-                                            len = h_len;
-                                            pos = h_len;
-                                            redraw_line(buf, len, pos);
-                                        }
-                                    }
-                                }
-                                b'B' => { // Down Arrow (History forward)
-                                    if history_idx < HISTORY_COUNT {
-                                        history_idx += 1;
+                                b'A' => {
+                                    let min_idx = HISTORY_COUNT.saturating_sub(HISTORY_MAX);
+                                    if history_idx > min_idx {
                                         if history_idx == HISTORY_COUNT {
-                                            buf[..draft_len].copy_from_slice(&draft_buf[..draft_len]);
-                                            len = draft_len;
-                                            pos = draft_len;
-                                        } else {
-                                            let h_idx = history_idx % HISTORY_MAX;
-                                            let h_len = HISTORY_LENS[h_idx];
-                                            buf[..h_len].copy_from_slice(&HISTORY_BUF[h_idx][..h_len]);
-                                            len = h_len;
-                                            pos = h_len;
+                                            draft_buf[..len].copy_from_slice(&buf[..len]);
+                                            draft_len = len;
                                         }
-                                        redraw_line(buf, len, pos);
+                                        history_idx -= 1;
+                                        let h_idx = history_idx % HISTORY_MAX;
+                                        let h_len = HISTORY_LENS[h_idx];
+                                        buf[..h_len].copy_from_slice(&HISTORY_BUF[h_idx][..h_len]);
+                                        len = h_len;
+                                        pos = h_len;
+                                        dirty = true;
                                     }
                                 }
-                                b'C' => { // Right Arrow
-                                    if pos < len {
-                                        pos += 1;
-                                        redraw_line(buf, len, pos);
-                                    }
+                                b'B' if history_idx < HISTORY_COUNT => {
+                                    history_idx += 1;
+                                    let (src, slen): (&[u8], usize) = if history_idx == HISTORY_COUNT {
+                                        (&draft_buf, draft_len)
+                                    } else {
+                                        let h_idx = history_idx % HISTORY_MAX;
+                                        (&HISTORY_BUF[h_idx], HISTORY_LENS[h_idx])
+                                    };
+                                    buf[..slen].copy_from_slice(&src[..slen]);
+                                    len = slen;
+                                    pos = slen;
+                                    dirty = true;
                                 }
-                                b'D' => { // Left Arrow
-                                    if pos > 0 {
-                                        pos -= 1;
-                                        redraw_line(buf, len, pos);
-                                    }
+                                b'C' if pos < len => {
+                                    pos += 1;
+                                    dirty = true;
                                 }
-                                b'H' => { // Home
+                                b'D' if pos > 0 => {
+                                    pos -= 1;
+                                    dirty = true;
+                                }
+                                b'H' | b'1' => {
+                                    if code == b'1' { let _ = try_read_byte(); }
                                     pos = 0;
-                                    redraw_line(buf, len, pos);
+                                    dirty = true;
                                 }
-                                b'F' => { // End
+                                b'F' | b'4' => {
+                                    if code == b'4' { let _ = try_read_byte(); }
                                     pos = len;
-                                    redraw_line(buf, len, pos);
+                                    dirty = true;
                                 }
-                                b'1' => { // Home (ESC[1~)
-                                    let _ = try_read_byte();
-                                    pos = 0;
-                                    redraw_line(buf, len, pos);
-                                }
-                                b'4' => { // End (ESC[4~)
-                                    let _ = try_read_byte();
-                                    pos = len;
-                                    redraw_line(buf, len, pos);
-                                }
-                                b'3' => { // Delete (ESC[3~)
+                                b'3' => {
                                     let _ = try_read_byte();
                                     if pos < len {
                                         buf.copy_within(pos + 1..len, pos);
                                         len -= 1;
-                                        redraw_line(buf, len, pos);
+                                        dirty = true;
                                     }
                                 }
                                 _ => {}
@@ -710,107 +1210,73 @@ fn read_line(buf: &mut [u8]) -> usize {
                         }
                     }
                 }
-                _ if (0x20..0x7f).contains(&ch) => {
-                    if len < buf.len() {
-                        buf.copy_within(pos..len, pos + 1);
-                        buf[pos] = ch;
-                        len += 1;
-                        pos += 1;
-                        redraw_line(buf, len, pos);
-                    }
+                _ if (0x20..0x7f).contains(&ch) && len < buf.len() => {
+                    buf.copy_within(pos..len, pos + 1);
+                    buf[pos] = ch;
+                    len += 1;
+                    pos += 1;
+                    dirty = true;
                 }
                 _ => {}
+            }
+
+            if dirty {
+                redraw_line(buf, len, pos);
             }
         }
     }
 }
 
-/// `start..end` with leading and trailing blanks removed.
-fn trim(buf: &[u8], mut start: usize, mut end: usize) -> (usize, usize) {
-    while start < end && (buf[start] == b' ' || buf[start] == b'\t') {
-        start += 1;
-    }
-    while end > start && (buf[end - 1] == b' ' || buf[end - 1] == b'\t') {
-        end -= 1;
-    }
-    (start, end)
-}
-
-/// Splits `buf[start..end]` into NUL-terminated tokens in place and fills `argv` with
-/// pointers to them, NULL-terminated. Returns the token count.
-///
-/// The separators become the terminators, so each token ends up a C string pointing
-/// into `buf` -- nothing is copied and nothing is allocated, which matters because
-/// there is no allocator here. The kernel copies the strings out during `spawn`, so
-/// they only have to survive that one call.
-///
-/// `buf[end]` is overwritten with the last token's NUL. That is why the line buffer
-/// is one byte longer than the longest line it accepts.
-///
-/// None means the line has more tokens than `argv` can hold.
 fn tokenize(
     buf: &mut [u8],
     start: usize,
     end: usize,
     argv: &mut [*const u8; MAX_ARGV],
 ) -> Option<usize> {
-    // Respeta comillas simples y dobles: un span entre comillas es UN token y las
-    // comillas se eliminan (necesario para `wifi connect "Familia beltre"`). Quitar
-    // comillas solo ENCOGE, así que la compactación in-place es segura: el cursor de
-    // escritura `write` nunca adelanta al de lectura `read`, así que nunca pisa bytes
-    // sin leer. Los tokens quedan NUL-separados dentro de [start..write).
     let mut offs = [0usize; MAX_ARGV];
     let mut n = 0;
-    let mut read = start;
-    let mut write = start;
-    while read < end {
-        while read < end && buf[read] == b' ' {
-            read += 1;
+    let mut r = start;
+    let mut w = start;
+    while r < end {
+        while r < end && (buf[r] == b' ' || buf[r] == b'\t') {
+            r += 1;
         }
-        if read >= end {
+        if r >= end {
             break;
         }
-        // argv[n] takes the token, so argv[n + 1] has to be free for the NULL.
         if n + 1 >= MAX_ARGV {
             return None;
         }
-        offs[n] = write;
+        offs[n] = w;
         n += 1;
         let mut quote: u8 = 0;
-        while read < end {
-            let c = buf[read];
+        while r < end {
+            let c = buf[r];
             if quote != 0 {
                 if c == quote {
                     quote = 0;
                 } else {
-                    buf[write] = c;
-                    write += 1;
+                    buf[w] = c;
+                    w += 1;
                 }
-                read += 1;
+                r += 1;
             } else if c == b'"' || c == b'\'' {
                 quote = c;
-                read += 1;
-            } else if c == b' ' {
+                r += 1;
+            } else if c == b' ' || c == b'\t' {
                 break;
             } else {
-                buf[write] = c;
-                write += 1;
-                read += 1;
+                buf[w] = c;
+                w += 1;
+                r += 1;
             }
         }
-        buf[write] = 0;
-        write += 1;
-        // El token terminó en un espacio en `read` (o en `end`). Consúmelo: si
-        // write==read (sin comillas), el NUL de arriba PISÓ ese espacio, así que el
-        // skip de espacios del tope lo vería como 0 y se atascaría leyendo un token
-        // vacío. Avanzar `read` aquí lo evita; el skip del tope cubre espacios extra.
-        if read < end {
-            read += 1;
+        buf[w] = 0;
+        w += 1;
+        if r < end {
+            r += 1;
         }
     }
-
-    // Pointers are taken only once every terminator is in, so nothing derived here
-    // is invalidated by a later write through the slice.
     let base = buf.as_ptr();
     for k in 0..n {
         argv[k] = unsafe { base.add(offs[k]) };
@@ -819,7 +1285,6 @@ fn tokenize(
     Some(n)
 }
 
-/// Primera aparición top-level (fuera de comillas) de `delim` en `buf[from..to]`.
 fn find_top(buf: &[u8], from: usize, to: usize, delim: u8) -> Option<usize> {
     let mut i = from;
     let mut quote: u8 = 0;
@@ -839,9 +1304,6 @@ fn find_top(buf: &[u8], from: usize, to: usize, delim: u8) -> Option<usize> {
     None
 }
 
-/// Tokenizes a command and resolves its program, reporting why if it cannot.
-///
-/// Returns the token count; `argv` is left NULL-terminated and ready for `spawn`.
 fn prepare<'a>(
     buf: &mut [u8],
     range: (usize, usize),
@@ -850,313 +1312,326 @@ fn prepare<'a>(
 ) -> Option<&'a str> {
     match tokenize(buf, range.0, range.1, argv) {
         None => {
-            println!("Too many arguments (max {})", MAX_ARGV - 1);
+            putln(b"sh: too many arguments");
             return None;
         }
-        Some(0) => {
-            println!("Empty command");
-            return None;
-        }
+        Some(0) => return None,
         Some(_) => {}
     }
-
-    // argv[0] is the name as typed; the path is where it was found. They differ for
-    // anything run by bare name, and the child is meant to see the former.
-    let path = resolve_path(unsafe { libc::arg(argv.as_ptr(), 0) }, path_buf);
+    let path = resolve_path(unsafe { arg(argv.as_ptr(), 0) }, path_buf);
     if path.is_empty() {
-        println!("Invalid command path");
+        putln(b"sh: invalid command path");
         return None;
     }
     Some(path)
 }
 
-/// Separa el rango de un stage en (rango_comando, redirección opcional). La redirección
-/// es el primer `>` (o `>>` = append) top-level y su fichero destino (un token).
-fn parse_redirect(
-    buf: &[u8],
-    a: usize,
-    b: usize,
-) -> ((usize, usize), Option<(usize, usize, bool)>) {
-    match find_top(buf, a, b, b'>') {
-        None => ((a, b), None),
-        Some(i) => {
-            let append = i + 1 < b && buf[i + 1] == b'>';
-            let after = if append { i + 2 } else { i + 1 };
-            let (ts, te0) = trim(buf, after, b);
-            // El destino es un solo token: hasta el siguiente espacio top-level.
-            let te = find_top(buf, ts, te0, b' ').unwrap_or(te0);
-            ((a, i), Some((ts, te, append)))
-        }
-    }
+#[derive(Clone, Copy)]
+struct RedirSpec {
+    stdin: Option<(usize, usize)>,
+    stdout: Option<(usize, usize, bool)>,
+    stderr: Option<(usize, usize, bool)>,
+    err_to_out: bool,
 }
 
-/// Abre el fichero destino de una redirección y devuelve su fd (<0 en error). Recorta
-/// comillas envolventes. `open` toma ptr+len, así que no hace falta NUL-terminar.
-fn redir_open(buf: &[u8], ts: usize, te: usize, append: bool) -> isize {
+fn take_redir_tok(orig_buf: &[u8], clean_buf: &mut [u8], op_start: usize, after: usize, b: usize) -> (usize, usize, usize) {
+    let (ts, te0) = trim(orig_buf, after, b);
+    let te = find_top(orig_buf, ts, te0, b' ').unwrap_or(te0);
+    for k in op_start..te {
+        clean_buf[k] = b' ';
+    }
+    (ts, te, te)
+}
+
+fn extract_redirs(orig_buf: &[u8], clean_buf: &mut [u8], a: usize, b: usize) -> RedirSpec {
+    let mut spec = RedirSpec {
+        stdin: None,
+        stdout: None,
+        stderr: None,
+        err_to_out: false,
+    };
+    let mut i = a;
+    let mut quote: u8 = 0;
+
+    while i < b {
+        let c = orig_buf[i];
+        if quote != 0 {
+            if c == quote { quote = 0; }
+            i += 1;
+            continue;
+        }
+        if c == b'\'' || c == b'"' {
+            quote = c;
+            i += 1;
+            continue;
+        }
+
+        if c == b'2' && i + 1 < b && orig_buf[i + 1] == b'>' && (i == a || orig_buf[i - 1] == b' ') {
+            if i + 3 < b && orig_buf[i + 2] == b'&' && orig_buf[i + 3] == b'1' {
+                spec.err_to_out = true;
+                for k in i..i + 4 { clean_buf[k] = b' '; }
+                i += 4;
+                continue;
+            }
+            let append = i + 2 < b && orig_buf[i + 2] == b'>';
+            let (ts, te, next_i) = take_redir_tok(orig_buf, clean_buf, i, if append { i + 3 } else { i + 2 }, b);
+            spec.stderr = Some((ts, te, append));
+            i = next_i;
+            continue;
+        }
+
+        if c == b'>' {
+            let append = i + 1 < b && orig_buf[i + 1] == b'>';
+            let (ts, te, next_i) = take_redir_tok(orig_buf, clean_buf, i, if append { i + 2 } else { i + 1 }, b);
+            spec.stdout = Some((ts, te, append));
+            i = next_i;
+            continue;
+        }
+
+        if c == b'<' {
+            let (ts, te, next_i) = take_redir_tok(orig_buf, clean_buf, i, i + 1, b);
+            spec.stdin = Some((ts, te));
+            i = next_i;
+            continue;
+        }
+        i += 1;
+    }
+    spec
+}
+
+fn unquote_slice(buf: &[u8], ts: usize, te: usize) -> Option<&str> {
     let (mut a, mut b) = (ts, te);
     if b > a + 1 && (buf[a] == b'"' || buf[a] == b'\'') && buf[b - 1] == buf[a] {
         a += 1;
         b -= 1;
     }
-    let path = match core::str::from_utf8(&buf[a..b]) {
-        Ok(p) => p,
-        Err(_) => return -1,
-    };
-    let flags = if append {
-        O_WRONLY | O_CREATE | O_APPEND
-    } else {
-        O_WRONLY | O_CREATE | O_TRUNC
-    };
-    open(path, flags)
+    if a >= b {
+        return None;
+    }
+    ascii_str(&buf[a..b])
 }
 
-fn run_single(buf: &mut [u8], range: (usize, usize)) {
-    let (mut cs, mut ce) = trim(buf, range.0, range.1);
-    let mut is_bg = false;
-    if ce > cs && buf[ce - 1] == b'&' {
-        is_bg = true;
-        ce -= 1;
-        let trimmed = trim(buf, cs, ce);
-        cs = trimmed.0;
-        ce = trimmed.1;
-    }
-
-    let (cmd, redir) = parse_redirect(buf, cs, ce);
-
-    // La redirección se abre ANTES de tokenizar el comando: `redir_open` lee bytes del
-    // destino, que están detrás del `>` y no los toca la compactación de `tokenize`.
-    let mut rfd = -1i32;
-    if let Some((ts, te, append)) = redir {
-        let fd = redir_open(buf, ts, te, append);
-        if fd < 0 {
-            println!("sh: cannot open redirection target");
-            return;
+fn open_redir(buf: &[u8], ts: usize, te: usize, flags: u32) -> i32 {
+    match unquote_slice(buf, ts, te) {
+        Some(p) => {
+            let fd = open(p, flags);
+            if fd >= 0 { fd as i32 } else { -1 }
         }
-        rfd = fd as i32;
-    }
-
-    let mut argv = [core::ptr::null(); MAX_ARGV];
-    let mut path_buf = [0u8; LINE + 8];
-    let path = match prepare(buf, cmd, &mut argv, &mut path_buf) {
-        Some(p) => p,
-        None => {
-            if rfd >= 0 {
-                close(rfd);
-            }
-            return;
-        }
-    };
-
-    // Redirección = dup2 sobre fd 1, guardando el original en fd 12. El hijo nunca sabe
-    // que se movió (misma semántica documentada en el README §6).
-    let mut saved = -1i32;
-    if rfd >= 0 {
-        saved = dup2(1, 12) as i32;
-        dup2(rfd, 1);
-        close(rfd);
-    }
-
-    let pid = spawn(path, argv.as_ptr());
-    if pid < 0 {
-        println!("Error executing: {}", path);
-    } else if is_bg {
-        println!("[1] {}", pid);
-    } else {
-        let mut status = 0;
-        let _ = wait(&mut status);
-    }
-
-    if saved >= 0 {
-        dup2(saved, 1);
-        close(saved);
+        None => -1,
     }
 }
 
-/// Pipeline de N etapas (`a | b | c | ...`). Crea N-1 pipes y encadena stdin/stdout de
-/// cada etapa; una etapa con redirección `>` propia manda su stdout al fichero en vez del
-/// pipe (gana al pipe, como el shell del kernel — README §6). Prepara y lanza cada etapa
-/// incrementalmente con la MISMA disciplina de fds que la versión de 2 etapas: el
-/// write-end de cada pipe sale de ESTA tabla (lo reasigna el `dup2` de la etapa siguiente)
-/// antes de lanzar la etapa que lo lee, así ninguna etapa hereda un escritor del pipe que
-/// va a leer y se cuelga esperando un EOF que no llega.
-fn run_pipeline_n(buf: &mut [u8], stages: &[(usize, usize)]) {
+/// Unified executor for single commands and multi-stage pipelines (`1..=MAX_STAGES`).
+fn run_stages(buf: &mut [u8], stages: &[(usize, usize)], is_bg: bool) {
     let n = stages.len();
     let saved_out = dup2(1, 10) as i32;
     let saved_in = dup2(0, 11) as i32;
+    let saved_err = dup2(2, 13) as i32;
 
-    let mut prev_read = -1i32; // read-end del pipe anterior = stdin de esta etapa
+    let mut prev_read = -1i32;
+    let mut pids = [-1i32; MAX_STAGES];
     let mut nspawned = 0usize;
+    let mut leader_pgid = 0u32;
 
     for i in 0..n {
         let (a, b) = stages[i];
-        let (cmd, redir) = parse_redirect(buf, a, b);
+        let mut clean = [0u8; LINE + 1];
+        clean[a..b].copy_from_slice(&buf[a..b]);
+        let spec = extract_redirs(buf, &mut clean, a, b);
 
-        let mut rfd = -1i32;
-        if let Some((ts, te, append)) = redir {
-            let fd = redir_open(buf, ts, te, append);
-            if fd >= 0 {
-                rfd = fd as i32;
+        let mut in_rfd = -1i32;
+        let mut out_rfd = -1i32;
+        let mut err_rfd = -1i32;
+        let mut redir_fail = false;
+
+        if let Some((ts, te)) = spec.stdin {
+            in_rfd = open_redir(buf, ts, te, O_RDONLY);
+            if in_rfd < 0 {
+                redir_fail = true;
             }
+        }
+        if !redir_fail {
+            if let Some((ts, te, app)) = spec.stdout {
+                let fl = O_WRONLY | O_CREATE | if app { O_APPEND } else { O_TRUNC };
+                out_rfd = open_redir(buf, ts, te, fl);
+                if out_rfd < 0 {
+                    redir_fail = true;
+                }
+            }
+        }
+        if !redir_fail {
+            if let Some((ts, te, app)) = spec.stderr {
+                let fl = O_WRONLY | O_CREATE | if app { O_APPEND } else { O_TRUNC };
+                err_rfd = open_redir(buf, ts, te, fl);
+                if err_rfd < 0 {
+                    redir_fail = true;
+                }
+            }
+        }
+        if redir_fail {
+            putln(b"sh: cannot open redirection target");
+            if in_rfd >= 0 { close(in_rfd); }
+            if out_rfd >= 0 { close(out_rfd); }
+            if err_rfd >= 0 { close(err_rfd); }
+            set_status(1);
+            break;
         }
 
         let mut argv = [core::ptr::null(); MAX_ARGV];
-        let mut path_buf = [0u8; LINE + 8];
-        let path = match prepare(buf, cmd, &mut argv, &mut path_buf) {
+        let mut path_buf = [0u8; PATH_MAX];
+        let path = match prepare(&mut clean, (a, b), &mut argv, &mut path_buf) {
             Some(p) => p,
             None => {
-                if rfd >= 0 {
-                    close(rfd);
-                }
+                if in_rfd >= 0 { close(in_rfd); }
+                if out_rfd >= 0 { close(out_rfd); }
+                if err_rfd >= 0 { close(err_rfd); }
                 break;
             }
         };
 
-        // Pipe hacia la siguiente etapa (salvo la última).
         let mut next_read = -1i32;
         let mut this_write = -1i32;
         if i + 1 < n {
             let mut pp = [0i32; 2];
             if pipe(&mut pp) < 0 {
-                println!("sh: pipe error");
-                if rfd >= 0 {
-                    close(rfd);
-                }
+                putln(b"sh: pipe error");
+                if in_rfd >= 0 { close(in_rfd); }
+                if out_rfd >= 0 { close(out_rfd); }
+                if err_rfd >= 0 { close(err_rfd); }
                 break;
             }
             next_read = pp[0];
             this_write = pp[1];
         }
 
-        // stdin de esta etapa: del pipe anterior, o el stdin original en la primera.
-        if prev_read >= 0 {
-            dup2(prev_read, 0);
+        let _ = dup2(if in_rfd >= 0 { in_rfd } else if prev_read >= 0 { prev_read } else { saved_in }, 0);
+        let _ = dup2(if out_rfd >= 0 { out_rfd } else if this_write >= 0 { this_write } else { saved_out }, 1);
+        if err_rfd >= 0 {
+            let _ = dup2(err_rfd, 2);
+        } else if spec.err_to_out {
+            let _ = dup2(1, 2);
         } else {
-            dup2(saved_in, 0);
-        }
-        // stdout: redirección propia (gana) > pipe siguiente > stdout original.
-        if rfd >= 0 {
-            dup2(rfd, 1);
-        } else if this_write >= 0 {
-            dup2(this_write, 1);
-        } else {
-            dup2(saved_out, 1);
+            let _ = dup2(saved_err, 2);
         }
 
         let pid = spawn(path, argv.as_ptr());
         if pid >= 0 {
+            let upid = pid as u32;
+            if leader_pgid == 0 {
+                leader_pgid = upid;
+            }
+            let _ = setpgid(upid, leader_pgid);
+            pids[nspawned] = pid as i32;
             nspawned += 1;
+        } else {
+            puts(b"Error executing: ");
+            putln(path.as_bytes());
         }
 
-        // El hijo ya clonó la tabla; suelta en ESTA los fds que no necesita.
-        if rfd >= 0 {
-            close(rfd);
-        }
-        if prev_read >= 0 {
-            close(prev_read);
-        }
-        if this_write >= 0 {
-            close(this_write);
-        }
+        if in_rfd >= 0 { close(in_rfd); }
+        if out_rfd >= 0 { close(out_rfd); }
+        if err_rfd >= 0 { close(err_rfd); }
+        if prev_read >= 0 { close(prev_read); }
+        if this_write >= 0 { close(this_write); }
         prev_read = next_read;
     }
+
     if prev_read >= 0 {
         close(prev_read);
     }
 
-    // Restaura stdio y espera a las etapas lanzadas.
-    dup2(saved_out, 1);
-    dup2(saved_in, 0);
+    let _ = dup2(saved_out, 1);
+    let _ = dup2(saved_in, 0);
+    let _ = dup2(saved_err, 2);
     close(saved_out);
     close(saved_in);
-    for _ in 0..nspawned {
-        let mut status = 0;
-        let _ = wait(&mut status);
+    close(saved_err);
+
+    if nspawned == 0 {
+        set_status(127);
+        return;
     }
+
+    if is_bg {
+        puts(b"[1] ");
+        put_i32(pids[nspawned - 1]);
+        putln(b"");
+        set_status(0);
+        return;
+    }
+
+    if leader_pgid != 0 {
+        let _ = tcsetpgrp(leader_pgid);
+    }
+    let mut last_st = 0;
+    for k in 0..nspawned {
+        let mut status = 0;
+        let _ = waitpid(pids[k], &mut status, 0);
+        last_st = status;
+    }
+    let _ = tcsetpgrp(0);
+    set_status(last_st);
 }
 
 fn print_help() {
-    println!("EspressoOS userland shell -- built-in commands & features:");
-    println!("  help                 show this help message");
-    println!("  clear                clear the screen");
-    println!("  cd [PATH]            change working directory");
-    println!("  pwd                  print working directory");
-    println!("  sudo <cmd>           run command with root privilege shim");
-    println!("  exit                 exit the shell");
-    println!("  <cmd> ; <cmd>        run commands sequentially");
-    println!("  <cmd> &              run command in background");
-    println!("  <cmd> | <cmd>        pipe output across commands (up to 8 stages)");
-    println!("  <cmd> > <file>       redirect stdout to file (truncate)");
-    println!("  <cmd> >> <file>      redirect stdout to file (append)");
-    println!("  \"text\" / 'text'      quote-aware argument parsing");
-    println!("");
-    println!("Line Editing Shortcuts:");
-    println!("  Up / Down (Arrow)    navigate command history");
-    println!("  Left / Right (Arrow) move cursor left / right");
-    println!("  Home / End           jump to start / end of line");
-    println!("  Tab                  auto-complete command or path");
-    println!("  Ctrl+A / Ctrl+E      jump to start / end of line");
-    println!("  Ctrl+U / Ctrl+K      delete line before / after cursor");
-    println!("  Ctrl+W               delete word before cursor");
-    println!("  Ctrl+L               clear screen and redraw line");
-    println!("  Ctrl+C               abort current draft line");
-    println!("  Ctrl+D               exit shell (on empty line)");
-    println!("");
-    println!("Programs in /bin (run by name, e.g. 'ls' or '/bin/ls'):");
-    let mut buf = [0u8; 1024];
-    let n = readdir("/bin", &mut buf);
-    if n < 0 {
-        println!("  (could not read /bin)");
+    putln(b"EspressoOS shell builtins: help clear cd pwd export unset source history exit");
+    putln(b"Operators: ;  &&  ||  &  |  <  >  >>  2>  2>&1  $VAR  $?  $$");
+    putln(b"Programs in /bin:");
+    let buf = unsafe { &mut *core::ptr::addr_of_mut!(DIR_BUF) };
+    let n = readdir("/bin", buf);
+    if n <= 0 {
         return;
     }
     let mut pos = 0;
     let limit = n as usize;
-    while pos < limit {
-        if pos + 11 > limit {
-            break;
-        }
-        let name_len = u16::from_le_bytes([buf[pos + 9], buf[pos + 10]]) as usize;
+    let mut col = 0usize;
+    while pos + 11 <= limit {
+        let nl = u16::from_le_bytes([buf[pos + 9], buf[pos + 10]]) as usize;
         pos += 11;
-        if pos + name_len > limit {
+        if pos + nl > limit {
             break;
         }
-        if let Ok(name) = core::str::from_utf8(&buf[pos..pos + name_len]) {
-            println!("  {}", name);
+        let name = &buf[pos..pos + nl];
+        if name != b"." && name != b".." {
+            puts(b"  ");
+            puts(name);
+            let pad = 12usize.saturating_sub(nl);
+            for _ in 0..pad {
+                puts(b" ");
+            }
+            col += 1;
+            if col == 5 {
+                putln(b"");
+                col = 0;
+            }
         }
-        pos += name_len;
+        pos += nl;
+    }
+    if col != 0 {
+        putln(b"");
     }
 }
 
-/// Where to look for `cmd`: /bin if it is a bare name, otherwise wherever it says.
-///
-/// This is PATH search and nothing else. The /bin prefix must stay -- `ls` means the
-/// program, and dropping it because "the VFS resolves paths now" would send `ls` after
-/// a `cd /tmp` looking for /tmp/ls. But it applies only to a bare NAME.
-///
-/// The test is `contains('/')`, not `starts_with('/')`, which is what the kernel shell
-/// has always used. With starts_with, `./hello` was not absolute, so it got the prefix:
-/// "/bin/./hello", which normalize collapses to "/bin/hello". Typing ./hello in /tmp
-/// ran a different program with the same name and said nothing, or reported "not found"
-/// about a path never typed. /tmp/hello was never consulted.
 fn resolve_path<'a>(cmd: &str, out_buf: &'a mut [u8]) -> &'a str {
-    let cmd = cmd.trim();
-    if cmd.is_empty() {
+    let cb = cmd.as_bytes();
+    let (s, e) = trim(cb, 0, cb.len());
+    let cb = &cb[s..e];
+    if cb.is_empty() {
         return "";
     }
-    if cmd.contains('/') {
-        let cmd_bytes = cmd.as_bytes();
-        if cmd_bytes.len() < out_buf.len() {
-            out_buf[..cmd_bytes.len()].copy_from_slice(cmd_bytes);
-            core::str::from_utf8(&out_buf[..cmd_bytes.len()]).unwrap_or("")
+    if rfind_slash(cb).is_some() {
+        if cb.len() < out_buf.len() {
+            out_buf[..cb.len()].copy_from_slice(cb);
+            ascii_str(&out_buf[..cb.len()]).unwrap_or("")
         } else {
             ""
         }
     } else {
-        let prefix = b"/bin/";
-        let cmd_bytes = cmd.as_bytes();
-        if prefix.len() + cmd_bytes.len() < out_buf.len() {
-            out_buf[..prefix.len()].copy_from_slice(prefix);
-            out_buf[prefix.len()..prefix.len() + cmd_bytes.len()].copy_from_slice(cmd_bytes);
-            core::str::from_utf8(&out_buf[..prefix.len() + cmd_bytes.len()]).unwrap_or("")
+        let p = b"/bin/";
+        if p.len() + cb.len() < out_buf.len() {
+            out_buf[..p.len()].copy_from_slice(p);
+            out_buf[p.len()..p.len() + cb.len()].copy_from_slice(cb);
+            ascii_str(&out_buf[..p.len() + cb.len()]).unwrap_or("")
         } else {
             ""
         }

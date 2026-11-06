@@ -5,7 +5,9 @@ mod wire;
 use crate::arch::xtensa::sync::Mutex;
 use crate::drivers::flash;
 use crate::prelude::*;
-use crate::vfs::inode::{DirEntry, FileSystem, FsStat, Inode, InodeKind};
+use crate::vfs::inode::{
+    default_mode, kind_code, DirEntry, FileSystem, FsStat, Inode, InodeKind, StatMeta,
+};
 use alloc::collections::BTreeMap;
 
 use wire::*;
@@ -53,10 +55,14 @@ struct FileData {
 enum Body {
     Dir(BTreeMap<String, u32>),
     File(FileData),
+    Symlink(String),
 }
 
 struct Node {
     kind: InodeKind,
+    mode: u16,
+    uid: u16,
+    gid: u16,
     body: Body,
 }
 
@@ -64,6 +70,7 @@ impl Node {
     fn size_of(&self) -> u64 {
         match &self.body {
             Body::File(f) => f.size as u64,
+            Body::Symlink(s) => s.len() as u64,
             Body::Dir(_) => 0,
         }
     }
@@ -93,6 +100,9 @@ impl FsState {
             ROOT_INO,
             Node {
                 kind: InodeKind::Dir,
+                mode: 0o0755,
+                uid: 0,
+                gid: 0,
                 body: Body::Dir(BTreeMap::new()),
             },
         );
@@ -116,7 +126,16 @@ impl FsState {
                 extents: Vec::new(),
             }),
         };
-        self.nodes.insert(ino, Node { kind, body });
+        self.nodes.insert(
+            ino,
+            Node {
+                kind,
+                mode: default_mode(kind),
+                uid: 0,
+                gid: 0,
+                body,
+            },
+        );
         if let Some(Node {
             body: Body::Dir(m), ..
         }) = self.nodes.get_mut(&parent)
@@ -125,6 +144,58 @@ impl FsState {
         }
         if ino >= self.next_ino {
             self.next_ino = ino + 1;
+        }
+    }
+
+    fn apply_symlink(&mut self, ino: u32, parent: u32, name: &str, target: &str) {
+        self.nodes.insert(
+            ino,
+            Node {
+                kind: InodeKind::Symlink,
+                mode: 0o0777,
+                uid: 0,
+                gid: 0,
+                body: Body::Symlink(String::from(target)),
+            },
+        );
+        if let Some(Node {
+            body: Body::Dir(m), ..
+        }) = self.nodes.get_mut(&parent)
+        {
+            m.insert(String::from(name), ino);
+        }
+        if ino >= self.next_ino {
+            self.next_ino = ino + 1;
+        }
+    }
+
+    fn apply_setattr(&mut self, ino: u32, mode: u16, uid: u16, gid: u16) {
+        if let Some(node) = self.nodes.get_mut(&ino) {
+            node.mode = mode;
+            node.uid = uid;
+            node.gid = gid;
+        }
+    }
+
+    fn apply_rename(&mut self, old_parent: u32, new_parent: u32, old_name: &str, new_name: &str) {
+        let moved_ino = match self.nodes.get_mut(&old_parent) {
+            Some(Node {
+                body: Body::Dir(m), ..
+            }) => m.remove(old_name),
+            _ => None,
+        };
+        if let Some(ino) = moved_ino {
+            let replaced = match self.nodes.get_mut(&new_parent) {
+                Some(Node {
+                    body: Body::Dir(m), ..
+                }) => m.insert(String::from(new_name), ino),
+                _ => None,
+            };
+            if let Some(old_dst_ino) = replaced {
+                if old_dst_ino != ino {
+                    self.nodes.remove(&old_dst_ino);
+                }
+            }
         }
     }
 
@@ -189,6 +260,7 @@ impl FsState {
         let f = match &node.body {
             Body::File(f) => f,
             Body::Dir(_) => return Err(KError::IsADirectory),
+            Body::Symlink(_) => return Err(KError::InvalidArgument),
         };
         let off = match u32::try_from(off) {
             Ok(v) => v,
@@ -241,7 +313,114 @@ impl FsState {
         let payload = enc_mk(ino, parent, name.as_bytes());
         self.append(rtype, &payload)?;
         self.apply_mk(kind, ino, parent, name);
+        let (uid, gid) = crate::scheduler::process::caller_creds();
+        if uid != 0 || gid != 0 {
+            let mode = default_mode(kind);
+            let ap = enc_setattr(ino, mode, uid, gid);
+            let _ = self.append(RecType::SetAttr, &ap);
+            self.apply_setattr(ino, mode, uid, gid);
+        }
         Ok(ino)
+    }
+
+    fn create_symlink(&mut self, parent: u32, name: &str, target: &str) -> KResult<u32> {
+        match self.nodes.get(&parent) {
+            Some(Node {
+                body: Body::Dir(m), ..
+            }) => {
+                if m.contains_key(name) {
+                    return Err(KError::AlreadyExists);
+                }
+            }
+            Some(_) => return Err(KError::NotADirectory),
+            None => return Err(KError::NotFound),
+        }
+        if name.is_empty() || name.len() > MAX_NAME || target.is_empty() || target.len() > MAX_NAME
+        {
+            return Err(KError::NameTooLong);
+        }
+        let ino = self.next_ino;
+        let payload = enc_symlink(ino, parent, name.as_bytes(), target.as_bytes());
+        self.append(RecType::MkSymlink, &payload)?;
+        self.apply_symlink(ino, parent, name, target);
+        Ok(ino)
+    }
+
+    fn set_mode(&mut self, ino: u32, mode: u16) -> KResult<()> {
+        let (uid, gid) = match self.nodes.get(&ino) {
+            Some(n) => (n.uid, n.gid),
+            None => return Err(KError::NotFound),
+        };
+        let m = mode & 0o7777;
+        let payload = enc_setattr(ino, m, uid, gid);
+        self.append(RecType::SetAttr, &payload)?;
+        self.apply_setattr(ino, m, uid, gid);
+        Ok(())
+    }
+
+    fn set_owner(&mut self, ino: u32, uid: Option<u16>, gid: Option<u16>) -> KResult<()> {
+        let (mode, cur_u, cur_g) = match self.nodes.get(&ino) {
+            Some(n) => (n.mode, n.uid, n.gid),
+            None => return Err(KError::NotFound),
+        };
+        let nu = uid.unwrap_or(cur_u);
+        let ng = gid.unwrap_or(cur_g);
+        let payload = enc_setattr(ino, mode, nu, ng);
+        self.append(RecType::SetAttr, &payload)?;
+        self.apply_setattr(ino, mode, nu, ng);
+        Ok(())
+    }
+
+    fn readlink(&self, ino: u32) -> KResult<String> {
+        let node = self.nodes.get(&ino).ok_or(KError::NotFound)?;
+        match &node.body {
+            Body::Symlink(t) => Ok(t.clone()),
+            _ => Err(KError::InvalidArgument),
+        }
+    }
+
+    fn walk_parent(&self, rel: &str) -> KResult<(u32, String)> {
+        let comps: Vec<&str> = rel.split('/').filter(|s| !s.is_empty()).collect();
+        if comps.is_empty() {
+            return Err(KError::InvalidArgument);
+        }
+        let mut cur = ROOT_INO;
+        for &c in &comps[..comps.len() - 1] {
+            cur = self.lookup(cur, c)?;
+        }
+        Ok((cur, String::from(comps[comps.len() - 1])))
+    }
+
+    fn rename_rel(&mut self, old_rel: &str, new_rel: &str) -> KResult<()> {
+        if old_rel == new_rel {
+            return Ok(());
+        }
+        let (old_parent, old_name) = self.walk_parent(old_rel)?;
+        let (new_parent, new_name) = self.walk_parent(new_rel)?;
+        if new_name.is_empty() || new_name.len() > MAX_NAME {
+            return Err(KError::NameTooLong);
+        }
+        let _src_ino = self.lookup(old_parent, &old_name)?;
+        if let Ok(dst_ino) = self.lookup(new_parent, &new_name) {
+            if let Some(Node {
+                body: Body::Dir(sub),
+                ..
+            }) = self.nodes.get(&dst_ino)
+            {
+                if !sub.is_empty() {
+                    return Err(KError::Busy);
+                }
+            }
+        }
+        let payload = enc_rename(
+            old_parent,
+            new_parent,
+            old_name.as_bytes(),
+            new_name.as_bytes(),
+        );
+        self.append(RecType::Rename, &payload)?;
+        self.apply_rename(old_parent, new_parent, &old_name, &new_name);
+        Ok(())
     }
 
     fn write_file(&mut self, ino: u32, off: u64, buf: &[u8]) -> KResult<usize> {
@@ -283,24 +462,42 @@ impl FsState {
     }
 
     fn unlink(&mut self, parent: u32, name: &str) -> KResult<()> {
-        let child = match self.nodes.get(&parent) {
+        let (dir_mode, dir_uid, child) = match self.nodes.get(&parent) {
             Some(Node {
-                body: Body::Dir(m), ..
-            }) => m.get(name).copied(),
+                mode,
+                uid,
+                body: Body::Dir(m),
+                ..
+            }) => (*mode, *uid, m.get(name).copied()),
             Some(_) => return Err(KError::NotADirectory),
             None => return Err(KError::NotFound),
         };
         let ci = child.ok_or(KError::NotFound)?;
 
-        if let Some(Node {
-            body: Body::Dir(sub),
-            ..
-        }) = self.nodes.get(&ci)
-        {
-            if !sub.is_empty() {
-                return Err(KError::Busy);
+        let child_uid = match self.nodes.get(&ci) {
+            Some(Node {
+                uid,
+                body: Body::Dir(sub),
+                ..
+            }) => {
+                if !sub.is_empty() {
+                    return Err(KError::Busy);
+                }
+                *uid
             }
+            Some(n) => n.uid,
+            None => 0,
+        };
+
+        let (caller_uid, _) = crate::scheduler::process::caller_creds();
+        if (dir_mode & 0o1000) != 0
+            && caller_uid != 0
+            && caller_uid != dir_uid
+            && caller_uid != child_uid
+        {
+            return Err(KError::PermissionDenied);
         }
+
         let payload = enc_unlink(parent, name.as_bytes());
         self.append(RecType::Unlink, &payload)?;
         self.apply_unlink(parent, name);
@@ -325,7 +522,7 @@ impl FsState {
                 }
                 None => Ok(None),
             },
-            Body::File(_) => Err(KError::NotADirectory),
+            Body::File(_) | Body::Symlink(_) => Err(KError::NotADirectory),
         }
     }
 
@@ -333,7 +530,7 @@ impl FsState {
         let node = self.nodes.get(&ino).ok_or(KError::NotFound)?;
         match &node.body {
             Body::Dir(m) => m.get(name).copied().ok_or(KError::NotFound),
-            Body::File(_) => Err(KError::NotADirectory),
+            Body::File(_) | Body::Symlink(_) => Err(KError::NotADirectory),
         }
     }
 
@@ -388,19 +585,44 @@ impl FsState {
         let mut new_ext: BTreeMap<u32, Vec<Extent>> = BTreeMap::new();
 
         for (ino, parent, name, kind) in &plan {
-            let rtype = if *kind == InodeKind::Dir {
-                RecType::MkDir
+            let rec = if *kind == InodeKind::Symlink {
+                let target = match self.nodes.get(ino) {
+                    Some(Node {
+                        body: Body::Symlink(t),
+                        ..
+                    }) => t.as_bytes(),
+                    _ => b"",
+                };
+                let payload = enc_symlink(*ino, *parent, name.as_bytes(), target);
+                encode_record(RecType::MkSymlink, seq, &payload)
             } else {
-                RecType::MkFile
+                let rtype = if *kind == InodeKind::Dir {
+                    RecType::MkDir
+                } else {
+                    RecType::MkFile
+                };
+                let payload = enc_mk(*ino, *parent, name.as_bytes());
+                encode_record(rtype, seq, &payload)
             };
-            let payload = enc_mk(*ino, *parent, name.as_bytes());
-            let rec = encode_record(rtype, seq, &payload);
             if cur + rec.len() as u32 > dend {
                 return Err(KError::NoSpace);
             }
             flash::write(cur, &rec)?;
             cur += rec.len() as u32;
             seq += 1;
+
+            if let Some(n) = self.nodes.get(ino) {
+                if n.mode != default_mode(*kind) || n.uid != 0 || n.gid != 0 {
+                    let ap = enc_setattr(*ino, n.mode, n.uid, n.gid);
+                    let arec = encode_record(RecType::SetAttr, seq, &ap);
+                    if cur + arec.len() as u32 > dend {
+                        return Err(KError::NoSpace);
+                    }
+                    flash::write(cur, &arec)?;
+                    cur += arec.len() as u32;
+                    seq += 1;
+                }
+            }
 
             if *kind == InodeKind::File {
                 let size = self.nodes.get(ino).map(|n| n.size_of() as u32).unwrap_or(0);
@@ -608,6 +830,41 @@ impl FsState {
                         }
                     }
                 }
+                RecType::MkSymlink => {
+                    let mut p = zeroed(plen);
+                    if flash::read(payload_off, &mut p).is_err() {
+                        break;
+                    }
+                    if let Some((ino, parent, name, target)) = dec_symlink(&p) {
+                        if let (Ok(name), Ok(target)) =
+                            (core::str::from_utf8(name), core::str::from_utf8(target))
+                        {
+                            self.apply_symlink(ino, parent, name, target);
+                        }
+                    }
+                }
+                RecType::SetAttr => {
+                    let mut p = zeroed(plen);
+                    if flash::read(payload_off, &mut p).is_err() {
+                        break;
+                    }
+                    if let Some((ino, mode, uid, gid)) = dec_setattr(&p) {
+                        self.apply_setattr(ino, mode, uid, gid);
+                    }
+                }
+                RecType::Rename => {
+                    let mut p = zeroed(plen);
+                    if flash::read(payload_off, &mut p).is_err() {
+                        break;
+                    }
+                    if let Some((old_p, new_p, old_n, new_n)) = dec_rename(&p) {
+                        if let (Ok(old_s), Ok(new_s)) =
+                            (core::str::from_utf8(old_n), core::str::from_utf8(new_n))
+                        {
+                            self.apply_rename(old_p, new_p, old_s, new_s);
+                        }
+                    }
+                }
             }
             if h.seq >= self.next_seq {
                 self.next_seq = h.seq + 1;
@@ -726,6 +983,47 @@ impl EspFsInner {
             .map(|n| n.size_of())
             .unwrap_or(0)
     }
+    fn meta(&self, ino: u32) -> StatMeta {
+        let st = self.state.lock();
+        if let Some(n) = st.nodes.get(&ino) {
+            StatMeta {
+                ino: ino as u64,
+                size: n.size_of(),
+                mode: n.mode,
+                kind: kind_code(n.kind),
+                nlink: if n.kind == InodeKind::Dir { 2 } else { 1 },
+                uid: n.uid,
+                gid: n.gid,
+                mtime: 0,
+            }
+        } else {
+            StatMeta {
+                ino: ino as u64,
+                size: 0,
+                mode: 0o0644,
+                kind: 1,
+                nlink: 1,
+                uid: 0,
+                gid: 0,
+                mtime: 0,
+            }
+        }
+    }
+    fn readlink(&self, ino: u32) -> KResult<String> {
+        self.state.lock().readlink(ino)
+    }
+    fn create_symlink(&self, parent: u32, name: &str, target: &str) -> KResult<u32> {
+        self.state.lock().create_symlink(parent, name, target)
+    }
+    fn set_mode(&self, ino: u32, mode: u16) -> KResult<()> {
+        self.state.lock().set_mode(ino, mode)
+    }
+    fn set_owner(&self, ino: u32, uid: Option<u16>, gid: Option<u16>) -> KResult<()> {
+        self.state.lock().set_owner(ino, uid, gid)
+    }
+    fn rename_rel(&self, old_rel: &str, new_rel: &str) -> KResult<()> {
+        self.state.lock().rename_rel(old_rel, new_rel)
+    }
     fn read_at(&self, ino: u32, off: u64, buf: &mut [u8]) -> KResult<usize> {
         self.state.lock().read_file(ino, off, buf)
     }
@@ -771,8 +1069,27 @@ impl Inode for EspNode {
     fn kind(&self) -> InodeKind {
         self.inner.kind(self.ino)
     }
+    fn inode_key(&self) -> (usize, u64) {
+        (Arc::as_ptr(&self.inner) as usize, self.ino as u64)
+    }
     fn size(&self) -> u64 {
         self.inner.size(self.ino)
+    }
+    fn meta(&self) -> StatMeta {
+        self.inner.meta(self.ino)
+    }
+    fn readlink(&self) -> KResult<String> {
+        self.inner.readlink(self.ino)
+    }
+    fn create_symlink(&self, name: &str, target: &str) -> KResult<Arc<dyn Inode>> {
+        let cino = self.inner.create_symlink(self.ino, name, target)?;
+        Ok(EspNode::make(self.inner.clone(), cino))
+    }
+    fn set_mode(&self, mode: u16) -> KResult<()> {
+        self.inner.set_mode(self.ino, mode)
+    }
+    fn set_owner(&self, uid: Option<u16>, gid: Option<u16>) -> KResult<()> {
+        self.inner.set_owner(self.ino, uid, gid)
     }
     fn read_at(&self, off: u64, buf: &mut [u8]) -> KResult<usize> {
         self.inner.read_at(self.ino, off, buf)
@@ -847,5 +1164,8 @@ impl FileSystem for EspFs {
             used_bytes: self.inner.used_bytes(),
             block_size: SEC,
         }
+    }
+    fn rename(&self, old_rel: &str, new_rel: &str) -> KResult<()> {
+        self.inner.rename_rel(old_rel, new_rel)
     }
 }

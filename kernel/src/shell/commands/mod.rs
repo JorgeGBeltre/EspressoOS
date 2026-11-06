@@ -1352,5 +1352,6 @@ fn err_str(e: KError) -> &'static str {
         KError::Timeout => "timed out",
         KError::Fault => "invalid address",
         KError::TableFull => "table full",
+        KError::Interrupted => "interrupted",
     }
 }

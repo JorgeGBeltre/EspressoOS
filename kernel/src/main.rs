@@ -8,6 +8,7 @@ extern crate alloc;
 mod arch;
 mod drivers;
 mod fs;
+mod klog;
 mod mm;
 mod ota;
 mod prelude;
@@ -186,16 +187,39 @@ fn main() -> ! {
     }
 
     let _ = vfs::mkdir("/run/lock");
+    let _ = vfs::mkdir("/run/systemd");
     let _ = vfs::mkdir("/root");
     let _ = vfs::mkdir("/sbin");
     let _ = vfs::mkdir("/var");
-    let _ = vfs::mkdir("/var/run");
-    let _ = vfs::mkdir("/var/lock");
+    let _ = vfs::mkdir("/var/tmp");
     let _ = vfs::mkdir("/var/log");
     let _ = vfs::mkdir("/var/lib");
     let _ = vfs::mkdir("/home");
     let _ = vfs::mkdir("/mnt");
     let _ = vfs::mkdir("/etc/services.d");
+
+    // LFS 13.1 §7.5 directory modes & canonical symlinks (/var/run -> /run, /var/lock -> /run/lock)
+    let _ = vfs::chmod("/tmp", 0o1777);
+    let _ = vfs::chmod("/var/tmp", 0o1777);
+    let _ = vfs::chmod("/root", 0o0750);
+
+    if let Ok(meta) = vfs::lstat("/var/run") {
+        if meta.kind != 4 {
+            let _ = vfs::unlink("/var/run");
+        }
+    }
+    let _ = vfs::symlink("/run", "/var/run");
+
+    if let Ok(meta) = vfs::lstat("/var/lock") {
+        if meta.kind != 4 {
+            let _ = vfs::unlink("/var/lock");
+        }
+    }
+    let _ = vfs::symlink("/run/lock", "/var/lock");
+
+    klog::log_msg("EspressoOS 0.2.0-dev (xtensa-esp32s3-none-elf) kernel initialized");
+    klog::log_msg("Memory: 128 KB SRAM heap + 8 MB Octal PSRAM (32 x 32 KB PSRAM-Exec slots)");
+    klog::log_msg("VFS: mounted devfs, espfs (/), ramfs (/tmp, /run, /mnt), procfs, sysfs");
 
     install_userland();
 
@@ -234,11 +258,13 @@ fn main() -> ! {
     ) {
         Ok(tid) => {
             let pid = scheduler::process::register_process("init-sup", tid, false, None);
+            scheduler::process::set_process_session(pid, uart_chan.id);
             if let Err(e) = vfs::seed_fd_table(pid, session::SessionConsole::new(uart_chan)) {
                 println!("[kernel] warning: could not seed supervisor fd table: {:?}", e);
             }
             scheduler::unblock_task(tid);
             println!("[kernel] task 'init-sup' created (tid={}, pid={})", tid, pid);
+            klog::log_msg("Process: init-sup registered as PID 1 with console session 0");
         }
         Err(e) => println!("[kernel] ERROR: could not create init supervisor: {:?}", e),
     }
@@ -337,6 +363,7 @@ fn heartbeat_task(_arg: usize) {
 fn sleep_ms(ms: u64) {
     let inicio = arch::xtensa::timer::uptime_ms();
     while arch::xtensa::timer::uptime_ms().saturating_sub(inicio) < ms {
+        session::poll_uart_signals();
         scheduler::yield_now();
     }
 }
@@ -665,17 +692,69 @@ fn init_etc_files() {
         }
     }
 
-    if vfs::mount::resolve("/etc/mtab").is_err() {
-        if let Ok(fd) = vfs::open(
-            "/etc/mtab",
-            vfs::OpenFlags(
-                vfs::OpenFlags::CREATE.0 | vfs::OpenFlags::WRONLY.0 | vfs::OpenFlags::TRUNC.0,
-            ),
-        ) {
-            let _ = vfs::write(fd, b"/proc/mounts\n");
-            let _ = vfs::close(fd);
+    // LFS 13.1 §7.6: /etc/mtab -> /proc/self/mounts symbolic link
+    if let Ok(meta) = vfs::lstat("/etc/mtab") {
+        if meta.kind != 4 {
+            let _ = vfs::unlink("/etc/mtab");
         }
     }
+    let _ = vfs::symlink("/proc/self/mounts", "/etc/mtab");
+
+    let seed_if_missing = |path: &str, content: &[u8]| {
+        if vfs::mount::resolve(path).is_err() {
+            if let Ok(fd) = vfs::open(
+                path,
+                vfs::OpenFlags(
+                    vfs::OpenFlags::CREATE.0 | vfs::OpenFlags::WRONLY.0 | vfs::OpenFlags::TRUNC.0,
+                ),
+            ) {
+                let _ = vfs::write(fd, content);
+                let _ = vfs::close(fd);
+            }
+        }
+    };
+
+    seed_if_missing(
+        "/etc/nsswitch.conf",
+        b"# /etc/nsswitch.conf (LFS 13.1)\npasswd: files\ngroup: files\nhosts: files dns\n",
+    );
+    seed_if_missing(
+        "/etc/locale.conf",
+        b"LANG=C.UTF-8\n",
+    );
+    seed_if_missing(
+        "/etc/inputrc",
+        b"# /etc/inputrc (LFS 13.1)\nset horizontal-scroll-mode Off\nset meta-flag On\nset input-meta On\nset convert-meta Off\nset output-meta On\nset bell-style none\n",
+    );
+    seed_if_missing(
+        "/etc/network.conf",
+        b"# EspressoOS Network Configuration (/etc/network.conf)\nIFACE=wlan0\nMODE=dhcp\nHOSTNAME=esp32s3\n",
+    );
+    seed_if_missing(
+        "/etc/services.conf",
+        b"# Enabled Micro-Systemd units at boot (one unit per line)\nsyslog.service\n",
+    );
+
+    seed_if_missing(
+        "/etc/services.d/syslog.service",
+        b"[Unit]\nDescription=EspressoOS Kernel & System Logger\n\n[Service]\nType=oneshot\nExecStart=/bin/logger -t systemd boot-journal-online\nRestart=no\n\n[Install]\nWantedBy=multi-user.target\n",
+    );
+    seed_if_missing(
+        "/etc/services.d/cron.service",
+        b"[Unit]\nDescription=Periodic Command Scheduler\nAfter=syslog.service\nRequires=syslog.service\n\n[Service]\nExecStart=/bin/cron\nRestart=always\nRestartSec=5\n\n[Install]\nWantedBy=multi-user.target\n",
+    );
+    seed_if_missing(
+        "/etc/services.d/sntp.service",
+        b"[Unit]\nDescription=SNTP Clock Synchronization\nAfter=syslog.service\n\n[Service]\nType=oneshot\nExecStart=/bin/sntp\nRestart=no\n\n[Install]\nWantedBy=multi-user.target\n",
+    );
+    seed_if_missing(
+        "/etc/services.d/httpd.service",
+        b"[Unit]\nDescription=Embedded HTTP Server (:80)\nAfter=syslog.service\nRequires=syslog.service\n\n[Service]\nExecStart=/bin/httpd\nRestart=on-failure\nRestartSec=3\n\n[Install]\nWantedBy=multi-user.target\n",
+    );
+    seed_if_missing(
+        "/etc/services.d/ble.service",
+        b"[Unit]\nDescription=BLE Advertising Daemon\nAfter=syslog.service\n\n[Service]\nExecStart=/bin/ble adv on\nRestart=on-failure\nRestartSec=5\n\n[Install]\nWantedBy=multi-user.target\n",
+    );
 
     if vfs::mount::resolve("/var/log/messages").is_err() {
         if let Ok(fd) = vfs::open(

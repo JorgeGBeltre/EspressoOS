@@ -2,8 +2,11 @@
 
 use super::inode::Inode;
 use crate::prelude::*;
+use core::sync::atomic::{AtomicU32, Ordering};
 
 pub type Fd = i32;
+
+static NEXT_LOCK_OWNER: AtomicU32 = AtomicU32::new(1);
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct OpenFlags(pub u32);
@@ -20,6 +23,8 @@ impl OpenFlags {
     pub const APPEND: OpenFlags = OpenFlags(0x0200);
 
     pub const TRUNC: OpenFlags = OpenFlags(0x0400);
+
+    pub const EXCL: OpenFlags = OpenFlags(0x0800);
 
     pub const fn contains(self, f: OpenFlags) -> bool {
         (self.0 & f.0) == f.0
@@ -45,6 +50,8 @@ pub struct OpenFile {
     pub writable: bool,
 
     pub append: bool,
+
+    pub lock_owner: u32,
 }
 
 fn offset_add(base: u64, delta: i64) -> KResult<u64> {
@@ -76,6 +83,7 @@ impl OpenFile {
             readable,
             writable,
             append,
+            lock_owner: NEXT_LOCK_OWNER.fetch_add(1, Ordering::Relaxed),
         })
     }
 

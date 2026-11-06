@@ -1156,15 +1156,25 @@ fn sys_flock(args: &[usize]) -> isize {
 }
 
 fn sys_mount(args: &[usize]) -> isize {
-    let src = match unsafe { user_str(arg(args, 0), arg(args, 1)) } {
+    let raw = match unsafe { user_slice(arg(args, 0), core::mem::size_of::<[usize; 6]>()) } {
+        Ok(b) => b,
+        Err(e) => return e.as_errno(),
+    };
+    let mut words = [0usize; 6];
+    let step = core::mem::size_of::<usize>();
+    for (i, slot) in words.iter_mut().enumerate() {
+        let off = i * step;
+        *slot = usize::from_le_bytes([raw[off], raw[off + 1], raw[off + 2], raw[off + 3]]);
+    }
+    let src = match unsafe { user_str(words[0], words[1]) } {
         Ok(s) => s,
         Err(e) => return e.as_errno(),
     };
-    let target = match unsafe { user_str(arg(args, 2), arg(args, 3)) } {
+    let target = match unsafe { user_str(words[2], words[3]) } {
         Ok(s) => s,
         Err(e) => return e.as_errno(),
     };
-    let fstype = match unsafe { user_str(arg(args, 4), arg(args, 5)) } {
+    let fstype = match unsafe { user_str(words[4], words[5]) } {
         Ok(s) => s,
         Err(e) => return e.as_errno(),
     };

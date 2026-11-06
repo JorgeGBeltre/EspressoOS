@@ -376,8 +376,9 @@ impl FileSystem for RamFs {
 
     fn stat(&self) -> FsStat {
         let usado = RamFs::used_bytes(&self.root);
+        let libre = crate::mm::heap::stats().free as u64;
         FsStat {
-            total_bytes: usado,
+            total_bytes: libre.saturating_add(usado),
             used_bytes: usado,
             block_size: 1,
         }

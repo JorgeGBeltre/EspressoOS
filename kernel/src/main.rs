@@ -196,7 +196,17 @@ fn main() -> ! {
     let _ = vfs::mkdir("/var/lib");
     let _ = vfs::mkdir("/home");
     let _ = vfs::mkdir("/mnt");
+    let _ = vfs::mkdir("/mnt/lfs");
     let _ = vfs::mkdir("/etc/services.d");
+
+    match fs::littlefs::LittleFs::mount_default() {
+        Ok(lfs) => {
+            if let Err(e) = vfs::mount("/mnt/lfs", lfs) {
+                println!("[kernel] warning: mount /mnt/lfs failed: {:?}", e);
+            }
+        }
+        Err(e) => println!("[kernel] warning: LittleFs::mount_default failed: {:?}", e),
+    }
 
     // LFS 13.1 §7.5 directory modes & canonical symlinks (/var/run -> /run, /var/lock -> /run/lock)
     let _ = vfs::chmod("/tmp", 0o1777);
@@ -219,7 +229,7 @@ fn main() -> ! {
 
     klog::log_msg("EspressoOS 0.2.0-dev (xtensa-esp32s3-none-elf) kernel initialized");
     klog::log_msg("Memory: 128 KB SRAM heap + 8 MB Octal PSRAM (32 x 32 KB PSRAM-Exec slots)");
-    klog::log_msg("VFS: mounted devfs, espfs (/), ramfs (/tmp, /run, /mnt), procfs, sysfs");
+    klog::log_msg("VFS: mounted devfs, espfs (/), littlefs (/mnt/lfs), ramfs (/tmp, /run, /mnt), procfs, sysfs");
 
     install_userland();
 
@@ -686,7 +696,7 @@ fn init_etc_files() {
         ) {
             let _ = vfs::write(
                 fd,
-                b"# /etc/fstab: static file system information\nespfs   /       espfs   defaults 0 0\nramfs   /tmp    tmpfs   defaults 0 0\nramfs   /run    tmpfs   defaults 0 0\nprocfs  /proc   procfs  defaults 0 0\nsysfs   /sys    sysfs   defaults 0 0\ndevfs   /dev    devfs   defaults 0 0\n",
+                b"# /etc/fstab: static file system information\n/dev/flash0 /        espfs    defaults 0 0\n/dev/flash1 /mnt/lfs littlefs defaults 0 0\nramfs       /tmp     tmpfs    defaults 0 0\nramfs       /run     tmpfs    defaults 0 0\nprocfs      /proc    procfs   defaults 0 0\nsysfs       /sys     sysfs    defaults 0 0\ndevfs       /dev     devfs    defaults 0 0\n",
             );
             let _ = vfs::close(fd);
         }

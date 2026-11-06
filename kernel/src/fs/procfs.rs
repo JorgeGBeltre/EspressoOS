@@ -140,6 +140,9 @@ impl Inode for ProcFsRoot {
         if name == "misc" {
             return Ok(Arc::new(ProcFsFile::Misc));
         }
+        if name == "fsstat" {
+            return Ok(Arc::new(ProcFsFile::FsStat));
+        }
         if name == "self" {
             return Ok(Arc::new(ProcFsSelfLink));
         }
@@ -349,16 +352,30 @@ impl Inode for ProcFsRoot {
                 ino: 27,
             }));
         }
+        if index == 28 {
+            return Ok(Some(DirEntry {
+                name: "self".to_string(),
+                kind: InodeKind::Symlink,
+                ino: 28,
+            }));
+        }
+        if index == 29 {
+            return Ok(Some(DirEntry {
+                name: "fsstat".to_string(),
+                kind: InodeKind::File,
+                ino: 29,
+            }));
+        }
 
         let pids: Vec<u32> = {
             let pt = crate::scheduler::process::PROCESS_TABLE.lock();
             pt.table.keys().copied().collect()
         };
 
-        if index < 28 {
+        if index < 30 {
             return Ok(None);
         }
-        let pid_idx = index - 28;
+        let pid_idx = index - 30;
         if pid_idx < pids.len() {
             let pid = pids[pid_idx];
             return Ok(Some(DirEntry {
@@ -710,6 +727,7 @@ enum ProcFsFile {
     Modules,
     Swaps,
     Misc,
+    FsStat,
 }
 
 impl Inode for ProcFsFile {
@@ -817,6 +835,8 @@ type         : rng\n"
                 for (path, fs_name) in crate::vfs::mount::list_mounts() {
                     let dev = if fs_name == "espfs" {
                         "/dev/flash0"
+                    } else if fs_name == "littlefs" {
+                        "/dev/flash1"
                     } else if fs_name == "devfs" {
                         "devfs"
                     } else if fs_name == "procfs" {
@@ -1167,6 +1187,23 @@ ble0 16384 1 - Live 0x403aa000\n"
                      60 random\n\
                      61 urandom\n"
                 )
+            }
+            ProcFsFile::FsStat => {
+                let mut out = alloc::string::String::new();
+                for (path, fs_name, st) in crate::vfs::mount::list_mount_stats() {
+                    let dev = if fs_name == "espfs" {
+                        "/dev/flash0"
+                    } else if fs_name == "littlefs" {
+                        "/dev/flash1"
+                    } else {
+                        fs_name.as_str()
+                    };
+                    out.push_str(&alloc::format!(
+                        "{} {} {} {} {}\n",
+                        dev, fs_name, st.total_bytes, st.used_bytes, path
+                    ));
+                }
+                out
             }
         };
 

@@ -1,73 +1,111 @@
 #![no_std]
 #![no_main]
 
-use libc::{arg, close, open, print, println, readdir, seek};
+use libc::{arg, lstat, print, println, readlink, stat, StatBuf, PATH_MAX};
 
-const O_RDONLY: u32 = 1;
+fn mode_string(kind: u8, mode: u16, out: &mut [u8; 10]) {
+    out[0] = match kind {
+        2 => b'd',
+        3 => b'c',
+        4 => b'l',
+        5 => b'p',
+        _ => b'-',
+    };
+    out[1] = if mode & 0o400 != 0 { b'r' } else { b'-' };
+    out[2] = if mode & 0o200 != 0 { b'w' } else { b'-' };
+    out[3] = if mode & 0o100 != 0 { b'x' } else { b'-' };
+    out[4] = if mode & 0o040 != 0 { b'r' } else { b'-' };
+    out[5] = if mode & 0o020 != 0 { b'w' } else { b'-' };
+    out[6] = if mode & 0o010 != 0 { b'x' } else { b'-' };
+    out[7] = if mode & 0o004 != 0 { b'r' } else { b'-' };
+    out[8] = if mode & 0o002 != 0 { b'w' } else { b'-' };
+    out[9] = if mode & 0o1000 != 0 {
+        if mode & 0o001 != 0 { b't' } else { b'T' }
+    } else if mode & 0o001 != 0 {
+        b'x'
+    } else {
+        b'-'
+    };
+}
 
-fn print_dec(mut n: usize) {
-    if n == 0 {
-        print!("0");
-        return;
-    }
-    let mut buf = [0u8; 16];
-    let mut i = 0;
-    while n > 0 {
-        buf[i] = b'0' + (n % 10) as u8;
-        n /= 10;
-        i += 1;
-    }
-    while i > 0 {
-        i -= 1;
-        let s = core::slice::from_ref(&buf[i]);
-        if let Ok(c) = core::str::from_utf8(s) {
-            print!("{}", c);
-        }
+fn kind_name(kind: u8) -> &'static str {
+    match kind {
+        1 => "regular file",
+        2 => "directory",
+        3 => "character device",
+        4 => "symbolic link",
+        5 => "fifo",
+        _ => "unknown",
     }
 }
 
 #[no_mangle]
 pub extern "C" fn main(argc: i32, argv: *const *const u8) -> i32 {
-    if argc < 2 {
-        println!("Usage: stat <file_or_dir>");
+    let mut deref = false;
+    let mut files = [""; 8];
+    let mut fcount = 0usize;
+
+    let mut i = 1;
+    while i < argc {
+        let a = unsafe { arg(argv, i) };
+        if a == "-h" || a == "--help" {
+            println!("Usage: stat [-L] FILE...");
+            return 0;
+        } else if a == "-L" || a == "--dereference" {
+            deref = true;
+        } else if fcount < files.len() {
+            files[fcount] = a;
+            fcount += 1;
+        }
+        i += 1;
+    }
+
+    if fcount == 0 {
+        println!("Usage: stat [-L] FILE...");
         return 1;
     }
 
-    let path = unsafe { arg(argv, 1) };
-    let fd = open(path, O_RDONLY);
-
-    if fd >= 0 {
-        let size = seek(fd as i32, 0, 2);
-        close(fd as i32);
-
-        print!("  File: ");
-        println!("{}", path);
-        print!("  Size: ");
-        if size >= 0 {
-            print_dec(size as usize);
-            println!(" bytes");
-        } else {
-            println!("0 bytes (device/stream)");
+    let mut status = 0;
+    for k in 0..fcount {
+        let path = files[k];
+        let mut st = StatBuf::zeroed();
+        let rc = if deref { stat(path, &mut st) } else { lstat(path, &mut st) };
+        if rc < 0 {
+            println!("stat: cannot stat '{}': No such file or directory", path);
+            status = 1;
+            continue;
         }
-        if path.starts_with("/dev/") {
-            println!("  Type: character device");
-        } else if path.starts_with("/proc/") || path.starts_with("/sys/") {
-            println!("  Type: pseudo file");
+
+        if st.kind == 4 {
+            let mut lbuf = [0u8; PATH_MAX];
+            let n = readlink(path, &mut lbuf);
+            if n > 0 {
+                if let Ok(target) = core::str::from_utf8(&lbuf[..n as usize]) {
+                    println!("  File: {} -> {}", path, target);
+                } else {
+                    println!("  File: {}", path);
+                }
+            } else {
+                println!("  File: {}", path);
+            }
         } else {
-            println!("  Type: regular file");
+            println!("  File: {}", path);
         }
-        return 0;
-    }
 
-    // Try readdir to see if it is a directory
-    let mut dir_buf = [0u8; 256];
-    if readdir(path, &mut dir_buf) >= 0 {
-        print!("  File: ");
-        println!("{}", path);
-        println!("  Type: directory");
-        return 0;
-    }
+        println!(
+            "  Size: {:<10} Inode: {:<8} Links: {}  Type: {}",
+            st.size,
+            st.ino,
+            st.nlink,
+            kind_name(st.kind)
+        );
 
-    println!("stat: cannot stat '{}': No such file or directory", path);
-    1
+        let mut mstr = [0u8; 10];
+        mode_string(st.kind, st.mode, &mut mstr);
+        let sym = core::str::from_utf8(&mstr).unwrap_or("----------");
+        print!("Access: ({:04o}/{})  ", st.mode & 0o7777, sym);
+        println!("Uid: ({})   Gid: ({})", st.uid, st.gid);
+        println!("Modify: {} s", st.mtime);
+    }
+    status
 }

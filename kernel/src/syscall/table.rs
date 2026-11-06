@@ -66,6 +66,38 @@ pub enum Syscall {
     Getpgid = 30,
 
     Setpgid = 31,
+
+    Getpid = 32,
+
+    Getppid = 33,
+
+    Stat = 34,
+
+    Lstat = 35,
+
+    Symlink = 36,
+
+    Readlink = 37,
+
+    Rename = 38,
+
+    Chmod = 39,
+
+    Chown = 40,
+
+    Chroot = 41,
+
+    Flock = 42,
+
+    Mount = 43,
+
+    Umount = 44,
+
+    Tcsetpgrp = 45,
+
+    Getuid = 46,
+
+    Setuid = 47,
 }
 
 impl Syscall {
@@ -103,6 +135,22 @@ impl Syscall {
             29 => Syscall::Getcwd,
             30 => Syscall::Getpgid,
             31 => Syscall::Setpgid,
+            32 => Syscall::Getpid,
+            33 => Syscall::Getppid,
+            34 => Syscall::Stat,
+            35 => Syscall::Lstat,
+            36 => Syscall::Symlink,
+            37 => Syscall::Readlink,
+            38 => Syscall::Rename,
+            39 => Syscall::Chmod,
+            40 => Syscall::Chown,
+            41 => Syscall::Chroot,
+            42 => Syscall::Flock,
+            43 => Syscall::Mount,
+            44 => Syscall::Umount,
+            45 => Syscall::Tcsetpgrp,
+            46 => Syscall::Getuid,
+            47 => Syscall::Setuid,
             _ => return None,
         };
         Some(sc)

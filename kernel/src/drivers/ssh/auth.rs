@@ -65,6 +65,10 @@ fn hex_decode(s: &str) -> Option<Vec<u8>> {
 /// - `$s5$<salt-hex>$<hash-hex>` (legacy salted SHA-256)
 /// - bare plaintext (legacy fallback)
 fn verify_stored(field: &str, password: &[u8]) -> bool {
+    if field.is_empty() || field == "x" || field == "*" || field.starts_with('!') {
+        return false;
+    }
+
     if let Some(rest) = field.strip_prefix("$pbkdf2-sha256$i=") {
         let mut parts = rest.splitn(3, '$');
         let (iter_str, salt_hex, hash_hex) = match (parts.next(), parts.next(), parts.next()) {

@@ -140,6 +140,9 @@ impl Inode for ProcFsRoot {
         if name == "misc" {
             return Ok(Arc::new(ProcFsFile::Misc));
         }
+        if name == "self" {
+            return Ok(Arc::new(ProcFsSelfLink));
+        }
         if let Ok(pid) = name.parse::<u32>() {
             let pt = crate::scheduler::process::PROCESS_TABLE.lock();
             if pt.table.contains_key(&pid) {
@@ -394,32 +397,77 @@ impl Inode for ProcFsPidDir {
         if name == "status" {
             return Ok(Arc::new(ProcFsFile::PidStatus(self.pid)));
         }
+        if name == "stat" {
+            return Ok(Arc::new(ProcFsFile::PidStat(self.pid)));
+        }
+        if name == "cmdline" {
+            return Ok(Arc::new(ProcFsFile::PidCmdline(self.pid)));
+        }
+        if name == "mounts" {
+            return Ok(Arc::new(ProcFsFile::Mounts));
+        }
         Err(KError::NotFound)
     }
 
     fn readdir(&self, index: usize) -> KResult<Option<DirEntry>> {
-        if index == 0 {
-            return Ok(Some(DirEntry {
+        match index {
+            0 => Ok(Some(DirEntry {
                 name: ".".to_string(),
                 kind: InodeKind::Dir,
                 ino: (1000 + self.pid) as u64,
-            }));
-        }
-        if index == 1 {
-            return Ok(Some(DirEntry {
+            })),
+            1 => Ok(Some(DirEntry {
                 name: "..".to_string(),
                 kind: InodeKind::Dir,
                 ino: 1,
-            }));
-        }
-        if index == 2 {
-            return Ok(Some(DirEntry {
+            })),
+            2 => Ok(Some(DirEntry {
                 name: "status".to_string(),
                 kind: InodeKind::File,
                 ino: (2000 + self.pid) as u64,
-            }));
+            })),
+            3 => Ok(Some(DirEntry {
+                name: "stat".to_string(),
+                kind: InodeKind::File,
+                ino: (3000 + self.pid) as u64,
+            })),
+            4 => Ok(Some(DirEntry {
+                name: "cmdline".to_string(),
+                kind: InodeKind::File,
+                ino: (4000 + self.pid) as u64,
+            })),
+            5 => Ok(Some(DirEntry {
+                name: "mounts".to_string(),
+                kind: InodeKind::File,
+                ino: (5000 + self.pid) as u64,
+            })),
+            _ => Ok(None),
         }
-        Ok(None)
+    }
+}
+
+struct ProcFsSelfLink;
+
+impl Inode for ProcFsSelfLink {
+    fn kind(&self) -> InodeKind {
+        InodeKind::Symlink
+    }
+
+    fn size(&self) -> u64 {
+        4
+    }
+
+    fn readlink(&self) -> KResult<String> {
+        let pid = crate::scheduler::process::get_current_pid().unwrap_or(1);
+        Ok(alloc::format!("{}", pid))
+    }
+
+    fn read_at(&self, _off: u64, _buf: &mut [u8]) -> KResult<usize> {
+        Err(KError::InvalidArgument)
+    }
+
+    fn write_at(&self, _off: u64, _buf: &[u8]) -> KResult<usize> {
+        Err(KError::NotSupported)
     }
 }
 
@@ -630,6 +678,8 @@ enum ProcFsFile {
     MemInfo,
     Stacks,
     PidStatus(u32),
+    PidStat(u32),
+    PidCmdline(u32),
     NetSockets,
     NetArp,
     NetDev,
@@ -711,10 +761,11 @@ RES:          0          0  Rescheduling interrupts\n",
                     "major minor  #blocks  name\n\
    31     0       24  nvs\n\
    31     1        8  otadata\n\
-   31     2     4096  factory\n\
-   31     3     4096  ota_0\n\
-   31     4     8000  storage\n\
-   31     5       64  coredump\n"
+   31     2       60  auxlfs\n\
+   31     3     4096  factory\n\
+   31     4     4096  ota_0\n\
+   31     5     8000  storage\n\
+   31     6       64  coredump\n"
                 )
             }
             ProcFsFile::Crypto => {
@@ -785,27 +836,12 @@ type         : rng\n"
                 alloc::format!("EspressoOS 0.2.0-dev (xtensa-esp32s3-none-elf) Rust no_std [Xtensa LX7 dual-core @ 240MHz]\n")
             }
             ProcFsFile::Dmesg => {
-                let ms = crate::arch::xtensa::timer::uptime_ms();
-                alloc::format!(
-                    "[{:5}.{:03}000] Linux-compatible EspressoOS 0.2.0-dev (xtensa-esp32s3-none-elf)\n\
-                     [{:5}.{:03}000] CPU: Xtensa LX7 dual-core running at 240 MHz\n\
-                     [{:5}.{:03}000] Memory: 128KB SRAM heap + 8MB Octal PSRAM (~7MB extended heap, 1MB PSRAM-exec pool)\n\
-                     [{:5}.{:03}000] PSRAM-Exec: 32 slots (16KB text/data) mapped to I-Bus @ 0x42800000\n\
-                     [{:5}.{:03}000] VFS: mounted devfs on /dev, espfs on /, ramfs on /tmp, procfs on /proc, sysfs on /sys\n\
-                     [{:5}.{:03}000] Drivers: UART0 live, SHA-256 accelerator ready, Power LPWR ready\n\
-                     [{:5}.{:03}000] Network: esp-wifi STA + smoltcp TCP/IP stack active\n\
-                     [{:5}.{:03}000] Security: SSH-2.0 daemon listening on :22\n\
-                     [{:5}.{:03}000] Process: Multitasking preemptive 100Hz scheduler active with orphan reparenting to PID 1\n",
-                    0, 0,
-                    0, 10,
-                    0, 25,
-                    0, 35,
-                    0, 45,
-                    0, 60,
-                    0, 80,
-                    0, 95,
-                    ms / 1000, ms % 1000
-                )
+                let snap = crate::klog::snapshot();
+                if snap.is_empty() {
+                    alloc::format!("[    0.000] EspressoOS 0.2.0-dev kernel ring buffer initialized\n")
+                } else {
+                    snap
+                }
             }
             ProcFsFile::Uptime => {
                 let ms = crate::arch::xtensa::timer::uptime_ms();
@@ -827,12 +863,44 @@ type         : rng\n"
                 let pt = crate::scheduler::process::PROCESS_TABLE.lock();
                 if let Some(proc) = pt.table.get(pid) {
                     alloc::format!(
-                        "Name:\t{}\nPid:\t{}\nState:\t{:?}\nExitCode:\t{}\n",
+                        "Name:\t{}\nPid:\t{}\nPPid:\t{}\nPGid:\t{}\nUid:\t{}\t{}\t{}\t{}\nGid:\t{}\t{}\t{}\t{}\nState:\t{:?}\nExitCode:\t{}\n",
                         proc.name,
                         pid,
+                        proc.parent_pid.unwrap_or(0),
+                        proc.pgid,
+                        proc.uid, proc.uid, proc.uid, proc.uid,
+                        proc.gid, proc.gid, proc.gid, proc.gid,
                         proc.state,
                         proc.exit_code
                     )
+                } else {
+                    return Err(KError::NotFound);
+                }
+            }
+            ProcFsFile::PidStat(pid) => {
+                let pt = crate::scheduler::process::PROCESS_TABLE.lock();
+                if let Some(proc) = pt.table.get(pid) {
+                    let st_ch = match proc.state {
+                        crate::scheduler::process::ProcessState::Running => 'R',
+                        crate::scheduler::process::ProcessState::Zombie => 'Z',
+                    };
+                    alloc::format!(
+                        "{} ({}) {} {} {} {} 0 -1 0 0 0 0 0 0 0 0 20 0 1 0 0 32768 8\n",
+                        pid,
+                        proc.name,
+                        st_ch,
+                        proc.parent_pid.unwrap_or(0),
+                        proc.pgid,
+                        proc.session_id
+                    )
+                } else {
+                    return Err(KError::NotFound);
+                }
+            }
+            ProcFsFile::PidCmdline(pid) => {
+                let pt = crate::scheduler::process::PROCESS_TABLE.lock();
+                if let Some(proc) = pt.table.get(pid) {
+                    alloc::format!("{}\n", proc.name)
                 } else {
                     return Err(KError::NotFound);
                 }
@@ -1050,16 +1118,20 @@ Node 0, zone   PSRAM\n\
                 )
             }
             ProcFsFile::DiskStats => {
-                let uptime_ticks = crate::arch::xtensa::timer::uptime_ms() / 1000;
-                let reads_flash = 1200 + uptime_ticks * 2;
-                let writes_flash = 65 + uptime_ticks / 10;
+                let st = crate::drivers::flash::io_stats();
                 alloc::format!(
                     "  31       0 flash0 {} 0 {} 0 {} 0 {} 0 0 0 0\n\
   31       1 espfs {} 0 {} 0 {} 0 {} 0 0 0 0\n\
-   1       0 ramfs0 45 0 90 0 32 0 64 0 0 0 0\n\
-   1       1 ramfs1 12 0 24 0 8 0 16 0 0 0 0\n",
-                    reads_flash, reads_flash * 8, writes_flash, writes_flash * 8,
-                    reads_flash / 2, reads_flash * 4, writes_flash / 2, writes_flash * 4,
+  31       2 auxlfs 0 0 0 0 {} 0 0 0 0 0 0\n",
+                    st.read_ops,
+                    st.read_sectors,
+                    st.write_ops,
+                    st.write_sectors,
+                    st.read_ops,
+                    st.read_sectors,
+                    st.write_ops,
+                    st.write_sectors,
+                    st.erase_ops,
                 )
             }
             ProcFsFile::Modules => {

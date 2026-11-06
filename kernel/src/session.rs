@@ -41,6 +41,9 @@ pub struct SessionChannel {
     /// session -> wire. Unused by the Uart arm.
     from_session: Mutex<VecDeque<u8>>,
 
+    /// Foreground process group id for TTY job control (`0` = interactive shell owns TTY).
+    fg_pgid: AtomicU32,
+
     open: AtomicBool,
 }
 
@@ -134,19 +137,77 @@ impl SessionChannel {
             return Ok(0);
         }
         let n = match self.kind {
-            ChannelKind::Uart => uart::read(buf),
+            ChannelKind::Uart => {
+                let mut got = pop(&self.to_session, buf);
+                if got < buf.len() {
+                    got += uart::read(&mut buf[got..]);
+                }
+                got
+            }
             ChannelKind::Ssh { .. } => pop(&self.to_session, buf),
         };
-        match n {
-            0 => Err(KError::WouldBlock),
-            n => Ok(n),
+        if n == 0 {
+            return Err(KError::WouldBlock);
         }
+        let fg = self.fg_pgid.load(Ordering::Acquire);
+        if fg != 0 {
+            let mut sig = 0i32;
+            let mut keep = 0usize;
+            for i in 0..n {
+                let b = buf[i];
+                if b == 0x03 {
+                    sig = 2;
+                } else if b == 0x1A {
+                    sig = 20;
+                } else {
+                    buf[keep] = b;
+                    keep += 1;
+                }
+            }
+            if sig != 0 {
+                let _ = self.write(b"^C\n");
+                deliver_signal_to_pgid(fg, sig);
+            }
+            if keep == 0 {
+                return Err(KError::WouldBlock);
+            }
+            return Ok(keep);
+        }
+        Ok(n)
+    }
+
+    pub fn set_fg_pgid(&self, pgid: u32) {
+        self.fg_pgid.store(pgid, Ordering::Release);
+    }
+
+    pub fn fg_pgid(&self) -> u32 {
+        self.fg_pgid.load(Ordering::Acquire)
     }
 
     /// SSH receive path: wire bytes headed for this session's stdin.
     pub fn push_input(&self, data: &[u8]) -> usize {
         if !self.is_open() {
             return 0;
+        }
+        let fg = self.fg_pgid.load(Ordering::Acquire);
+        if fg != 0 && data.iter().any(|&b| b == 0x03 || b == 0x1A) {
+            let mut sig = 0i32;
+            let mut filtered = Vec::with_capacity(data.len());
+            for &b in data {
+                if b == 0x03 {
+                    sig = 2;
+                } else if b == 0x1A {
+                    sig = 20;
+                } else {
+                    filtered.push(b);
+                }
+            }
+            let _ = push(&self.to_session, &filtered);
+            if sig != 0 {
+                let _ = self.write(b"^C\n");
+                deliver_signal_to_pgid(fg, sig);
+            }
+            return data.len();
         }
         push(&self.to_session, data)
     }
@@ -216,10 +277,67 @@ pub fn create(kind: ChannelKind, user: Option<String>) -> Arc<SessionChannel> {
         user,
         to_session: Mutex::new(VecDeque::new()),
         from_session: Mutex::new(VecDeque::new()),
+        fg_pgid: AtomicU32::new(0),
         open: AtomicBool::new(true),
     });
     SESSIONS.lock().insert(id, chan.clone());
     chan
+}
+
+pub fn deliver_signal_to_pgid(pgid: u32, sig: i32) {
+    if pgid == 0 || sig <= 0 || sig >= 32 {
+        return;
+    }
+    let mut pt = crate::scheduler::process::PROCESS_TABLE.lock();
+    let mut matched = false;
+    for proc in pt.table.values_mut() {
+        if proc.pgid == pgid {
+            proc.pending_signals |= 1 << sig;
+            crate::scheduler::unblock_task(proc.main_task);
+            matched = true;
+        }
+    }
+    if matched {
+        crate::scheduler::set_need_resched();
+    }
+}
+
+/// Polls UART0 RX FIFO when the serial console has an active foreground job (`fg_pgid != 0`),
+/// delivering `SIGINT`/`SIGTSTP` on `Ctrl+C`/`Ctrl+Z` while stashing ordinary input bytes.
+pub fn poll_uart_signals() {
+    let chan = match get(UART_SESSION) {
+        Some(c) => c,
+        None => return,
+    };
+    let fg = chan.fg_pgid();
+    if fg == 0 {
+        return;
+    }
+    let mut raw = [0u8; 32];
+    let n = uart::read(&mut raw);
+    if n == 0 {
+        return;
+    }
+    let mut sig = 0i32;
+    for &b in &raw[..n] {
+        if b == 0x03 {
+            sig = 2;
+        } else if b == 0x1A {
+            sig = 20;
+        } else {
+            let _ = push(&chan.to_session, &[b]);
+        }
+    }
+    if sig != 0 {
+        let _ = chan.write(b"^C\n");
+        deliver_signal_to_pgid(fg, sig);
+    }
+}
+
+pub fn set_session_fg_pgid(id: SessionId, pgid: u32) -> KResult<()> {
+    let chan = get(id).ok_or(KError::NotFound)?;
+    chan.set_fg_pgid(pgid);
+    Ok(())
 }
 
 pub fn get(id: SessionId) -> Option<Arc<SessionChannel>> {

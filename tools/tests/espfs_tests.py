@@ -28,7 +28,7 @@ HEADER_LEN = 16
 SB_LEN = 20
 WRITE_DATA_OFF = 8
 
-MK_FILE, MK_DIR, WRITE, TRUNCATE, UNLINK = 1, 2, 3, 4, 5
+MK_FILE, MK_DIR, WRITE, TRUNCATE, UNLINK, MK_SYMLINK, SET_ATTR, RENAME = 1, 2, 3, 4, 5, 6, 7, 8
 
 
 def crc32(data: bytes) -> int:
@@ -72,7 +72,7 @@ def parse_header(buf: bytes) -> Optional[Tuple[int, int, int, int]]:
     if (buf[0] | (buf[1] << 8)) != REC_MAGIC:
         return None
     rtype = buf[2]
-    if rtype not in (MK_FILE, MK_DIR, WRITE, TRUNCATE, UNLINK):
+    if rtype not in (MK_FILE, MK_DIR, WRITE, TRUNCATE, UNLINK, MK_SYMLINK, SET_ATTR, RENAME):
         return None
     seq = int.from_bytes(buf[4:8], "little")
     plen = int.from_bytes(buf[8:12], "little")
@@ -98,6 +98,38 @@ def enc_trunc(ino: int, length: int) -> bytes:
 
 def enc_unlink(parent: int, name: bytes) -> bytes:
     return parent.to_bytes(4, "little") + name
+
+
+def enc_symlink(ino: int, parent: int, name: bytes, target: bytes) -> bytes:
+    return (
+        ino.to_bytes(4, "little")
+        + parent.to_bytes(4, "little")
+        + len(name).to_bytes(2, "little")
+        + len(target).to_bytes(2, "little")
+        + name
+        + target
+    )
+
+
+def enc_setattr(ino: int, mode: int, uid: int, gid: int) -> bytes:
+    return (
+        ino.to_bytes(4, "little")
+        + mode.to_bytes(2, "little")
+        + uid.to_bytes(2, "little")
+        + gid.to_bytes(2, "little")
+        + (0).to_bytes(2, "little")
+    )
+
+
+def enc_rename(old_parent: int, new_parent: int, old_name: bytes, new_name: bytes) -> bytes:
+    return (
+        old_parent.to_bytes(4, "little")
+        + new_parent.to_bytes(4, "little")
+        + len(old_name).to_bytes(2, "little")
+        + len(new_name).to_bytes(2, "little")
+        + old_name
+        + new_name
+    )
 
 
 def encode_super(generation: int, active_half: int) -> bytes:
@@ -130,11 +162,15 @@ ROOT_INO = 1
 
 
 class Node:
-    def __init__(self, kind: str):
-        self.kind = kind  # "dir" | "file"
+    def __init__(self, kind: str, target: str = ""):
+        self.kind = kind  # "dir" | "file" | "symlink"
         self.children: Dict[str, int] = {}
-        self.size = 0
+        self.size = len(target.encode("utf-8")) if kind == "symlink" else 0
         self.extents: List[Tuple[int, int, int]] = []  # (off, len, flash)
+        self.target = target
+        self.mode = 0o755 if kind == "dir" else (0o777 if kind == "symlink" else 0o644)
+        self.uid = 0
+        self.gid = 0
 
 
 class FsModel:
@@ -201,6 +237,47 @@ class FsModel:
         if ci is not None:
             self.nodes.pop(ci, None)
 
+    def unlink_checked(self, parent: int, name: str, caller_uid: int) -> bool:
+        p = self.nodes.get(parent)
+        if not p or p.kind != "dir":
+            return False
+        ci = p.children.get(name)
+        if ci is None:
+            return False
+        child = self.nodes.get(ci)
+        if (p.mode & 0o1000) != 0 and caller_uid != 0:
+            if caller_uid != p.uid and (child is None or caller_uid != child.uid):
+                return False
+        self.apply_unlink(parent, name)
+        return True
+
+    def apply_symlink(self, ino: int, parent: int, name: str, target: str):
+        self.nodes[ino] = Node("symlink", target)
+        p = self.nodes.get(parent)
+        if p and p.kind == "dir":
+            p.children[name] = ino
+        if ino >= self.next_ino:
+            self.next_ino = ino + 1
+
+    def apply_setattr(self, ino: int, mode: int, uid: int, gid: int):
+        n = self.nodes.get(ino)
+        if n is not None:
+            n.mode = mode
+            n.uid = uid
+            n.gid = gid
+
+    def apply_rename(self, old_parent: int, new_parent: int, old_name: str, new_name: str):
+        op = self.nodes.get(old_parent)
+        np = self.nodes.get(new_parent)
+        if not op or op.kind != "dir" or not np or np.kind != "dir":
+            return
+        moved = op.children.pop(old_name, None)
+        if moved is not None:
+            replaced = np.children.get(new_name)
+            np.children[new_name] = moved
+            if replaced is not None and replaced != moved:
+                self.nodes.pop(replaced, None)
+
     # -- lectura resolviendo extents (espeja read_file) --
     def read(self, ino: int, off: int, length: int) -> bytes:
         n = self.nodes[ino]
@@ -252,6 +329,28 @@ class FsModel:
                 parent = int.from_bytes(payload[0:4], "little")
                 name = payload[4:].decode("utf-8")
                 self.apply_unlink(parent, name)
+            elif rtype == MK_SYMLINK:
+                ino = int.from_bytes(payload[0:4], "little")
+                parent = int.from_bytes(payload[4:8], "little")
+                nlen = int.from_bytes(payload[8:10], "little")
+                tlen = int.from_bytes(payload[10:12], "little")
+                name = payload[12:12 + nlen].decode("utf-8")
+                target = payload[12 + nlen:12 + nlen + tlen].decode("utf-8")
+                self.apply_symlink(ino, parent, name, target)
+            elif rtype == SET_ATTR:
+                ino = int.from_bytes(payload[0:4], "little")
+                mode = int.from_bytes(payload[4:6], "little")
+                uid = int.from_bytes(payload[6:8], "little")
+                gid = int.from_bytes(payload[8:10], "little")
+                self.apply_setattr(ino, mode, uid, gid)
+            elif rtype == RENAME:
+                old_p = int.from_bytes(payload[0:4], "little")
+                new_p = int.from_bytes(payload[4:8], "little")
+                olen = int.from_bytes(payload[8:10], "little")
+                nlen = int.from_bytes(payload[10:12], "little")
+                old_name = payload[12:12 + olen].decode("utf-8")
+                new_name = payload[12 + olen:12 + olen + nlen].decode("utf-8")
+                self.apply_rename(old_p, new_p, old_name, new_name)
             if seq >= self.next_seq:
                 self.next_seq = seq + 1
             cur += total
@@ -376,6 +475,44 @@ class ReplayTests(unittest.TestCase):
         cur = m.replay(0, len(buf))
         self.assertEqual(cur, 0)
         self.assertEqual(m.nodes[ROOT_INO].children, {})
+
+    def test_symlink_setattr_and_atomic_rename_replay(self):
+        lb = LogBuilder()
+        lb.emit(MK_DIR, enc_mk(2, ROOT_INO, b"etc"))
+        lb.emit(MK_DIR, enc_mk(3, ROOT_INO, b"tmp"))
+        lb.emit(SET_ATTR, enc_setattr(3, 0o1777, 0, 0))
+        lb.emit(MK_SYMLINK, enc_symlink(4, 2, b"mtab", b"/proc/self/mounts"))
+        lb.emit(MK_FILE, enc_mk(5, 3, b"draft.txt"))
+        lb.emit(WRITE, enc_write(5, 0, b"v2"))
+        lb.emit(SET_ATTR, enc_setattr(5, 0o600, 1000, 1000))
+        lb.emit(MK_FILE, enc_mk(6, 2, b"final.txt"))
+        lb.emit(WRITE, enc_write(6, 0, b"v1"))
+        lb.emit(RENAME, enc_rename(3, 2, b"draft.txt", b"final.txt"))
+
+        m = FsModel(bytes(lb.buf))
+        m.replay(0, len(lb.buf))
+
+        self.assertEqual(m.nodes[4].kind, "symlink")
+        self.assertEqual(m.nodes[4].target, "/proc/self/mounts")
+        self.assertEqual(m.nodes[3].mode, 0o1777)
+        self.assertNotIn("draft.txt", m.nodes[3].children)
+        self.assertEqual(m.nodes[2].children["final.txt"], 5)
+        self.assertNotIn(6, m.nodes)
+        self.assertEqual(m.read(5, 0, 16), b"v2")
+        self.assertEqual((m.nodes[5].mode, m.nodes[5].uid, m.nodes[5].gid), (0o600, 1000, 1000))
+
+    def test_sticky_bit_unlink_protection(self):
+        lb = LogBuilder()
+        lb.emit(MK_DIR, enc_mk(2, ROOT_INO, b"tmp"))
+        lb.emit(SET_ATTR, enc_setattr(2, 0o1777, 0, 0))
+        lb.emit(MK_FILE, enc_mk(3, 2, b"alice.txt"))
+        lb.emit(SET_ATTR, enc_setattr(3, 0o644, 1000, 1000))
+        m = FsModel(bytes(lb.buf))
+        m.replay(0, len(lb.buf))
+        self.assertFalse(m.unlink_checked(2, "alice.txt", caller_uid=1001))
+        self.assertIn("alice.txt", m.nodes[2].children)
+        self.assertTrue(m.unlink_checked(2, "alice.txt", caller_uid=1000))
+        self.assertNotIn("alice.txt", m.nodes[2].children)
 
 
 class SpliceTests(unittest.TestCase):

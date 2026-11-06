@@ -108,6 +108,40 @@ pub const O_RDWR: u32 = 0x0003;
 pub const O_CREATE: u32 = 0x0100;
 pub const O_APPEND: u32 = 0x0200;
 pub const O_TRUNC: u32 = 0x0400;
+pub const O_EXCL: u32 = 0x0800;
+
+pub const LOCK_SH: u32 = 1;
+pub const LOCK_EX: u32 = 2;
+pub const LOCK_NB: u32 = 4;
+pub const LOCK_UN: u32 = 8;
+
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct StatBuf {
+    pub ino: u64,
+    pub size: u64,
+    pub mode: u16,
+    pub kind: u8,
+    pub nlink: u8,
+    pub uid: u16,
+    pub gid: u16,
+    pub mtime: u64,
+}
+
+impl StatBuf {
+    pub const fn zeroed() -> Self {
+        Self {
+            ino: 0,
+            size: 0,
+            mode: 0,
+            kind: 0,
+            nlink: 0,
+            uid: 0,
+            gid: 0,
+            mtime: 0,
+        }
+    }
+}
 
 pub fn open(path: &str, flags: u32) -> isize {
     unsafe { syscall(2, path.as_ptr() as usize, path.len(), flags as usize, 0, 0, 0) }
@@ -184,8 +218,9 @@ pub fn wait(status: &mut i32) -> isize {
     waitpid(-1, status, 0)
 }
 
-pub fn waitpid(_pid: i32, status: &mut i32, options: u32) -> isize {
-    unsafe { syscall(7, status as *mut i32 as usize, options as usize, 0, 0, 0, 0) }
+pub fn waitpid(pid: i32, status: &mut i32, options: u32) -> isize {
+    let target = if pid <= 0 { 0usize } else { pid as usize };
+    unsafe { syscall(7, status as *mut i32 as usize, options as usize, target, 0, 0, 0) }
 }
 
 pub fn seek(fd: i32, offset: isize, whence: i32) -> isize {
@@ -327,6 +362,160 @@ pub fn signal(sig: i32, handler: usize, restorer: usize) -> isize {
 
 pub fn kill(pid: u32, sig: i32) -> isize {
     unsafe { syscall(16, pid as usize, sig as usize, 0, 0, 0, 0) }
+}
+
+pub fn kill_pgid(pgid: u32, sig: i32) -> isize {
+    let neg = -(pgid as isize);
+    unsafe { syscall(16, neg as usize, sig as usize, 0, 0, 0, 0) }
+}
+
+pub fn getpid() -> u32 {
+    unsafe { syscall(32, 0, 0, 0, 0, 0, 0) as u32 }
+}
+
+pub fn getppid() -> u32 {
+    unsafe { syscall(33, 0, 0, 0, 0, 0, 0) as u32 }
+}
+
+pub fn stat(path: &str, out: &mut StatBuf) -> isize {
+    unsafe {
+        syscall(
+            34,
+            path.as_ptr() as usize,
+            path.len(),
+            out as *mut StatBuf as usize,
+            0,
+            0,
+            0,
+        )
+    }
+}
+
+pub fn lstat(path: &str, out: &mut StatBuf) -> isize {
+    unsafe {
+        syscall(
+            35,
+            path.as_ptr() as usize,
+            path.len(),
+            out as *mut StatBuf as usize,
+            0,
+            0,
+            0,
+        )
+    }
+}
+
+pub fn symlink(target: &str, link_path: &str) -> isize {
+    unsafe {
+        syscall(
+            36,
+            target.as_ptr() as usize,
+            target.len(),
+            link_path.as_ptr() as usize,
+            link_path.len(),
+            0,
+            0,
+        )
+    }
+}
+
+pub fn readlink(path: &str, buf: &mut [u8]) -> isize {
+    unsafe {
+        syscall(
+            37,
+            path.as_ptr() as usize,
+            path.len(),
+            buf.as_mut_ptr() as usize,
+            buf.len(),
+            0,
+            0,
+        )
+    }
+}
+
+pub fn rename(old_path: &str, new_path: &str) -> isize {
+    unsafe {
+        syscall(
+            38,
+            old_path.as_ptr() as usize,
+            old_path.len(),
+            new_path.as_ptr() as usize,
+            new_path.len(),
+            0,
+            0,
+        )
+    }
+}
+
+pub fn chmod(path: &str, mode: u32) -> isize {
+    unsafe { syscall(39, path.as_ptr() as usize, path.len(), mode as usize, 0, 0, 0) }
+}
+
+pub fn chown(path: &str, uid: u32, gid: u32) -> isize {
+    unsafe {
+        syscall(
+            40,
+            path.as_ptr() as usize,
+            path.len(),
+            uid as usize,
+            gid as usize,
+            0,
+            0,
+        )
+    }
+}
+
+pub fn chroot(path: &str) -> isize {
+    unsafe { syscall(41, path.as_ptr() as usize, path.len(), 0, 0, 0, 0) }
+}
+
+pub fn flock(fd: i32, operation: u32) -> isize {
+    unsafe { syscall(42, fd as usize, operation as usize, 0, 0, 0, 0) }
+}
+
+pub fn mount(src: &str, target: &str, fstype: &str) -> isize {
+    unsafe {
+        syscall(
+            43,
+            src.as_ptr() as usize,
+            src.len(),
+            target.as_ptr() as usize,
+            target.len(),
+            fstype.as_ptr() as usize,
+            fstype.len(),
+        )
+    }
+}
+
+pub fn umount(target: &str) -> isize {
+    unsafe { syscall(44, target.as_ptr() as usize, target.len(), 0, 0, 0, 0) }
+}
+
+pub fn tcsetpgrp(pgid: u32) -> isize {
+    unsafe { syscall(45, pgid as usize, 0, 0, 0, 0, 0) }
+}
+
+pub fn getuid() -> u16 {
+    let raw = unsafe { syscall(46, 0, 0, 0, 0, 0, 0) as usize };
+    (raw & 0xFFFF) as u16
+}
+
+pub fn getgid() -> u16 {
+    let raw = unsafe { syscall(46, 0, 0, 0, 0, 0, 0) as usize };
+    ((raw >> 16) & 0xFFFF) as u16
+}
+
+pub fn setuid(uid: u16, gid: u16) -> isize {
+    unsafe { syscall(47, uid as usize, gid as usize, 0, 0, 0, 0) }
+}
+
+pub fn getuid_gid() -> (u32, u32) {
+    let raw = unsafe { syscall(46, 0, 0, 0, 0, 0, 0) as usize };
+    ((raw & 0xFFFF) as u32, ((raw >> 16) & 0xFFFF) as u32)
+}
+
+pub fn setuid_gid(uid: u32, gid: u32) -> isize {
+    setuid(uid as u16, gid as u16)
 }
 
 #[no_mangle]

@@ -2,6 +2,7 @@
 
 use crate::arch::xtensa::sync::Mutex;
 use crate::prelude::*;
+use core::sync::atomic::{AtomicU32, Ordering};
 
 use embedded_storage::nor_flash::{NorFlash, ReadNorFlash};
 use esp_storage::FlashStorage;
@@ -11,6 +12,30 @@ pub const SECTOR_SIZE: usize = 4096;
 const WRITE_ALIGN: u32 = 4;
 
 static FLASH: Mutex<Option<FlashStorage>> = Mutex::new(None);
+static READ_OPS: AtomicU32 = AtomicU32::new(0);
+static READ_SECTORS: AtomicU32 = AtomicU32::new(0);
+static WRITE_OPS: AtomicU32 = AtomicU32::new(0);
+static WRITE_SECTORS: AtomicU32 = AtomicU32::new(0);
+static ERASE_OPS: AtomicU32 = AtomicU32::new(0);
+
+#[derive(Clone, Copy, Debug)]
+pub struct FlashIoStats {
+    pub read_ops: u32,
+    pub read_sectors: u32,
+    pub write_ops: u32,
+    pub write_sectors: u32,
+    pub erase_ops: u32,
+}
+
+pub fn io_stats() -> FlashIoStats {
+    FlashIoStats {
+        read_ops: READ_OPS.load(Ordering::Relaxed),
+        read_sectors: READ_SECTORS.load(Ordering::Relaxed),
+        write_ops: WRITE_OPS.load(Ordering::Relaxed),
+        write_sectors: WRITE_SECTORS.load(Ordering::Relaxed),
+        erase_ops: ERASE_OPS.load(Ordering::Relaxed),
+    }
+}
 
 fn with_flash<R>(f: impl FnOnce(&mut FlashStorage) -> R) -> R {
     let mut guard = FLASH.lock();
@@ -42,7 +67,13 @@ const fn sector_base(offset: u32) -> u32 {
 pub fn read(offset: u32, buf: &mut [u8]) -> KResult<()> {
     check_range(offset, buf.len())?;
 
-    with_flash(|fs| fs.read(offset, buf).map_err(|_| KError::IoError))
+    let res = with_flash(|fs| fs.read(offset, buf).map_err(|_| KError::IoError));
+    if res.is_ok() {
+        READ_OPS.fetch_add(1, Ordering::Relaxed);
+        let sectors = ((buf.len() + 511) / 512) as u32;
+        READ_SECTORS.fetch_add(sectors.max(1), Ordering::Relaxed);
+    }
+    res
 }
 
 pub fn write(offset: u32, buf: &[u8]) -> KResult<()> {
@@ -55,7 +86,13 @@ pub fn write(offset: u32, buf: &[u8]) -> KResult<()> {
         return Ok(());
     }
 
-    with_flash(|fs| fs.write(offset, buf).map_err(|_| KError::IoError))
+    let res = with_flash(|fs| fs.write(offset, buf).map_err(|_| KError::IoError));
+    if res.is_ok() {
+        WRITE_OPS.fetch_add(1, Ordering::Relaxed);
+        let sectors = ((buf.len() + 511) / 512) as u32;
+        WRITE_SECTORS.fetch_add(sectors.max(1), Ordering::Relaxed);
+    }
+    res
 }
 
 pub fn erase_sector(offset: u32) -> KResult<()> {
@@ -64,5 +101,11 @@ pub fn erase_sector(offset: u32) -> KResult<()> {
     check_range(base, SECTOR_SIZE)?;
     let end = base + SECTOR_SIZE as u32;
 
-    with_flash(|fs| fs.erase(base, end).map_err(|_| KError::IoError))
+    let res = with_flash(|fs| fs.erase(base, end).map_err(|_| KError::IoError));
+    if res.is_ok() {
+        ERASE_OPS.fetch_add(1, Ordering::Relaxed);
+        WRITE_OPS.fetch_add(1, Ordering::Relaxed);
+        WRITE_SECTORS.fetch_add((SECTOR_SIZE / 512) as u32, Ordering::Relaxed);
+    }
+    res
 }

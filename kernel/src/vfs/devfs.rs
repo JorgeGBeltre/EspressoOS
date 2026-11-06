@@ -179,7 +179,17 @@ impl Device for LogDevice {
     }
     fn write(&self, _off: u64, buf: &[u8]) -> KResult<usize> {
         if let Ok(s) = core::str::from_utf8(buf) {
-            println!("[syslog] {}", s.trim_end());
+            let trimmed = s.trim_end();
+            if !trimmed.is_empty() {
+                crate::klog::log_msg(trimmed);
+                crate::println!("[syslog] {}", trimmed);
+                if let Ok(inode) = crate::vfs::mount::resolve("/var/log/messages") {
+                    let mut line = String::from(trimmed);
+                    line.push('\n');
+                    let off = inode.size();
+                    let _ = inode.write_at(off, line.as_bytes());
+                }
+            }
         }
         Ok(buf.len())
     }

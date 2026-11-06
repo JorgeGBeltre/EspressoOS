@@ -1,9 +1,7 @@
 #![no_std]
 #![no_main]
 
-use libc::{arg, close, open, print, println, uptime_ms, write};
-
-const O_WRONLY_CREATE_APPEND: u32 = 2 | 0x100 | 0x200;
+use libc::{arg, close, open, print, println, uptime_ms, write, O_APPEND, O_CREATE, O_WRONLY};
 
 fn write_num(buf: &mut [u8], mut idx: usize, mut val: usize, min_digits: usize) -> usize {
     let mut digits = [b'0'; 10];
@@ -33,27 +31,34 @@ fn write_num(buf: &mut [u8], mut idx: usize, mut val: usize, min_digits: usize) 
 #[no_mangle]
 pub extern "C" fn main(argc: i32, argv: *const *const u8) -> i32 {
     if argc < 2 {
-        println!("usage: logger [-s] MESSAGE...");
+        println!("usage: logger [-s] [-t TAG] MESSAGE...");
         return 1;
     }
 
-    let mut start_idx = 1;
     let mut echo_stderr = false;
+    let mut tag = "";
+    let mut i = 1;
 
-    let first = unsafe { arg(argv, 1) };
-    if first == "-h" || first == "--help" {
-        println!("usage: logger [-s] MESSAGE...");
-        println!("Add entries to the system log (/var/log/syslog)");
-        println!("  -s  Log the message to standard error as well as system log");
-        return 0;
-    }
-    if first == "-s" {
-        echo_stderr = true;
-        start_idx = 2;
-        if argc < 3 {
-            println!("usage: logger [-s] MESSAGE...");
-            return 1;
+    while i < argc {
+        let a = unsafe { arg(argv, i) };
+        if a == "-h" || a == "--help" {
+            println!("usage: logger [-s] [-t TAG] MESSAGE...");
+            println!("Write entries to /dev/log and /var/log/syslog");
+            return 0;
+        } else if a == "-s" {
+            echo_stderr = true;
+            i += 1;
+        } else if a == "-t" && i + 1 < argc {
+            tag = unsafe { arg(argv, i + 1) };
+            i += 2;
+        } else {
+            break;
         }
+    }
+
+    if i >= argc {
+        println!("usage: logger [-s] [-t TAG] MESSAGE...");
+        return 1;
     }
 
     let ms = uptime_ms();
@@ -63,18 +68,33 @@ pub extern "C" fn main(argc: i32, argv: *const *const u8) -> i32 {
     let mut log_buf = [0u8; 256];
     let mut idx = 0;
 
-    // Format: "[sec.frac] "
-    if idx < log_buf.len() { log_buf[idx] = b'['; idx += 1; }
+    log_buf[idx] = b'[';
+    idx += 1;
     idx = write_num(&mut log_buf, idx, sec, 1);
-    if idx < log_buf.len() { log_buf[idx] = b'.'; idx += 1; }
+    log_buf[idx] = b'.';
+    idx += 1;
     idx = write_num(&mut log_buf, idx, frac, 3);
-    if idx < log_buf.len() { log_buf[idx] = b']'; idx += 1; }
-    if idx < log_buf.len() { log_buf[idx] = b' '; idx += 1; }
+    log_buf[idx] = b']';
+    idx += 1;
+    log_buf[idx] = b' ';
+    idx += 1;
 
-    // Append arguments
-    for i in start_idx..argc {
-        let word = unsafe { arg(argv, i) };
-        if i > start_idx && idx < log_buf.len() - 2 {
+    if !tag.is_empty() {
+        for &b in tag.as_bytes() {
+            if idx < log_buf.len() - 4 {
+                log_buf[idx] = b;
+                idx += 1;
+            }
+        }
+        log_buf[idx] = b':';
+        idx += 1;
+        log_buf[idx] = b' ';
+        idx += 1;
+    }
+
+    for k in i..argc {
+        let word = unsafe { arg(argv, k) };
+        if k > i && idx < log_buf.len() - 2 {
             log_buf[idx] = b' ';
             idx += 1;
         }
@@ -86,11 +106,8 @@ pub extern "C" fn main(argc: i32, argv: *const *const u8) -> i32 {
         }
     }
 
-    if idx < log_buf.len() {
-        log_buf[idx] = b'\n';
-        idx += 1;
-    }
-
+    log_buf[idx] = b'\n';
+    idx += 1;
     let log_slice = &log_buf[..idx];
 
     if echo_stderr {
@@ -99,13 +116,20 @@ pub extern "C" fn main(argc: i32, argv: *const *const u8) -> i32 {
         }
     }
 
-    let fd = open("/var/log/syslog", O_WRONLY_CREATE_APPEND);
-    if fd >= 0 {
-        let _ = write(fd as i32, log_slice);
-        close(fd as i32);
-        0
-    } else {
-        println!("logger: cannot open /var/log/syslog");
-        1
+    let mut wrote = false;
+    let dev_fd = open("/dev/log", O_WRONLY);
+    if dev_fd >= 0 {
+        let _ = write(dev_fd as i32, log_slice);
+        close(dev_fd as i32);
+        wrote = true;
     }
+
+    let sys_fd = open("/var/log/syslog", O_WRONLY | O_CREATE | O_APPEND);
+    if sys_fd >= 0 {
+        let _ = write(sys_fd as i32, log_slice);
+        close(sys_fd as i32);
+        wrote = true;
+    }
+
+    if wrote { 0 } else { 1 }
 }

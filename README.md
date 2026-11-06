@@ -75,7 +75,8 @@ EspressoOS boots and executes on physical ESP32-S3 hardware. The system acquires
   - **Public-Key Authentication**: Supports OpenSSH `ssh-ed25519` keys in `/etc/authorized_keys` with constant-time cryptographic verification (`ct_eq`).
   - **Connection Resilience**: 60s authentication deadline, 300s session idle timeout, and clean TCP socket teardown on remote FIN/RST (`CloseWait`).
 - **`passwd` Command & Dedicated KDF**: Userland application `/bin/passwd` creates or updates `/etc/passwd` in persistent flash storage (EspFs) using a formal Key Derivation Function: **PBKDF2-HMAC-SHA256 (RFC 8018)** with 1,000 iterations and a 16-byte hardware TRNG salt (`$pbkdf2-sha256$i=1000$<salt-hex>$<hash-hex>`), with constant-time verification (`ct_eq`) and backward compatibility for legacy hashes.
-- **Persistent EspFs Filesystem & VFS**: Log-structured filesystem on NOR flash surviving reboots and re-flashes, with dynamic mount table and ramfs scratch mount on `/mnt`.
+- **Persistent EspFs & LittleFs Filesystems & VFS**: Log-structured `EspFs` on `/` (7.8 MB NOR flash) and hierarchical `LittleFs` auto-mounted on `/mnt/lfs` (60 KB NOR flash @ `0x0001_1000`, `ELFS` header + IEEE CRC32), both verified surviving physical hardware reboots (`RTC_SW_SYS_RST`) with symlinks, POSIX DAC modes, atomic rename, `chroot` root confinement, and advisory `flock`.
+- **Micro-Systemd Supervision (`/bin/init` & `/bin/systemctl`)**: Declarative `.service` unit parsing under `/etc/services.d/` with Kahn DAG topological startup ordering, `Type=simple|oneshot` lifecycle management, exponential restart backoff, and live runtime control over `/run/init.ctl`.
 - **Hardware Cryptography & TRNG**: Drivers `/dev/sha0` exposing the hardware SHA-256 accelerator, and `/dev/random` + `/dev/urandom` streaming entropy from the on-chip True Random Number Generator.
 - **Power Management & Reboot**: Driver `/dev/power` with working software reboot.
 - **BLE Advertising**: Beacon advertisement as `EspressoOS` via `/bin/ble`.
@@ -176,7 +177,7 @@ Memory layout defined in `kernel/src/prelude.rs` (`layout`).
 
 ### 3.4 Syscall ABI (Full Table)
 
-The system call ABI spans 48 syscalls (`0..=47` in `kernel/src/syscall/table.rs`, preserving backward compatibility across `0..=29`). Arguments are passed in `a3..a7`, syscall number in `a2`, and return value in `a2`.
+The system call ABI spans 48 syscalls (`0..=47` in `kernel/src/syscall/table.rs`, preserving backward compatibility across `0..=29`). Userland invokes the trap through a 6-register `#[unsafe(naked)] extern "C"` Windowed-ABI trampoline (`sys5`: `entry a1, 32; syscall; retw.n`), passing the syscall number in `a2`, up to five register arguments in `a3..a7` (with zero stack-passed arguments to prevent `a7` frame-pointer clobbers under `-C force-frame-pointers`), and returning the result in `a2`.
 
 | Number | Syscall | Description |
 | :--- | :--- | :--- |
@@ -223,7 +224,7 @@ The system call ABI spans 48 syscalls (`0..=47` in `kernel/src/syscall/table.rs`
 | 40 | `Chown` | Update file owner `uid` and `gid` (`uid == 0`) |
 | 41 | `Chroot` | Confine process root directory (`uid == 0`) |
 | 42 | `Flock` | Acquire or release advisory file lock (`LOCK_SH`, `LOCK_EX`, `LOCK_NB`, `LOCK_UN`) |
-| 43 | `Mount` | Dynamically mount `ramfs`/`tmpfs`, `procfs`, `sysfs`, or `littlefs` (`uid == 0`) |
+| 43 | `Mount` | Dynamically mount `ramfs`/`tmpfs`, `procfs`, `sysfs`, or `littlefs` via `MountReq*` (`uid == 0`) |
 | 44 | `Umount` | Unmount secondary mount point (`uid == 0`) |
 | 45 | `Tcsetpgrp` | Set foreground process group ID on the active TTY session |
 | 46 | `Getuid` | Query packed `(gid << 16) \| uid` credentials |
@@ -260,8 +261,8 @@ The system call ABI spans 48 syscalls (`0..=47` in `kernel/src/syscall/table.rs`
   - `/proc/interrupts`: CPU interrupt lines, vectors, and scheduler tick counters.
   - `/proc/partitions`: Flash partition table matching hardware memory layout.
   - `/proc/crypto`: Hardware accelerators and cryptographic cipher engines.
-  - `/proc/dmesg`, `/proc/diskstats`: Live kernel circular log (`klog`) and NOR flash read/write/erase counters.
-  - `/proc/self`, `/proc/<pid>/{status,stat,cmdline,cwd,mounts,fd}`: Dynamic caller symlink and per-process hierarchy/credential metrics.
+  - `/proc/dmesg`, `/proc/diskstats`, `/proc/fsstat`: Live kernel circular log (`klog`), NOR flash read/write/erase counters, and live per-mount `FileSystem::stat()` capacity/usage telemetry consumed by `/bin/df`.
+  - `/proc/mounts`, `/proc/self`, `/proc/<pid>/{status,stat,cmdline,cwd,mounts,fd}`: Active mount table (mapping `/dev/flash0` on `/` and `/dev/flash1` on `/mnt/lfs`), dynamic caller symlink, and per-process hierarchy/credential metrics.
 - **SysFs Synthesized Files (`/sys`)**:
   - `/sys/kernel`: Kernel identification and version string.
   - `/sys/smp`: Multiprocessing status.
@@ -352,9 +353,9 @@ The system integrates identity management and user authentication for the SSH se
   - When an exited process has live child processes, they are automatically reparented to `PID 1` (`init-sup`).
   - `sys_wait` (`syscall 7`) implements `WNOHANG`, exposed via `libc::waitpid(pid, status, options)`.
   - `/bin/sh` non-blockingly reaps background jobs (`&`) before displaying each interactive prompt, eliminating zombie accumulation and PSRAM slot leaks.
-- **`libc` Library** (`userland/libc/`): Provides entry `_start`, panic handler, 32 KB non-reclaiming bump allocator, and typed wrappers for all 48 syscalls (`0..=47`).
+- **`libc` Library** (`userland/libc/`): Provides entry `_start`, panic handler, 32 KB non-reclaiming bump allocator, 6-register `#[unsafe(naked)]` Xtensa Windowed-ABI `syscall` trampoline (`sys5`), and typed wrappers for all 48 syscalls (`0..=47`).
 - **Userland Shell (`/bin/sh`)**:
-  - Interactive POSIX-oriented shell located at `/bin/sh` (`-c` batch command mode supported).
+  - Interactive POSIX-oriented shell located at `/bin/sh` (`-c` batch command mode supported) with `O(1)` single-byte end-of-line echo (`pos == len`) coupled with full-duplex `UART0` RX FIFO draining and `rxfifo_ovf` hardware recovery so multi-command bursts pasted at 115200 baud never overflow or drop characters.
   - Supports multi-stage pipelines (`|`), input/output/stderr redirection (`<`, `>`, `>>`, `2>`, `2>&1`), conditional command chaining (`;`, `&&`, `||`), variable expansion (`$VAR`, `${VAR}`, `$?`, `$$`), persistent history (`/root/.sh_history`), foreground TTY process-group job control (`setpgid` + `tcsetpgrp` for `Ctrl+C`/`Ctrl+Z`), background execution (`&`), and quote parsing.
   - Built-in commands: `cd`, `pwd`, `export`, `unset`, `source` (`.`), `history`, `jobs`, `fg`, `bg`, `clear`, `sudo` (no-op prefix), `exit`, `help`.
 - **Micro-Systemd Service Supervisor (`/bin/init`, `/bin/systemctl`, `/bin/service`)**:
@@ -403,6 +404,9 @@ To build the kernel and flash the board:
 ```bash
 cargo build --release
 cargo run --release
+
+# Or explicitly target a specific serial port (e.g. COM4 on Windows):
+espflash flash --port COM4 target/xtensa-esp32s3-none-elf/release/kernel
 ```
 
 `kernel/build.rs` automatically compiles all 178 userland binaries, generates relocation fixup tables, and embeds them into the kernel image.
@@ -506,7 +510,7 @@ The system includes **178 userland binaries** in `/bin` alongside shell built-in
 38. **`tail`**: Print last N lines using a circular ring buffer (`tail [-n N] [FILE...]`).
 39. **`wc`**: Print newline, word, and byte counts for files or stdin (`wc [FILE...]`).
 40. **`grep`**: Print lines matching a specified pattern in files or stdin (`grep PATTERN [FILE...]`).
-41. **`df`**: Report filesystem disk space usage, block sizes, and mount points (`df`).
+41. **`df`**: Report live filesystem disk space usage (`1K-blocks`, `Used`, `Available`, `Use%`), mount points via `/proc/fsstat`, and memory subsystem status (`df`).
 42. **`dmesg`**: Dump kernel circular diagnostic ring buffer with microsecond timestamps (`dmesg`).
 43. **`date`**: Format and display current system uptime clock (`date`).
 44. **`sync`**: Explicitly flush in-memory buffers to persistent flash storage (`sync`).
@@ -519,7 +523,7 @@ The system includes **178 userland binaries** in `/bin` alongside shell built-in
 51. **`clear`**: Clear terminal screen and position cursor to origin using ANSI escape sequence (`clear`).
 52. **`pwd`**: Print current working directory path from process context (`pwd`).
 53. **`poweroff`**: Perform clean hardware shutdown by placing the board into deep sleep (`poweroff`).
-54. **`mount`**: Display active VFS mount table, device mappings, and filesystem types (`mount`).
+54. **`mount`**: Display active VFS mount table or dynamically mount filesystems (`mount [-t TYPE] [SRC TARGET]`).
 55. **`umount`**: Unmount filesystem or report busy/system-managed status (`umount PATH`).
 56. **`less`**: Screen-by-screen file and stream pager with interactive navigation controls (`less [FILE]`).
 57. **`find`**: Recursively search directory hierarchy with BFS queue and pattern matching (`find [PATH] [-name PATTERN]`).
@@ -768,6 +772,8 @@ Flash layout defined in `kernel/src/prelude.rs` and `partitions.csv`:
 5. **Passwordless Public-Key Authentication — IMPLEMENTED**: OpenSSH `ssh-ed25519` keys configured in `/etc/authorized_keys` are dynamically resolved via VFS, base64-decoded, and verified in constant time (`ct_eq`), enabling passwordless SSH access.
 6. **Process Slot Leaks & Reparenting — FIXED**: Orphaned child processes are automatically reparented to `PID 1` (`init-sup`). `sys_wait` implements `WNOHANG` (exposed via `libc::waitpid`), and `/bin/sh` non-blockingly reaps background jobs (`&`), preventing PSRAM-Exec slot exhaustion.
 7. **Non-Reentrant Kernel Mutex Deadlock Diagnostics — FIXED**: Kernel `Mutex` disables CPU interrupts while held to protect shared resources across task contexts and interrupt handlers. To eliminate silent deadlocks when a mutex was inadvertently acquired twice on the same CPU core, atomic owner tracking was implemented. Re-entering an already held mutex on the same core is detected immediately in `lock()` and aborts with a descriptive panic indicating the core ID before spinning, preventing un-diagnosable hardware watchdog hangs. In `try_lock()`, same-core re-entrancy returns `None` safely.
+8. **Xtensa Windowed-ABI Frame-Pointer (`a7`) Syscall Clobber — FIXED**: With `-C force-frame-pointers`, LLVM Xtensa reserves `a7` as the frame pointer and passes any 7th C parameter (`arg5`) on the stack at `[a7 + 32]`; binding `in("a7") arg4` alongside `in("a8") arg5` in inline `asm!` caused LLVM to overwrite `a7` before loading `arg5`, triggering a `LoadProhibited` (`EXCVADDR=0x20`) fault when `arg5` was non-constant. `userland/libc` now routes all syscalls through a 6-register `#[unsafe(naked)] extern "C" fn sys5` trampoline (`entry a1, 32; syscall; retw.n`) and passes `MountReq*` for `Syscall::Mount (43)`, eliminating stack-passed syscall arguments altogether.
+9. **UART0 128-Byte RX FIFO Burst-Paste Overflow — FIXED**: Redrawing the full prompt and line buffer on every keystroke (`O(N^2)` TX bytes) starved RX draining when pasting >100-byte command lines at 115200 baud, latching ESP32-S3 `UART0` `rxfifo_ovf`. `/bin/sh` now emits a single `O(1)` character write when appending at end-of-line (`pos == len`), `SessionChannel::write` drains pending `UART0` RX bytes into the 16 KB session ring during console output, and `drivers/uart.rs` resets and clock-syncs `rxfifo_rst` (`reg_update`) if `rxfifo_ovf` ever asserts.
 
 ---
 
@@ -1040,8 +1046,9 @@ Flash layout defined in `kernel/src/prelude.rs` and `partitions.csv`:
   - Hardened multi-user authentication: `drivers/ssh/auth.rs` unconditionally rejects empty, `x`, `*`, and `!`-locked password fields; `/dev/passwd` performs non-destructive 7-field POSIX upserts in `/etc/passwd`.
   - Upgraded `/bin/sh` with `<`, `>`, `>>`, `2>`, `2>&1` redirections, `;`/`&&`/`||` conditional chains, `$VAR`/`${VAR}`/`$?`/`$$` expansion, `export`/`unset`/`.` (`source`)/`history` builtins, `/root/.sh_history`, and `setpgid` + `tcsetpgrp` foreground TTY job control.
   - Implemented Micro-Systemd (`init`, `systemctl`, `service`) parsing declarative `/etc/services.d/*.service` units with Kahn DAG topological ordering (`After=`, `Requires=`), `Restart=no|always|on-failure` backoff supervision, `/var/log/<unit>.log` capture, and `/run/init.ctl` runtime control.
-  - Expanded userland application suite to **178 dynamic ELF binaries** (adding `sed`, `lscpu`, `useradd`, `flock`, `userdel`, `groupadd`, `systemctl`, and upgrading `stat`, `ls`, `ln`, `readlink`, `chmod`, `chown`, `chgrp`, `chroot`, `mv`, `mount`, `umount`, `pkg`, `id`, `whoami`, `su`, `httpd`, `netstat`, `tee`, `logger`), all linking within their 16 KB PSRAM execution slot budgets.
-  - Expanded automated host test suite to **255 tests passing with 100% success rate** across 7 harnesses (`posix_lfs_tests.py` + extended `espfs_tests.py`).
+  - Expanded userland application suite to **178 dynamic ELF binaries** (adding `sed`, `lscpu`, `useradd`, `flock`, `userdel`, `groupadd`, `systemctl`, and upgrading `stat`, `ls`, `ln`, `readlink`, `chmod`, `chown`, `chgrp`, `chroot`, `mv`, `mount`, `umount`, `df`, `pkg`, `id`, `whoami`, `su`, `httpd`, `netstat`, `tee`, `logger`), all linking within their 16 KB PSRAM execution slot budgets.
+  - Hardened Xtensa Windowed-ABI syscall dispatch (`#[unsafe(naked)] extern "C" fn sys5` + `MountReq*`), added live `/proc/fsstat` filesystem capacity reporting for `/bin/df`, auto-mounted `/mnt/lfs` (`LittleFs`) at boot, and implemented full-duplex `UART0` RX draining + `rxfifo_ovf` recovery with `O(1)` shell echo.
+  - Verified end-to-end on physical **ESP32-S3-WROOM-1-N16R8** hardware (`COM4`, 16 MB Flash, 8 MB Octal PSRAM) including NOR flash persistence across `reboot` (`RTC_SW_SYS_RST`) in both `EspFs` and `LittleFs`, alongside **255 host unit tests passing with 100% success rate** across 7 harnesses (`posix_lfs_tests.py` + extended `espfs_tests.py`).
 
 ### [0.1.0] - 2026-08-06
 

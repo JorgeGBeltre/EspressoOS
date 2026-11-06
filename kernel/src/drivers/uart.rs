@@ -174,10 +174,26 @@ pub fn write(buf: &[u8]) -> usize {
 fn uart0_read_byte() -> Option<u8> {
     let uart = unsafe { &*esp_hal::peripherals::UART0::PTR };
     if uart.status().read().rxfifo_cnt().bits() > 0 {
-        Some(uart.fifo().read().rxfifo_rd_byte().bits())
-    } else {
-        None
+        return Some(uart.fifo().read().rxfifo_rd_byte().bits());
     }
+    if uart.int_raw().read().rxfifo_ovf().bit_is_set() {
+        let sync_regs = || {
+            let update_reg = uart.id();
+            update_reg.modify(|_, w| w.reg_update().set_bit());
+            for _ in 0..10_000 {
+                if !update_reg.read().reg_update().bit_is_set() {
+                    break;
+                }
+                core::hint::spin_loop();
+            }
+        };
+        uart.conf0().modify(|_, w| w.rxfifo_rst().set_bit());
+        sync_regs();
+        uart.conf0().modify(|_, w| w.rxfifo_rst().clear_bit());
+        sync_regs();
+        uart.int_clr().write(|w| w.rxfifo_ovf().clear_bit_by_one());
+    }
+    None
 }
 
 pub fn read(buf: &mut [u8]) -> usize {

@@ -1211,11 +1211,18 @@ fn read_line(buf: &mut [u8]) -> usize {
                     }
                 }
                 _ if (0x20..0x7f).contains(&ch) && len < buf.len() => {
-                    buf.copy_within(pos..len, pos + 1);
-                    buf[pos] = ch;
-                    len += 1;
-                    pos += 1;
-                    dirty = true;
+                    if pos == len {
+                        buf[pos] = ch;
+                        len += 1;
+                        pos += 1;
+                        let _ = write(1, &[ch]);
+                    } else {
+                        buf.copy_within(pos..len, pos + 1);
+                        buf[pos] = ch;
+                        len += 1;
+                        pos += 1;
+                        dirty = true;
+                    }
                 }
                 _ => {}
             }

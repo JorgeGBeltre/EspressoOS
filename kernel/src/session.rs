@@ -87,12 +87,21 @@ impl SessionChannel {
             // uart::write always takes the whole slice, so this arm can neither
             // tear a \r\n nor report WouldBlock.
             ChannelKind::Uart => {
+                let mut rx = [0u8; 64];
+                let got = uart::read(&mut rx);
+                if got > 0 {
+                    let _ = push(&self.to_session, &rx[..got]);
+                }
                 for (body, nl) in onlcr_chunks(buf) {
                     if !body.is_empty() {
                         uart::write(body);
                     }
                     if nl {
                         uart::write(b"\r\n");
+                    }
+                    let got2 = uart::read(&mut rx);
+                    if got2 > 0 {
+                        let _ = push(&self.to_session, &rx[..got2]);
                     }
                 }
                 Ok(buf.len())

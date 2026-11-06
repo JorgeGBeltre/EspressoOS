@@ -1,5 +1,5 @@
 #![no_std]
-#![feature(naked_functions, asm_experimental_arch)]
+#![feature(asm_experimental_arch)]
 
 use core::alloc::{GlobalAlloc, Layout};
 use core::cell::UnsafeCell;
@@ -69,7 +69,23 @@ pub unsafe fn arg(argv: *const *const u8, i: i32) -> &'static str {
 
 
 
-#[inline(never)]
+#[unsafe(naked)]
+unsafe extern "C" fn sys5(
+    num: usize,
+    arg0: usize,
+    arg1: usize,
+    arg2: usize,
+    arg3: usize,
+    arg4: usize,
+) -> isize {
+    core::arch::naked_asm!(
+        "entry a1, 32",
+        "syscall",
+        "retw.n",
+    );
+}
+
+#[inline(always)]
 pub unsafe fn syscall(
     num: usize,
     arg0: usize,
@@ -77,21 +93,9 @@ pub unsafe fn syscall(
     arg2: usize,
     arg3: usize,
     arg4: usize,
-    arg5: usize,
+    _arg5: usize,
 ) -> isize {
-    let ret: isize;
-    core::arch::asm!(
-        "syscall",
-        inlateout("a2") num => ret,
-        in("a3") arg0,
-        in("a4") arg1,
-        in("a5") arg2,
-        in("a6") arg3,
-        in("a7") arg4,
-        in("a8") arg5,
-        options(nostack),
-    );
-    ret
+    sys5(num, arg0, arg1, arg2, arg3, arg4)
 }
 
 pub fn read(fd: i32, buf: &mut [u8]) -> isize {
@@ -473,18 +477,26 @@ pub fn flock(fd: i32, operation: u32) -> isize {
     unsafe { syscall(42, fd as usize, operation as usize, 0, 0, 0, 0) }
 }
 
+#[repr(C)]
+struct MountReq {
+    src_ptr: usize,
+    src_len: usize,
+    target_ptr: usize,
+    target_len: usize,
+    fstype_ptr: usize,
+    fstype_len: usize,
+}
+
 pub fn mount(src: &str, target: &str, fstype: &str) -> isize {
-    unsafe {
-        syscall(
-            43,
-            src.as_ptr() as usize,
-            src.len(),
-            target.as_ptr() as usize,
-            target.len(),
-            fstype.as_ptr() as usize,
-            fstype.len(),
-        )
-    }
+    let req = MountReq {
+        src_ptr: src.as_ptr() as usize,
+        src_len: src.len(),
+        target_ptr: target.as_ptr() as usize,
+        target_len: target.len(),
+        fstype_ptr: fstype.as_ptr() as usize,
+        fstype_len: fstype.len(),
+    };
+    unsafe { syscall(43, &req as *const MountReq as usize, 0, 0, 0, 0, 0) }
 }
 
 pub fn umount(target: &str) -> isize {
